@@ -1,0 +1,39 @@
+__pycache__/
+media/weights
+media/AI_Calibration_Files
+media/capture
+media/new_sku_images
+media/output
+media/Reports
+media/TestMode Reports
+media/Capture_Input
+.vscode
+graphs_output
+Apollo_env
+app.log
+Apollo_App.lnk
+GUI1.py
+run_apollo.bat
+media/img/login_ai.gif
+media/img/login_ai1.gif
+*.pt
+*.pth
+*.onnx
+*.engine
+test-requirements.txt
+plc_handshake_manual.py
+pytest.ini
+test_apollo_vit.py
+test_main_cam_mock.py
+.coverage
+test_gui_live_mock.py
+# Local configuration and generated snapshots
+.env
+.env.*
+!.env.example
+logs/
+media/validation_reports/configuration_snapshot.json
+# Local authentication database and SQLite runtime files
+data/security/*.db
+data/security/*.db-wal
+data/security/*.db-shm

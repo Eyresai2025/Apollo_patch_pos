@@ -1,0 +1,4 @@
+# PostgreSQL Phase 1 dependencies.
+# Install after the main requirements.txt:
+#   python -m pip install -r requirements-postgres.txt
+psycopg[binary,pool]>=3.2,<4

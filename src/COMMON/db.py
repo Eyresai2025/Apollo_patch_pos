@@ -1,0 +1,594 @@
+from __future__ import annotations
+
+import hashlib
+import os
+from datetime import datetime
+from typing import Any, Dict, Optional
+from threading import Lock
+
+import cv2  # type: ignore
+import numpy as np  # type: ignore
+from bson import ObjectId  # type: ignore
+from gridfs import GridFS  # type: ignore
+from pymongo import MongoClient  # type: ignore
+
+from src.COMMON.config import get_config
+from src.COMMON.structured_logging import get_logger
+
+logger = get_logger(__name__, component="DATABASE")
+
+
+# =========================
+# CENTRAL CONFIGURATION
+# =========================
+_config = get_config()
+
+DB_URL: str = _config.database.url
+DB_NAME: str = _config.database.name
+GRIDFS_BUCKET: str = _config.database.gridfs_bucket
+
+TYRE_DETAILS_COLLECTION = _config.inspection.collection_name
+NEW_SKU_META_COLLECTION = "New SKU"
+ACCOUNTS_COLLECTION_NAME = "Accounts"
+REPEATABILITY_COLLECTION = "Repeatability"
+TEST_MODE_RESULTS_COLLECTION = "Test Mode Results"
+ACTION_CODE_CATALOG_COLLECTION = "Action Code Catalog"
+AI_DEFECT_CATALOG_MAP_COLLECTION = "AI Defect Catalog Map"
+ACTION_DECISION_RULES_COLLECTION = "Action Decision Rules"
+INSPECTION_ACTION_DECISIONS_COLLECTION = "Inspection Action Decisions"
+ALARM_EVENTS_COLLECTION = "Alarm Events"
+
+# =========================
+# SINGLETON CLIENT
+# =========================
+_client: Optional[MongoClient] = None
+_inspection_repository = None
+_inspection_repository_lock = Lock()
+_inspection_sync_service = None
+_inspection_sync_service_lock = Lock()
+_alarm_repository = None
+_alarm_repository_lock = Lock()
+_alarm_service = None
+_alarm_service_lock = Lock()
+
+
+def get_client() -> MongoClient:
+    global _client
+    if _client is None:
+        _client = MongoClient(
+            DB_URL,
+            maxPoolSize=_config.database.pool_size,
+            minPoolSize=_config.database.min_pool_size,
+            serverSelectionTimeoutMS=_config.database.timeout_ms,
+            connectTimeoutMS=_config.database.connect_timeout_ms,
+            retryWrites=_config.database.retry_writes,
+            retryReads=_config.database.retry_reads,
+        )
+        logger.info(
+            "MongoDB client initialized",
+            extra={
+                "event_code": "DB_CLIENT_INITIALIZED",
+                "details": {
+                    "database": DB_NAME,
+                    "pool_size": _config.database.pool_size,
+                    "min_pool_size": _config.database.min_pool_size,
+                },
+            },
+        )
+    return _client
+
+
+def get_db(db_name: Optional[str] = None):
+    name = db_name or DB_NAME
+    return get_client()[name]
+
+
+def get_collection(collection_name: str, db_name: Optional[str] = None):
+    return get_db(db_name)[collection_name]
+
+
+def get_gridfs(bucket: Optional[str] = None, db_name: Optional[str] = None) -> GridFS:
+    return GridFS(get_db(db_name), collection=bucket or GRIDFS_BUCKET)
+
+
+def ensure_collection(collection_name: str, db_name: Optional[str] = None) -> None:
+    db = get_db(db_name)
+    if collection_name not in db.list_collection_names():
+        db.create_collection(collection_name)
+
+def get_action_code_catalog_collection():
+    return get_collection(ACTION_CODE_CATALOG_COLLECTION)
+
+
+def get_ai_defect_catalog_map_collection():
+    return get_collection(AI_DEFECT_CATALOG_MAP_COLLECTION)
+
+
+def get_action_decision_rules_collection():
+    return get_collection(ACTION_DECISION_RULES_COLLECTION)
+
+
+def get_inspection_action_decisions_collection():
+    return get_collection(INSPECTION_ACTION_DECISIONS_COLLECTION)
+# =========================
+# FIXED COLLECTION HELPERS
+# =========================
+def get_tyre_details_collection():
+    return get_collection(TYRE_DETAILS_COLLECTION)
+
+
+def get_inspection_repository():
+    """Return the singleton schema-versioned TYRE DETAILS repository."""
+    global _inspection_repository
+    if _inspection_repository is None:
+        with _inspection_repository_lock:
+            if _inspection_repository is None:
+                from src.COMMON.inspection_repository import InspectionRepository
+
+                _inspection_repository = InspectionRepository(
+                    get_tyre_details_collection(),
+                    database=get_db(),
+                )
+    return _inspection_repository
+
+
+def ensure_inspection_indexes():
+    return get_inspection_repository().ensure_indexes()
+
+
+def get_inspection_outbox():
+    """Return the durable local queue used only when MongoDB is unavailable."""
+    return get_inspection_repository().get_outbox()
+
+
+def get_inspection_sync_service():
+    """Return the singleton automatic MongoDB recovery service."""
+    global _inspection_sync_service
+    if _inspection_sync_service is None:
+        with _inspection_sync_service_lock:
+            if _inspection_sync_service is None:
+                from src.COMMON.inspection_sync_service import InspectionSyncService
+
+                repository = get_inspection_repository()
+                _inspection_sync_service = InspectionSyncService(
+                    repository,
+                    repository.get_outbox(),
+                )
+                repository.set_sync_wakeup(_inspection_sync_service.wake)
+    return _inspection_sync_service
+
+
+def get_alarm_events_collection():
+    """Return the MongoDB collection used by V5 Alarm & Event Center."""
+    return get_collection(ALARM_EVENTS_COLLECTION)
+
+
+def get_alarm_repository():
+    """Return the singleton MongoDB alarm repository."""
+    global _alarm_repository
+    if _alarm_repository is None:
+        with _alarm_repository_lock:
+            if _alarm_repository is None:
+                from src.COMMON.alarm_repository import AlarmRepository
+
+                _alarm_repository = AlarmRepository(get_alarm_events_collection())
+    return _alarm_repository
+
+
+def get_alarm_service():
+    """Return the singleton V5 alarm lifecycle service."""
+    global _alarm_service
+    if _alarm_service is None:
+        with _alarm_service_lock:
+            if _alarm_service is None:
+                from src.COMMON.alarm_service import AlarmService
+
+                _alarm_service = AlarmService(get_alarm_repository())
+    return _alarm_service
+
+
+def get_new_sku_collection():
+    return get_collection(NEW_SKU_META_COLLECTION)
+
+
+def get_accounts_collection():
+    return get_collection(ACCOUNTS_COLLECTION_NAME)
+
+
+def get_repeatability_collection():
+    return get_collection(REPEATABILITY_COLLECTION)
+
+def get_test_mode_results_collection():
+    return get_collection(TEST_MODE_RESULTS_COLLECTION)
+
+
+# =========================
+# ACCOUNTS
+# =========================
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def create_account(full_name: str, username: str, email: str, password: str):
+    col = get_accounts_collection()
+    existing = col.find_one({"$or": [{"username": username}, {"email": email}]})
+    if existing:
+        return False, "Username or Email already exists."
+
+    doc = {
+        "full_name": full_name,
+        "username": username,
+        "email": email,
+        "password": _hash_password(password),
+        "created_at": datetime.utcnow(),
+        "is_active": True,
+    }
+    col.insert_one(doc)
+    return True, "Account created successfully."
+
+
+def authenticate_user(identifier: str, password: str):
+    col = get_accounts_collection()
+    user = col.find_one({"$or": [{"username": identifier}, {"email": identifier}]})
+
+    if not user:
+        return False, "Account not found.", None
+
+    if user["password"] != _hash_password(password):
+        return False, "Incorrect password.", None
+
+    if not user.get("is_active", True):
+        return False, "Account is disabled.", None
+
+    return True, "Login successful.", user
+
+
+def reset_password(identifier: str, new_password: str):
+    col = get_accounts_collection()
+    result = col.update_one(
+        {"$or": [{"username": identifier}, {"email": identifier}]},
+        {"$set": {"password": _hash_password(new_password)}},
+    )
+
+    if result.matched_count == 0:
+        return False, "Account not found."
+
+    return True, "Password updated successfully."
+
+
+# =========================
+# GENERIC IMAGE / GRIDFS HELPERS
+# =========================
+def nparray_to_bytes(db, img_array, filename, cycle):
+    date = datetime.now().strftime("%d-%m-%Y")
+    success, encoded = cv2.imencode(".jpg", img_array)
+    if not success:
+        raise ValueError("Failed to encode image array to JPG bytes.")
+
+    image_bytes = encoded.tobytes()
+    fs = GridFS(db)
+    file_id = fs.put(
+        image_bytes,
+        filename=filename,
+        cycle_no=cycle,
+        inspection_date=date,
+    )
+    return file_id
+
+
+def recent_cycle(mydb):
+    file_collection = mydb[TYRE_DETAILS_COLLECTION]
+    current_date = datetime.now()
+
+    recent_document = file_collection.find_one({}, sort=[("inspectionDateTime", -1)])
+
+    if recent_document:
+        latest_inspection_date_str = recent_document.get("inspectionDate")
+
+        if latest_inspection_date_str:
+            try:
+                latest_inspection_date = datetime.strptime(
+                    latest_inspection_date_str, "%d-%m-%Y"
+                )
+
+                if current_date.date() != latest_inspection_date.date():
+                    return "1"
+                else:
+                    return str(int(recent_document.get("cycle_no", 0)) + 1)
+
+            except ValueError:
+                logger.error(
+                    "Invalid inspection date format in database",
+                    extra={
+                        "event_code": "DB_INVALID_INSPECTION_DATE",
+                        "error_code": "DB-001",
+                        "details": {"inspection_date": latest_inspection_date_str},
+                    },
+                )
+                return "1"
+        else:
+            logger.warning(
+                "Most recent tyre document has no inspectionDate",
+                extra={"event_code": "DB_INSPECTION_DATE_MISSING"},
+            )
+            return "1"
+    else:
+        logger.info(
+            "No previous tyre documents found; starting cycle sequence at 1",
+            extra={"event_code": "DB_FIRST_CYCLE"},
+        )
+        return "1"
+
+
+def db_to_images(cycle, db, download_loc, date):
+    os.makedirs(download_loc, exist_ok=True)
+
+    file_collection = db[f"{GRIDFS_BUCKET}.files"]
+    file_list = list(
+        file_collection.find(
+            {"cycle_no": cycle, "inspection_date": date},
+            {"_id": False, "filename": True},
+        )
+    )
+
+    fs = GridFS(db)
+
+    for file in file_list:
+        image_doc = fs.find_one(file)
+
+        if image_doc:
+            image_data = fs.get(image_doc._id).read()
+            retrieved_image_data = np.frombuffer(image_data, dtype=np.uint8)
+            retrieved_image = cv2.imdecode(retrieved_image_data, cv2.IMREAD_COLOR)
+
+            if retrieved_image is not None:
+                cv2.imwrite(
+                    os.path.join(download_loc, file["filename"]),
+                    retrieved_image,
+                )
+            else:
+                print(f"Failed to decode image: {file['filename']}")
+        else:
+            print(f"Image with filename '{file}' not found.")
+
+# =========================
+# CYCLE METADATA IN MONGODB
+# =========================
+def _extract_cycle_no(cycle_id: str) -> str:
+    try:
+        return str(int(str(cycle_id).split("_")[-1]))
+    except Exception:
+        return str(cycle_id)
+
+
+def _count_defect_sides(side_results: dict) -> int:
+    count = 0
+    for _, side_data in side_results.items():
+        label = str(side_data.get("final_label", "")).upper()
+        if label in ["DEFECT", "FAILED", "INVALID", "SUSPECT"]:
+            count += 1
+    return count
+
+
+def save_cycle_metadata(
+    result: dict,
+    *,
+    operator: Optional[Dict[str, Any]] = None,
+    plc_status: Optional[Dict[str, Any]] = None,
+    final_result: Optional[str] = None,
+    recipe: Optional[Dict[str, Any]] = None,
+    lifecycle_status: str = "AI_COMPLETED",
+    store_images: Optional[bool] = None,
+):
+    """Upsert one inspection cycle into the existing TYRE DETAILS collection.
+
+    Existing fields remain available while schema V2 fields are added. Calling
+    this function more than once for the same cycle updates the same document.
+    """
+    return get_inspection_repository().save_cycle(
+        result,
+        operator=operator,
+        plc_status=plc_status,
+        final_result=final_result,
+        recipe=recipe,
+        lifecycle_status=lifecycle_status,
+        store_images=store_images,
+    )
+
+
+# =========================
+# NEW SKU
+# =========================
+def save_new_sku_image(
+    file_path: str,
+    label: str,
+    capture_id: str,
+    sku_meta: Optional[Dict[str, Any]] = None,
+    meta_collection: Optional[str] = None,
+    gridfs_bucket: Optional[str] = None,
+) -> ObjectId:
+    sku_meta = sku_meta or {}
+    meta_collection = meta_collection or NEW_SKU_META_COLLECTION
+    gridfs_bucket = gridfs_bucket or GRIDFS_BUCKET
+
+    ensure_collection(meta_collection)
+
+    fs = get_gridfs(bucket=gridfs_bucket)
+    meta_col = get_collection(meta_collection)
+
+    file_name = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+
+    ext = os.path.splitext(file_name)[1].lower()
+    content_type = "image/jpeg" if ext in [".jpg", ".jpeg"] else "image/png"
+
+    with open(file_path, "rb") as f:
+        file_id = fs.put(
+            f,
+            filename=file_name,
+            contentType=content_type,
+            metadata={
+                "capture_id": capture_id,
+                "label": label,
+                "sku_meta": sku_meta,
+                "source_file_path": file_path,
+                "file_size": file_size,
+                "created_at": datetime.utcnow(),
+            },
+        )
+
+    meta_doc = {
+        "type": "image_meta",
+        "capture_id": capture_id,
+        "label": label,
+        "file_name": file_name,
+        "file_path": file_path,
+        "file_size": file_size,
+        "status": "stored",
+        "created_at": datetime.utcnow(),
+        "sku_meta": sku_meta,
+        "gridfs_bucket": gridfs_bucket,
+        "gridfs_file_id": file_id,
+    }
+    meta_col.insert_one(meta_doc)
+
+    return file_id
+
+
+# =========================
+# REPEATABILITY
+# =========================
+def insert_repeatability_log(doc: dict):
+    col = get_repeatability_collection()
+    return col.insert_one(doc)
+
+# =========================
+# TEST MODE RESULTS
+# =========================
+def _mongo_safe(value):
+    """
+    Convert objects into Mongo-safe values.
+
+    Hardware check result contains live Python objects like:
+    - snap7 PLC client
+    - multi camera manager
+
+    Those cannot be inserted into MongoDB directly.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, dict):
+        safe = {}
+        for k, v in value.items():
+            # Never store live hardware objects
+            if k in ("plc_client", "multi_cam"):
+                safe[k] = "<not stored>"
+            else:
+                safe[str(k)] = _mongo_safe(v)
+        return safe
+
+    if isinstance(value, (list, tuple)):
+        return [_mongo_safe(v) for v in value]
+
+    # fallback for non-serializable objects
+    try:
+        return str(value)
+    except Exception:
+        return f"<non_serializable:{type(value).__name__}>"
+
+
+def save_test_mode_result(result: Dict[str, Any], operator: str = ""):
+    """
+    Save one Full Hardware Check result to MongoDB.
+
+    Collection:
+        Test Mode Results
+    """
+    col = get_test_mode_results_collection()
+
+    result = result or {}
+    details = result.get("details", {}) or {}
+
+    plc = details.get("plc", {}) or {}
+    camera = details.get("camera", {}) or {}
+    laser = details.get("laser", {}) or {}
+    lights = details.get("lights", {}) or {}
+    app_ok = details.get("application_ok_bit", {}) or {}
+
+    camera_status = camera.get("camera_status", []) or []
+    connected_camera_count = sum(1 for c in camera_status if c.get("connected"))
+
+    now = datetime.now()
+
+    # Make raw result safe before storing.
+    raw_result = dict(result)
+    raw_result.pop("plc_client", None)
+    raw_result.pop("multi_cam", None)
+
+    doc = {
+        "type": "test_mode_result",
+
+        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "inspectionDate": now.strftime("%d-%m-%Y"),
+        "operator": operator or "",
+
+        "overall_ok": bool(result.get("overall_ok", False)),
+        "overall_status": "PASS" if result.get("overall_ok") else "FAIL",
+
+        "deployment": result.get("deployment", ""),
+        "check_timestamp": result.get("timestamp", ""),
+
+        "lights_ok": bool(result.get("lights_ok", False)),
+        "plc_ok": bool(result.get("plc_ok", False)),
+        "camera_ok": bool(result.get("camera_ok", False)),
+        "laser_ok": bool(result.get("laser_ok", False)),
+        "app_ok_sent": bool(result.get("app_ok_sent", False)),
+
+        "plc": {
+            "plc_type": plc.get("plc_type", ""),
+            "ip": plc.get("ip", ""),
+            "rack": plc.get("rack", ""),
+            "slot": plc.get("slot", ""),
+            "connected": plc.get("connected", False),
+            "connected_on_attempt": plc.get("connected_on_attempt", ""),
+            "last_error": plc.get("last_error", ""),
+        },
+
+        "application_ok_bit": {
+            "address": app_ok.get("address", ""),
+            "sent": app_ok.get("sent", False),
+            "value_written": app_ok.get("value_written", False),
+            "read_back_value": app_ok.get("read_back_value", False),
+            "verified": app_ok.get("verified", False),
+            "message": app_ok.get("message", ""),
+        },
+
+        "cameras": {
+            "overall_ok": bool(result.get("camera_ok", False)),
+            "connected_count": connected_camera_count,
+            "total_count": len(camera_status),
+            "items": _mongo_safe(camera_status),
+        },
+
+        "lights": _mongo_safe(lights),
+        "laser": _mongo_safe(laser),
+        "messages": _mongo_safe(result.get("messages", [])),
+
+        # Keep full sanitized result for debugging.
+        "raw_result": _mongo_safe(raw_result),
+    }
+
+    return col.insert_one(doc)
+
+
+def fetch_gridfs_bytes(file_id: str | ObjectId, bucket: Optional[str] = None) -> bytes:
+    fs = get_gridfs(bucket=bucket)
+    oid = file_id if isinstance(file_id, ObjectId) else ObjectId(file_id)
+    return fs.get(oid).read()
