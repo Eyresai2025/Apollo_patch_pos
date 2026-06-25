@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
+from src.COMMON.repositories import DeviceProfileRepository
+
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
@@ -27,6 +29,7 @@ class SKUDeviceProfileStore:
 
         self.camera_root.mkdir(parents=True, exist_ok=True)
         self.laser_root.mkdir(parents=True, exist_ok=True)
+        self.profile_repository = DeviceProfileRepository()
 
     def camera_profile_path(self, sku_name: str) -> Path:
         return self.camera_root / sku_name / "camera_profile.json"
@@ -48,7 +51,7 @@ class SKUDeviceProfileStore:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(profile, f, indent=4)
 
-        self._upsert_to_mongo(
+        self._upsert_to_postgres(
             collection_name="Camera Device Profiles",
             sku_name=sku_name,
             profile_type="camera",
@@ -80,7 +83,7 @@ class SKUDeviceProfileStore:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(profile, f, indent=4)
 
-        self._upsert_to_mongo(
+        self._upsert_to_postgres(
             collection_name="Laser Device Profiles",
             sku_name=sku_name,
             profile_type="laser",
@@ -99,7 +102,7 @@ class SKUDeviceProfileStore:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def _upsert_to_mongo(
+    def _upsert_to_postgres(
         self,
         collection_name: str,
         sku_name: str,
@@ -107,29 +110,14 @@ class SKUDeviceProfileStore:
         profile: Dict[str, Any],
         json_path: str,
     ) -> None:
+        """Persist the profile JSON and its fixed relational keys in PostgreSQL."""
         try:
-            from src.COMMON.db import ensure_collection, get_collection
-
-            ensure_collection(collection_name)
-            col = get_collection(collection_name)
-
-            col.update_one(
-                {
-                    "sku_name": sku_name,
-                    "profile_type": profile_type,
-                },
-                {
-                    "$set": {
-                        "type": f"{profile_type}_device_profile",
-                        "sku_name": sku_name,
-                        "profile_type": profile_type,
-                        "json_path": json_path,
-                        "profile": _json_safe(profile),
-                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                },
-                upsert=True,
+            self.profile_repository.upsert_profile(
+                sku_name=sku_name,
+                profile_type=profile_type,
+                profile=_json_safe(profile),
+                json_path=json_path,
             )
-
-        except Exception as e:
-            print(f"[PROFILE][MongoDB][WARN] Save failed: {e}")
+        except Exception as exc:
+            print(f"[PROFILE][PostgreSQL][WARN] Save failed: {exc}")
+            raise

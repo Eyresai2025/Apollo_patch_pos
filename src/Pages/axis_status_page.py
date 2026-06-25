@@ -15,11 +15,11 @@ class AxisStatusPage(QWidget):
     Axis Status page.
 
     Read-only page:
-    - Reads MongoDB Active Recipe / last_loaded_recipe.
+    - Reads PostgreSQL active_recipe_state / last_loaded_recipe.
     - Does NOT read DB75.DBW288.
     - Shows DB74 live actual position.
     - Shows DB75 running servo recipe value.
-    - Shows MongoDB saved recipe target value.
+    - Shows PostgreSQL saved recipe target value.
     - Shows delta comparisons.
     - Does not write to PLC.
     """
@@ -110,7 +110,7 @@ class AxisStatusPage(QWidget):
         self.active_sku_lbl.setStyleSheet("font: 800 12px 'Segoe UI'; color:#333; border:none;")
         info.addWidget(self.active_sku_lbl)
 
-        self.recipe_status_lbl = QLabel("MongoDB State: UNKNOWN")
+        self.recipe_status_lbl = QLabel("PostgreSQL State: UNKNOWN")
         self.recipe_status_lbl.setStyleSheet("font: 800 12px 'Segoe UI'; color:#333; border:none;")
         info.addWidget(self.recipe_status_lbl)
 
@@ -150,7 +150,7 @@ class AxisStatusPage(QWidget):
             "Position",
             "Current Live Value",
             "Active Recipe Value",
-            "MongoDB Value",
+            "PostgreSQL Value",
             "Enabled",
             "Homed",
             "Fault",
@@ -260,7 +260,7 @@ class AxisStatusPage(QWidget):
                 0.09,  # Position
                 0.12,  # Current Live Value
                 0.12,  # Active Recipe Value
-                0.12,  # MongoDB Value
+                0.12,  # PostgreSQL Value
                 0.07,  # Enabled
                 0.07,  # Homed
                 0.06,  # Fault
@@ -331,8 +331,8 @@ class AxisStatusPage(QWidget):
             "FAULT",
             "NOT HOMED",
             "OUT OF RANGE",
-            "RUNNING/MONGO MISMATCH",
-            "PLC/MONGO MISMATCH",
+            "RUNNING/POSTGRES MISMATCH",
+            "PLC/POSTGRES MISMATCH",
         ):
             item.setForeground(Qt.red)
 
@@ -340,7 +340,7 @@ class AxisStatusPage(QWidget):
             "DISABLED",
             "UNKNOWN",
             "DB75 UNKNOWN",
-            "MONGO MISSING",
+            "POSTGRES MISSING",
             "LIVE UNKNOWN",
         ):
             item.setForeground(Qt.darkYellow)
@@ -376,7 +376,7 @@ class AxisStatusPage(QWidget):
             f"SKU: {active_sku} | Version: {recipe_version} | "
             f"PLC Written: {plc_written} | PLC Verified: {plc_verified}"
         )
-        self.recipe_status_lbl.setText(f"MongoDB State: {recipe_status}")
+        self.recipe_status_lbl.setText(f"PostgreSQL State: {recipe_status}")
         self.status_msg_lbl.setText(f"Status: {sku_message}")
 
         if overall_ok:
@@ -417,7 +417,7 @@ class AxisStatusPage(QWidget):
             self._set_item(row, 2, target.get("position", "-"), status)
             self._set_item(row, 3, self._fmt(target.get("live_db74")), status)
             self._set_item(row, 4, self._fmt(running_db75), status)
-            self._set_item(row, 5, self._fmt(target.get("mongo_target")), status)
+            self._set_item(row, 5, self._fmt(target.get("postgres_target", target.get("mongo_target"))), status)
             self._set_item(row, 6, self._fmt(target.get("enabled")), status)
             self._set_item(row, 7, self._fmt(target.get("homed")), status)
             self._set_item(row, 8, self._fmt(target.get("fault")), status)

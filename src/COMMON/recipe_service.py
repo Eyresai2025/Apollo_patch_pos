@@ -7,8 +7,8 @@ from datetime import datetime
 from typing import Any, Dict, Optional, List
 import struct
 from src.COMMON.common import load_env
-from src.COMMON.db import get_collection
 from src.COMMON.recipe_tag_map import RECIPE_TARGETS
+from src.COMMON.repositories import RecipeRepository, SKURepository
 import time
 try:
     import snap7  # type: ignore
@@ -116,8 +116,13 @@ class RecipeService:
         self.deployment = _to_bool(self.env.get("DEPLOYMENT", "False"))
         self.plc_client = plc_client
 
-        self.recipe_col = get_collection(RECIPE_COLLECTION)
-        self.new_sku_col = get_collection("New SKU")
+        # Phase 2 PostgreSQL repositories. MongoDB remains untouched for the
+        # other application modules until their later migration phases.
+        self.sku_repository = SKURepository()
+        self.recipe_repository = RecipeRepository(
+            manager=self.sku_repository.db,
+            sku_repository=self.sku_repository,
+        )
 
         self.backup_dir = Path(
             self.env.get(
@@ -464,6 +469,9 @@ class RecipeService:
             "barcode_pattern": sku_meta.get("barcode_pattern", ""),
             "inspection_zones": int(sku_meta.get("inspection_zones", 5)),
             "image_count_per_zone": int(sku_meta.get("image_count_per_zone", 20)),
+            "train_good_count": int(sku_meta.get("train_good_count", 0)),
+            "operator": sku_meta.get("operator", author),
+            "sku_meta": dict(sku_meta),
 
             # Legacy fields kept for current pages/backward compatibility.
             "camera_axis_targets": camera_axis_targets,
@@ -501,29 +509,32 @@ class RecipeService:
         except Exception:
             return None
 
-        return self.recipe_col.find_one(
-            {
-                "type": "sku_recipe",
-                "$or": [
-                    {"recipe_number": recipe_number},
-                    {"plc_recipe_number": recipe_number},
-                ],
-            },
-            sort=[("version", -1)],
-        )
+        return self.recipe_repository.find_by_recipe_number(recipe_number)
+
     def get_next_version(self, sku_name: str) -> int:
-        last = self.recipe_col.find_one(
+        return self.recipe_repository.get_next_version(sku_name)
+
+    def upsert_sku_setup(
+        self,
+        sku_name: str,
+        sku_meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Create or update the fixed PostgreSQL SKU master row."""
+        return self.sku_repository.upsert_sku_setup(sku_name, sku_meta)
+
+    def list_recipes(self) -> List[Dict[str, Any]]:
+        """Return all PostgreSQL recipes in SKU/version order."""
+        return self.recipe_repository.list_recipes()
+
+    def mark_test_active(self, recipe_doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Store engineering-only active recipe state in PostgreSQL."""
+        return self.recipe_repository.upsert_active_state(
+            "test_active_recipe",
+            recipe_doc,
             {
-                "type": "sku_recipe",
-                "sku_name": sku_name,
+                "source": "MANUAL_ENGINEERING_TEST",
             },
-            sort=[("version", -1)],
         )
-
-        if not last:
-            return 1
-
-        return int(last.get("version", 0)) + 1
 
     def save_recipe(
         self,
@@ -543,18 +554,23 @@ class RecipeService:
 
         existing_recipe = self.find_recipe_by_number(recipe_number)
 
-        if existing_recipe:
+        # A recipe number belongs to one SKU, but the same SKU may have many
+        # versions using that number. Reject only cross-SKU reuse.
+        if (
+            existing_recipe
+            and str(existing_recipe.get("sku_name", "")).strip() != str(sku_name).strip()
+        ):
             raise ValueError(
                 f"Recipe number {recipe_number} already exists for "
-                f"SKU {existing_recipe.get('sku_name', 'UNKNOWN')} "
-                f"version {existing_recipe.get('version', '-')}. "
-                "Duplicate recipe was not saved."
+                f"SKU {existing_recipe.get('sku_name', 'UNKNOWN')}. "
+                "Use a different recipe number."
             )
-        inserted = self.recipe_col.insert_one(recipe_doc)
 
-        # Important: keep inserted MongoDB _id inside recipe_doc
-        # so Active Recipe / last_loaded_recipe can point to this exact recipe.
-        recipe_doc["_id"] = inserted.inserted_id
+        inserted_id = self.recipe_repository.insert_recipe(recipe_doc)
+
+        # Preserve the legacy dictionary key used by existing PyQt pages.
+        # The value is now a PostgreSQL UUID string, not a MongoDB ObjectId.
+        recipe_doc["_id"] = inserted_id
 
         backup_path = self._save_local_backup(recipe_doc)
 
@@ -575,7 +591,7 @@ class RecipeService:
 
         return {
             "ok": True,
-            "inserted_id": str(inserted.inserted_id),
+            "inserted_id": str(inserted_id),
             "sku_name": sku_name,
             "version": recipe_doc.get("version"),
             "backup_path": str(backup_path),
@@ -609,7 +625,7 @@ class RecipeService:
         tolerance: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Read DB53 values back after writing and compare with MongoDB recipe values.
+        Read DB53 values back after writing and compare with PostgreSQL recipe values.
 
         This verifies:
             recipe_axis_targets[target_key]["value"]
@@ -792,46 +808,29 @@ class RecipeService:
                 except Exception:
                     pass
 
-    def _mark_recipe_as_last_loaded(self, recipe_doc: Dict[str, Any], plc_result: Dict[str, Any]) -> bool:
-        """
-        Stores the last recipe that this application loaded to PLC.
-
-        This is NOT PLC active SKU.
-        It is application-side history/state.
-
-        Axis Status can later use this until PLC gives real active SKU tag.
-        """
-
+    def _mark_recipe_as_last_loaded(
+        self,
+        recipe_doc: Dict[str, Any],
+        plc_result: Dict[str, Any],
+    ) -> bool:
+        """Store the last recipe loaded by this application in PostgreSQL."""
         try:
-            active_col = get_collection("Active Recipe")
-
-            active_col.update_one(
-                {"type": "last_loaded_recipe"},
+            self.recipe_repository.upsert_active_state(
+                "last_loaded_recipe",
+                recipe_doc,
                 {
-                    "$set": {
-                        "type": "last_loaded_recipe",
-                        "sku_name": recipe_doc.get("sku_name", ""),
-                        "recipe_id": str(recipe_doc.get("_id", "")),
-                        "recipe_version": recipe_doc.get("version"),
-                        "recipe_number": recipe_doc.get("recipe_number"),
-                        "plc_recipe_number": recipe_doc.get("plc_recipe_number"),
-                        "status": recipe_doc.get("status", ""),
-                        "vit_model_path": recipe_doc.get("vit_model_path", ""),
-                        "plc_written": plc_result.get("written", False),
-                        "plc_verified": plc_result.get("verified", False),
-                        "recipe_number_result": plc_result.get("recipe_number_result", {}),
-                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "source": "APPLICATION_LOADED_TO_PLC",
-                    }
+                    "plc_written": plc_result.get("written", False),
+                    "plc_verified": plc_result.get("verified", False),
+                    "recipe_number_result": plc_result.get(
+                        "recipe_number_result", {}
+                    ),
+                    "source": "APPLICATION_LOADED_TO_PLC",
                 },
-                upsert=True,
             )
-
             return True
-
         except Exception:
             return False
-        
+
     def _write_recipe_name_to_plc(self, client, recipe_doc: Dict[str, Any]) -> Dict[str, Any]:
         """
         Writes recipe/tyre name to PLC.

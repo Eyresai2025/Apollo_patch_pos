@@ -753,7 +753,15 @@ class DevicePage(QWidget):
             profile["cameras"][zone_key] = settings
             saved_count += 1
 
-        path = self.sku_profile_store.save_camera_profile(sku, profile)
+        try:
+            path = self.sku_profile_store.save_camera_profile(sku, profile)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Camera Profile Database Error",
+                f"Camera profile JSON was created, but PostgreSQL save failed:\n{exc}",
+            )
+            return
 
         msg = f"Saved {saved_count} camera profile(s):\n{path}"
 
@@ -1506,7 +1514,15 @@ class DevicePage(QWidget):
             profile["lasers"][zone_key] = settings
             saved_count += 1
 
-        path = self.sku_profile_store.save_laser_profile(sku, profile)
+        try:
+            path = self.sku_profile_store.save_laser_profile(sku, profile)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Laser Profile Database Error",
+                f"Laser profile JSON was created, but PostgreSQL save failed:\n{exc}",
+            )
+            return
 
         msg = f"Saved {saved_count} laser profile(s):\n{path}"
 

@@ -1046,23 +1046,12 @@ class NewSKUPage(QWidget):
             clean_sku_meta = dict(self.sku_meta)
             clean_sku_meta.pop("machine_serial", None)
 
-            self.recipe_service.new_sku_col.update_one(
-                {"type": "sku_setup", "sku_name": sku_name},
-                {
-                    "$set": {
-                        "type": "sku_setup",
-                        "sku_name": sku_name,
-                        "sku_meta": clean_sku_meta,
-                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    },
-                    "$setOnInsert": {
-                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    },
-                },
-                upsert=True,
+            self.recipe_service.upsert_sku_setup(
+                sku_name=sku_name,
+                sku_meta=clean_sku_meta,
             )
         except Exception as e:
-            QMessageBox.warning(self, "DB Warning", f"SKU setup saved in page but DB update failed:\n{e}")
+            QMessageBox.warning(self, "DB Warning", f"SKU setup saved in page but PostgreSQL update failed:\n{e}")
 
         if self.status_lbl is not None:
             self.status_lbl.setText(f"SKU setup saved successfully: {sku_name}")
@@ -1091,7 +1080,7 @@ class NewSKUPage(QWidget):
 
         hint = QLabel(
             "Production mode uses src/COMMON/recipe_tag_map.py as the master recipe tag map. "
-            "DB74 live servo positions are read only. Recipe targets are saved to MongoDB and written to DB53."
+            "DB74 live servo positions are read only. Recipe targets are saved to PostgreSQL JSONB and written to DB53."
         )
         hint.setObjectName("HintText")
         lay.addWidget(hint)

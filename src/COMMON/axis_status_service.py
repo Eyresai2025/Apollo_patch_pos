@@ -4,9 +4,8 @@ import struct
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from bson import ObjectId  # type: ignore
 from src.COMMON.recipe_tag_map import RECIPE_TARGETS
-from src.COMMON.db import get_collection
+from src.COMMON.repositories import RecipeRepository
 
 
 class AxisStatusService:
@@ -16,8 +15,8 @@ class AxisStatusService:
     Current production-safe flow WITHOUT PLC active SKU tag:
     - DB74 = live actual machine values/status.
     - DB75.DBD0 to DB75.DBD284 = current/running servo recipe values.
-    - MongoDB Active Recipe = last recipe this application loaded to PLC.
-    - MongoDB SKU Recipes = full saved recipe values.
+    - PostgreSQL active_recipe_state = last recipe this application loaded to PLC.
+    - PostgreSQL sku_recipes = full saved recipe values.
 
     Important:
     - DB75.DBW288 is NOT active recipe read tag.
@@ -33,8 +32,7 @@ class AxisStatusService:
         self.deployment = self.env.get("DEPLOYMENT", "False")
         self.refresh_ms = self._env_int("AXIS_STATUS_REFRESH_MS", 1000)
 
-        self.recipe_col = get_collection("SKU Recipes")
-        self.active_recipe_col = get_collection("Active Recipe")
+        self.recipe_repository = RecipeRepository()
         # PLC active running recipe number.
         # PLC confirmed this tag is working.
         self.active_recipe_db = self._env_int("PLC_ACTIVE_RECIPE_DB", 74)
@@ -415,20 +413,20 @@ class AxisStatusService:
         return value, address
 
     # ------------------------------------------------------------
-    # MONGODB ACTIVE / LAST LOADED RECIPE
+    # POSTGRESQL ACTIVE / LAST LOADED RECIPE
     # ------------------------------------------------------------
     def _get_last_loaded_recipe_state(self) -> Optional[Dict[str, Any]]:
         """
         Reads application-side last loaded recipe state.
 
-        This comes from Active Recipe collection:
-            type = last_loaded_recipe
+        This comes from PostgreSQL active_recipe_state:
+            state_type = last_loaded_recipe
 
         This is NOT PLC active SKU.
         It only tells which recipe the application last loaded to PLC.
         """
         try:
-            return self.active_recipe_col.find_one({"type": "last_loaded_recipe"})
+            return self.recipe_repository.get_active_state("last_loaded_recipe")
         except Exception:
             return None
 
@@ -436,65 +434,27 @@ class AxisStatusService:
         self,
         state: Optional[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """
-        Fetch full recipe from SKU Recipes using Active Recipe pointer.
-        Preferred lookup:
-            recipe_id
-
-        Fallback:
-            sku_name + version
-            recipe_number + version/latest
-        """
+        """Fetch the full PostgreSQL recipe referenced by active state."""
         if not state:
             return None
 
         recipe_id = str(state.get("recipe_id", "")).strip()
-
         if recipe_id:
-            try:
-                recipe = self.recipe_col.find_one({"_id": ObjectId(recipe_id)})
-                if recipe:
-                    return recipe
-            except Exception:
-                pass
+            recipe = self.recipe_repository.get_by_id(recipe_id)
+            if recipe:
+                return recipe
 
         sku_name = str(state.get("sku_name", "")).strip()
         recipe_version = state.get("recipe_version")
-
         if sku_name and recipe_version not in (None, ""):
-            try:
-                recipe = self.recipe_col.find_one(
-                    {
-                        "type": "sku_recipe",
-                        "sku_name": sku_name,
-                        "version": int(recipe_version),
-                    }
-                )
-                if recipe:
-                    return recipe
-            except Exception:
-                pass
+            recipe = self.recipe_repository.get_by_sku_version(
+                sku_name, recipe_version
+            )
+            if recipe:
+                return recipe
 
         recipe_number = state.get("recipe_number") or state.get("plc_recipe_number")
-
-        if recipe_number not in (None, ""):
-            try:
-                recipe = self.recipe_col.find_one(
-                    {
-                        "type": "sku_recipe",
-                        "$or": [
-                            {"recipe_number": int(recipe_number)},
-                            {"plc_recipe_number": int(recipe_number)},
-                        ],
-                    },
-                    sort=[("version", -1)],
-                )
-                if recipe:
-                    return recipe
-            except Exception:
-                pass
-
-        return None
+        return self.recipe_repository.find_by_recipe_number(recipe_number)
 
     def _extract_target_value(self, container, key):
         if not container or not key:
@@ -513,9 +473,9 @@ class AxisStatusService:
             return None
 
 
-    def _get_mongo_target_value(self, recipe: Optional[Dict[str, Any]], target_cfg: Dict[str, Any]):
+    def _get_postgres_target_value(self, recipe: Optional[Dict[str, Any]], target_cfg: Dict[str, Any]):
         """
-        Reads MongoDB target value.
+        Reads PostgreSQL recipe target value.
 
         Priority:
         1. New key from recipe_tag_map.py
@@ -572,7 +532,7 @@ class AxisStatusService:
         self,
         live_position,
         running_db75_value,
-        mongo_value,
+        postgres_value,
         enabled,
         homed,
         fault,
@@ -585,23 +545,23 @@ class AxisStatusService:
         - Status is calculated only by comparing:
             Active Recipe Value from PLC DB75
             vs
-            MongoDB saved recipe value
+            PostgreSQL saved recipe value
 
         Required behavior:
             same value  -> OK
-            different   -> RUNNING/MONGO MISMATCH
+            different   -> RUNNING/POSTGRES MISMATCH
         """
 
         if running_db75_value is None:
             return "DB75 UNKNOWN"
 
-        if mongo_value is None:
-            return "MONGO MISSING"
+        if postgres_value is None:
+            return "POSTGRES MISSING"
 
-        running_mongo_delta = self._delta(running_db75_value, mongo_value)
+        running_postgres_delta = self._delta(running_db75_value, postgres_value)
 
-        if self._abs_gt(running_mongo_delta, tolerance):
-            return "RUNNING/MONGO MISMATCH"
+        if self._abs_gt(running_postgres_delta, tolerance):
+            return "RUNNING/POSTGRES MISMATCH"
 
         return "OK"
     
@@ -627,28 +587,19 @@ class AxisStatusService:
     
     def _get_recipe_by_plc_active_number(self, recipe_number):
         """
-        Fetch MongoDB recipe using PLC active running recipe number.
+        Fetch PostgreSQL recipe using PLC active running recipe number.
 
         PLC active recipe:
             DB74.DBW78 INT
 
-        MongoDB expected fields:
+        PostgreSQL recipe fields:
             recipe_number or plc_recipe_number
         """
         if recipe_number in (None, "", "UNKNOWN"):
             return None
 
         try:
-            return self.recipe_col.find_one(
-                {
-                    "type": "sku_recipe",
-                    "$or": [
-                        {"recipe_number": int(recipe_number)},
-                        {"plc_recipe_number": int(recipe_number)},
-                    ],
-                },
-                sort=[("version", -1)],
-            )
+            return self.recipe_repository.find_by_recipe_number(recipe_number)
         except Exception:
             return None
     # ------------------------------------------------------------
@@ -740,7 +691,7 @@ class AxisStatusService:
                 target_cfg=target_cfg,
             )
 
-            mongo_value = self._get_mongo_target_value(
+            postgres_value = self._get_postgres_target_value(
                 recipe=recipe,
                 target_cfg=target_cfg,
             )
@@ -748,12 +699,12 @@ class AxisStatusService:
             tolerance = float(live_state.get("tolerance") or self.running_recipe_tolerance)
 
             live_running_delta = self._delta(live_state.get("live_position"), running_value)
-            running_mongo_delta = self._delta(running_value, mongo_value)
+            running_postgres_delta = self._delta(running_value, postgres_value)
 
             status = self._calculate_status(
                 live_position=live_state.get("live_position"),
                 running_db75_value=running_value,
-                mongo_value=mongo_value,
+                postgres_value=postgres_value,
                 enabled=live_state.get("enabled"),
                 homed=live_state.get("homed"),
                 fault=live_state.get("fault"),
@@ -774,14 +725,16 @@ class AxisStatusService:
 
                 "live_db74": live_state.get("live_position"),
                 "running_db75": running_value,
-                "mongo_target": mongo_value,
+                "postgres_target": postgres_value,
+                "mongo_target": postgres_value,  # temporary compatibility alias
 
                 "live_running_delta": live_running_delta,
-                "running_mongo_delta": running_mongo_delta,
+                "running_postgres_delta": running_postgres_delta,
 
                 "active_db75": running_value,
                 "live_active_delta": live_running_delta,
-                "active_mongo_delta": running_mongo_delta,
+                "active_postgres_delta": running_postgres_delta,
+                "active_mongo_delta": running_postgres_delta,  # compatibility alias
 
                 "tolerance": tolerance,
 
@@ -814,13 +767,13 @@ class AxisStatusService:
                 f"PLC active recipe={plc_active_recipe_number}, "
                 f"SKU={active_sku}, "
                 f"version={recipe_version}. "
-                f"MongoDB recipe status={recipe_status}."
+                f"PostgreSQL recipe status={recipe_status}."
             )
         else:
             sku_message = (
                 f"PLC active recipe={plc_active_recipe_number}. "
-                f"MongoDB recipe status={recipe_status}. "
-                "Check whether this active recipe number exists in SKU Recipes."
+                f"PostgreSQL recipe status={recipe_status}. "
+                "Check whether this active recipe number exists in PostgreSQL sku_recipes."
             )
 
         return {

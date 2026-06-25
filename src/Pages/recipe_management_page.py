@@ -5,8 +5,6 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from bson import ObjectId  # type: ignore
-
 from PyQt5.QtCore import Qt  # type: ignore
 from PyQt5.QtWidgets import (  # type: ignore
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
@@ -15,12 +13,9 @@ from PyQt5.QtWidgets import (  # type: ignore
 )
 
 from src.COMMON.recipe_service import RecipeService
-from src.COMMON.db import get_collection
 
 
 def _json_default(obj):
-    if isinstance(obj, ObjectId):
-        return str(obj)
     try:
         return str(obj)
     except Exception:
@@ -53,7 +48,7 @@ class RecipeManagementPage(QWidget):
     Production purpose:
         - View saved SKU recipes
         - View version history
-        - View recipe_axis_targets from MongoDB
+        - View recipe_axis_targets from PostgreSQL JSONB
         - Edit target values safely
         - Save edited values as a new version
         - Load selected recipe to PLC DB53
@@ -83,9 +78,6 @@ class RecipeManagementPage(QWidget):
             media_path=self.media_path,
             env_path=self.env_path or None,
         )
-
-        self.recipe_col = get_collection("SKU Recipes")
-        self.active_recipe_col = get_collection("Active Recipe")
 
         self.current_recipes: List[Dict[str, Any]] = []
         self.selected_recipe: Optional[Dict[str, Any]] = None
@@ -418,12 +410,7 @@ class RecipeManagementPage(QWidget):
         try:
             previous_sku = self.sku_combo.currentText().strip() if self.sku_combo else ""
 
-            recipes = list(
-                self.recipe_col.find(
-                    {"type": "sku_recipe"},
-                    sort=[("sku_name", 1), ("version", -1)]
-                )
-            )
+            recipes = self.recipe_service.list_recipes()
 
             self.current_recipes = recipes
 
@@ -836,22 +823,7 @@ class RecipeManagementPage(QWidget):
             return
 
         try:
-            self.active_recipe_col.update_one(
-                {"type": "test_active_recipe"},
-                {
-                    "$set": {
-                        "type": "test_active_recipe",
-                        "sku_name": recipe.get("sku_name"),
-                        "recipe_id": str(recipe.get("_id")),
-                        "recipe_version": recipe.get("version"),
-                        "status": recipe.get("status"),
-                        "vit_model_path": recipe.get("vit_model_path", ""),
-                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "source": "MANUAL_ENGINEERING_TEST",
-                    }
-                },
-                upsert=True
-            )
+            self.recipe_service.mark_test_active(recipe)
 
             QMessageBox.information(
                 self,
