@@ -2,24 +2,22 @@ from __future__ import annotations
 
 """Read-only PostgreSQL inspection-history and traceability service.
 
-Phase 4A reads inspection metadata and new image binaries from PostgreSQL.
-Existing MongoDB GridFS IDs remain supported as a historical fallback.
+Phase 5 reads inspection metadata and image binaries from PostgreSQL.
+Legacy MongoDB GridFS reads occur only when the explicit fallback switch is enabled.
 """
 
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Mapping, Optional
 from uuid import UUID
 
-from bson import ObjectId  # type: ignore
-from gridfs import GridFS  # type: ignore
 from psycopg import sql
 
 from src.COMMON.config import get_config
-from src.COMMON.db import get_db
 from src.COMMON.postgres import PostgreSQLAssetStore, PostgreSQLConnectionManager, get_postgres_manager
 from src.COMMON.repositories.inspection_image_repository import InspectionImageRepository
 from src.COMMON.repositories.json_utils import json_safe
 from src.COMMON.structured_logging import get_logger
+from src.COMMON.runtime_backend import mongodb_fallback_enabled
 
 logger = get_logger(__name__, component="INSPECTION_HISTORY")
 
@@ -60,7 +58,7 @@ def normalize_result(value: Any) -> str:
 
 
 class InspectionHistoryService:
-    """Paginated access to PostgreSQL metadata/assets with GridFS fallback."""
+    """Paginated access to PostgreSQL metadata and binary assets."""
 
     def __init__(
         self,
@@ -75,11 +73,16 @@ class InspectionHistoryService:
         self.enable_image_read = bool(enable_image_read)
         self.asset_store = PostgreSQLAssetStore(self.db)
         self.image_repository = InspectionImageRepository(self.db)
-        self.image_database = (
-            image_database
-            if image_database is not None
-            else (get_db() if self.enable_image_read else None)
-        )
+        self.image_database = image_database
+        if (
+            self.image_database is None
+            and self.enable_image_read
+            and mongodb_fallback_enabled()
+        ):
+            # Deliberately lazy: normal Phase 5 startup never initializes MongoDB.
+            from src.COMMON.db import get_db
+
+            self.image_database = get_db()
 
     def _where(
         self,
@@ -505,8 +508,11 @@ class InspectionHistoryService:
         bucket = reference.get("bucket") or (
             self.config.input_gridfs_bucket if image_type == "input" else self.config.output_gridfs_bucket
         )
-        if file_id and self.image_database is not None:
+        if file_id and self.image_database is not None and mongodb_fallback_enabled():
             try:
+                from bson import ObjectId  # type: ignore
+                from gridfs import GridFS  # type: ignore
+
                 object_id = file_id if isinstance(file_id, ObjectId) else ObjectId(str(file_id))
                 grid_out = GridFS(self.image_database, collection=bucket).get(object_id)
                 return {

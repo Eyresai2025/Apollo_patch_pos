@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Durable local outbox for inspection records that could not reach PostgreSQL/GridFS.
+"""Durable local outbox for inspection records that could not reach PostgreSQL.
 
 PostgreSQL is the permanent metadata store in Phase 3. SQLite is used only as a
 small local queue for failed inspection writes and is automatically replayed
-when PostgreSQL/GridFS becomes available again.
+when PostgreSQL becomes available again.
 """
 
 import json
@@ -16,8 +16,6 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
-
-from bson import ObjectId  # type: ignore
 
 from src.COMMON.config import get_config
 from src.COMMON.inspection_schema import derive_cycle_uid
@@ -70,8 +68,10 @@ def _json_safe(value: Any) -> Any:
         return value
     if isinstance(value, datetime):
         return value.isoformat()
-    if isinstance(value, (Path, ObjectId, Enum)):
+    if isinstance(value, (Path, Enum)):
         return str(value.value if isinstance(value, Enum) else value)
+    if value.__class__.__name__ == "ObjectId":
+        return str(value)
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):

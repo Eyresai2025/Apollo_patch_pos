@@ -19,6 +19,11 @@ from src.COMMON.common import load_env
 from src.COMMON.db import save_new_sku_image
 from src.COMMON.recipe_service import RecipeService
 from src.COMMON.model_validation_service import run_validation_for_sku
+from src.COMMON.ai_model_store import (
+    publish_registered_models,
+    register_training_summary_models,
+    update_registered_models_validation,
+)
 from src.training.central_vit_trainer import run_training_for_sku
 
 try:
@@ -309,7 +314,24 @@ class TrainingWorker(QThread):
                 rebuild_dataset=self.rebuild_dataset,
                 logger=self.status_signal.emit,
             )
-            self.finished_signal.emit(summary or {})
+            summary = dict(summary or {})
+            try:
+                self.status_signal.emit("[MODEL-REGISTRY] Storing trained model binaries in PostgreSQL...")
+                summary["postgres_models"] = register_training_summary_models(
+                    self.sku_name,
+                    summary,
+                    created_by="new_sku_training",
+                )
+                self.status_signal.emit(
+                    f"[MODEL-REGISTRY] Registered {len(summary['postgres_models'])} model(s) in PostgreSQL"
+                )
+            except Exception as registry_error:
+                # Training remains successful. The operator can retry model registration
+                # after restoring the PostgreSQL connection.
+                summary["postgres_models"] = []
+                summary["postgres_model_registry_error"] = str(registry_error)
+                self.status_signal.emit(f"[MODEL-REGISTRY-WARN] {registry_error}")
+            self.finished_signal.emit(summary)
         except Exception as e:
             self.error_signal.emit(str(e))
 
@@ -2278,6 +2300,11 @@ class NewSKUPage(QWidget):
         self.latest_training_summary = summary or {}
         self.recipe_doc["training_summary"] = dict(self.latest_training_summary)
         self.recipe_doc["vit_model_path"] = self._extract_model_path_from_training_summary(summary or {})
+        self.recipe_doc["vit_model_assets"] = list(
+            (self.latest_training_summary or {}).get("postgres_models", []) or []
+        )
+        if self.recipe_doc["vit_model_assets"]:
+            self.recipe_doc["vit_model_asset_id"] = self.recipe_doc["vit_model_assets"][0].get("asset_id")
 
         if self.training_progress is not None:
             self.training_progress.setValue(100)
@@ -2381,6 +2408,17 @@ class NewSKUPage(QWidget):
         self.latest_validation_result["accepted"] = accepted
         self.latest_validation_result["status"] = "ACCEPTED" if accepted else "REJECTED"
         self.recipe_doc["validation_result"] = dict(self.latest_validation_result)
+        try:
+            updated_models = update_registered_models_validation(
+                (self.latest_training_summary or {}).get("postgres_models", []) or [],
+                accepted=accepted,
+                validation_score=self.latest_validation_result.get("f1_macro"),
+            )
+            if updated_models:
+                self.latest_training_summary["postgres_models"] = updated_models
+                self.recipe_doc["vit_model_assets"] = list(updated_models)
+        except Exception as registry_error:
+            self.latest_validation_result["model_registry_warning"] = str(registry_error)
         self._refresh_validation_ui()
 
     def _refresh_validation_ui(self):
@@ -2524,6 +2562,11 @@ class NewSKUPage(QWidget):
 
         recipe_doc["recipe_number"] = recipe_number
         recipe_doc["plc_recipe_number"] = recipe_number
+        recipe_doc["vit_model_assets"] = list(
+            (self.latest_training_summary or {}).get("postgres_models", []) or []
+        )
+        if recipe_doc["vit_model_assets"]:
+            recipe_doc["vit_model_asset_id"] = recipe_doc["vit_model_assets"][0].get("asset_id")
 
         return recipe_doc
 
@@ -2742,6 +2785,17 @@ class NewSKUPage(QWidget):
             self.saved_recipe_doc["version"] = result.get("version", recipe_doc.get("version"))
 
             self.saved_recipe_result = dict(result)
+
+            try:
+                if bool((self.latest_validation_result or {}).get("accepted", False)):
+                    published_models = publish_registered_models(
+                        (self.latest_training_summary or {}).get("postgres_models", []) or []
+                    )
+                    if published_models:
+                        self.latest_training_summary["postgres_models"] = published_models
+                        self.saved_recipe_doc["vit_model_assets"] = list(published_models)
+            except Exception as registry_error:
+                self.saved_recipe_result["model_registry_warning"] = str(registry_error)
 
             if self.load_machine_btn is not None:
                 self.load_machine_btn.setEnabled(True)

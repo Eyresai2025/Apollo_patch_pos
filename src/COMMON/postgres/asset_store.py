@@ -249,11 +249,18 @@ class PostgreSQLAssetStore:
                 """
                 SELECT
                     (SELECT COUNT(*) FROM {}.inspection_images WHERE asset_id = %s) +
-                    (SELECT COUNT(*) FROM {}.new_sku_images WHERE asset_id = %s)
+                    (SELECT COUNT(*) FROM {}.new_sku_images WHERE asset_id = %s) +
+                    (SELECT COUNT(*) FROM {}.action_catalog_images WHERE asset_id = %s) +
+                    (SELECT COUNT(*) FROM {}.ai_models WHERE asset_id = %s)
                     AS reference_count
                 """
-            ).format(sql.Identifier(self.schema), sql.Identifier(self.schema)),
-            (asset_uuid, asset_uuid),
+            ).format(
+                sql.Identifier(self.schema),
+                sql.Identifier(self.schema),
+                sql.Identifier(self.schema),
+                sql.Identifier(self.schema),
+            ),
+            (asset_uuid, asset_uuid, asset_uuid, asset_uuid),
         )
         if int((row or {}).get("reference_count", 0)) > 0:
             return False

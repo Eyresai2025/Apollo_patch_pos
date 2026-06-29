@@ -3,7 +3,7 @@ from __future__ import annotations
 """Alarm lifecycle service for Apollo VIT V5.
 
 The service converts lightweight component-health snapshots into deduplicated
-MongoDB alarms. It deliberately does no camera/PLC reconnection and performs no
+PostgreSQL alarms. It deliberately does no camera/PLC reconnection and performs no
 AI loading, so callers can run it from a background executor during inspection.
 """
 
@@ -90,7 +90,7 @@ class AlarmService:
                     self._recovery_counts[health_key] = 0
                     self._failure_counts[health_key] = self._failure_counts.get(health_key, 0) + 1
                     # Process only the first confirmed failure. This avoids one
-                    # MongoDB write and occurrence increment on every health poll.
+                    # PostgreSQL write and occurrence increment on every health poll.
                     if self._failure_counts[health_key] != self.failure_confirmations:
                         continue
 

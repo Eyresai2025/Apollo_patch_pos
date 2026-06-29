@@ -1,25 +1,17 @@
 from __future__ import annotations
 
-"""MongoDB persistence for Apollo VIT alarms and events."""
+"""PostgreSQL persistence for Apollo VIT alarms and events."""
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
+from uuid import UUID
 
-try:  # Available in the deployed Apollo environment.
-    from bson import ObjectId  # type: ignore
-except Exception:  # pragma: no cover - keeps isolated unit tests importable.
-    ObjectId = None  # type: ignore
-
-try:
-    from pymongo import ASCENDING, DESCENDING, ReturnDocument  # type: ignore
-except Exception:  # pragma: no cover
-    ASCENDING = 1
-    DESCENDING = -1
-
-    class ReturnDocument:  # type: ignore
-        AFTER = True
+from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from src.COMMON.alarm_codes import ALARM_STATES, SEVERITIES
+from src.COMMON.postgres import PostgreSQLConnectionManager, get_postgres_manager
+from src.COMMON.repositories.json_utils import json_safe
 from src.COMMON.structured_logging import get_logger
 
 logger = get_logger(__name__, component="ALARM_REPOSITORY")
@@ -29,73 +21,52 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def json_safe(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if ObjectId is not None and isinstance(value, ObjectId):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(k): json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [json_safe(v) for v in value]
-    return value
-
-
 def _safe_text(value: Any, default: str = "-") -> str:
     text = str(value or "").strip()
     return text if text else default
 
 
+def _as_uuid(value: Any) -> Optional[UUID]:
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value or "").strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 class AlarmRepository:
-    COLLECTION_NAME = "Alarm Events"
+    TABLE_NAME = "alarm_events"
 
-    def __init__(self, collection):
-        if collection is None:
-            raise ValueError("AlarmRepository requires a MongoDB collection")
-        self.collection = collection
+    def __init__(self, manager: PostgreSQLConnectionManager | None = None):
+        self.db = manager or get_postgres_manager()
+        self.schema = self.db.settings.schema
 
-    # ------------------------------------------------------------------
-    # Schema / indexes
-    # ------------------------------------------------------------------
+    def _table(self) -> sql.Composed:
+        return sql.SQL("{}.{}").format(
+            sql.Identifier(self.schema), sql.Identifier(self.TABLE_NAME)
+        )
+
+    @staticmethod
+    def _to_document(row: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        document = dict(row)
+        document["_id"] = str(document.get("id") or "")
+        document.pop("id", None)
+        return json_safe(document)
+
     def ensure_indexes(self) -> List[str]:
-        names: List[str] = []
-        names.append(
-            self.collection.create_index(
-                [("fingerprint", ASCENDING)],
-                name="uq_alarm_open_fingerprint",
-                unique=True,
-                partialFilterExpression={"is_open": True},
-            )
-        )
-        names.append(
-            self.collection.create_index(
-                [("is_open", ASCENDING), ("severity_rank", ASCENDING), ("opened_at", DESCENDING)],
-                name="ix_alarm_open_severity_time",
-            )
-        )
-        names.append(
-            self.collection.create_index(
-                [("state", ASCENDING), ("last_seen_at", DESCENDING)],
-                name="ix_alarm_state_last_seen",
-            )
-        )
-        names.append(
-            self.collection.create_index(
-                [("component", ASCENDING), ("code", ASCENDING), ("opened_at", DESCENDING)],
-                name="ix_alarm_component_code_time",
-            )
-        )
-        names.append(
-            self.collection.create_index(
-                [("cycle_id", ASCENDING), ("opened_at", DESCENDING)],
-                name="ix_alarm_cycle_time",
-            )
-        )
-        return names
+        # Numbered SQL migrations own DDL. This method keeps the original
+        # service contract while validating that Phase 5 is installed.
+        self.db.fetch_one(sql.SQL("SELECT COUNT(*) AS count FROM {}").format(self._table()))
+        return [
+            "uq_alarm_open_fingerprint",
+            "idx_alarm_open_severity_time",
+            "idx_alarm_component_code_time",
+            "idx_alarm_cycle_time",
+        ]
 
-    # ------------------------------------------------------------------
-    # Write operations
-    # ------------------------------------------------------------------
     def open_or_update(self, alarm: Mapping[str, Any]) -> Dict[str, Any]:
         now = utc_now()
         fingerprint = _safe_text(alarm.get("fingerprint"), "")
@@ -107,8 +78,7 @@ class AlarmRepository:
             severity = "WARNING"
         severity_rank = {"CRITICAL": 1, "HIGH": 2, "WARNING": 3, "INFO": 4}[severity]
 
-        existing = self.collection.find_one({"fingerprint": fingerprint, "is_open": True})
-        common_set = {
+        values = {
             "schema_version": "5.0",
             "fingerprint": fingerprint,
             "code": _safe_text(alarm.get("code"), "ALARM-UNKNOWN"),
@@ -117,10 +87,10 @@ class AlarmRepository:
             "severity_rank": severity_rank,
             "title": _safe_text(alarm.get("title"), "Apollo alarm"),
             "message": _safe_text(alarm.get("message"), "No alarm detail provided"),
-            "recommended_action": _safe_text(alarm.get("recommended_action"), "Review the component status."),
+            "recommended_action": _safe_text(
+                alarm.get("recommended_action"), "Review the component status."
+            ),
             "source": _safe_text(alarm.get("source"), "SYSTEM_MONITOR"),
-            "last_seen_at": now,
-            "updated_at": now,
             "cycle_id": _safe_text(alarm.get("cycle_id")),
             "tyre_id": _safe_text(alarm.get("tyre_id")),
             "sku_name": _safe_text(alarm.get("sku_name")),
@@ -128,32 +98,85 @@ class AlarmRepository:
             "context": dict(alarm.get("context") or {}),
         }
 
-        if existing:
-            self.collection.update_one(
-                {"_id": existing["_id"]},
-                {
-                    "$set": common_set,
-                    "$inc": {"occurrence_count": 1},
-                },
-            )
-            updated = self.collection.find_one({"_id": existing["_id"]}) or existing
-            updated["created"] = False
-            return updated
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE fingerprint = %s AND is_open = TRUE FOR UPDATE"
+                    ).format(self._table()),
+                    (fingerprint,),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    cur.execute(
+                        sql.SQL(
+                            """
+                            UPDATE {}
+                            SET schema_version = %s,
+                                code = %s,
+                                component = %s,
+                                severity = %s,
+                                severity_rank = %s,
+                                title = %s,
+                                message = %s,
+                                recommended_action = %s,
+                                source = %s,
+                                last_seen_at = %s,
+                                updated_at = %s,
+                                cycle_id = %s,
+                                tyre_id = %s,
+                                sku_name = %s,
+                                zone = %s,
+                                context = %s,
+                                occurrence_count = occurrence_count + 1
+                            WHERE id = %s
+                            RETURNING *
+                            """
+                        ).format(self._table()),
+                        (
+                            values["schema_version"], values["code"], values["component"],
+                            values["severity"], values["severity_rank"], values["title"],
+                            values["message"], values["recommended_action"], values["source"],
+                            now, now, values["cycle_id"], values["tyre_id"], values["sku_name"],
+                            values["zone"], Jsonb(json_safe(values["context"])), existing["id"],
+                        ),
+                    )
+                    row = cur.fetchone()
+                    document = self._to_document(row) or {}
+                    document["created"] = False
+                    return document
 
-        document = {
-            **common_set,
-            "state": "ACTIVE",
-            "is_open": True,
-            "opened_at": now,
-            "first_seen_at": now,
-            "occurrence_count": 1,
-            "acknowledgement": None,
-            "recovery": None,
-        }
-        result = self.collection.insert_one(document)
-        document["_id"] = result.inserted_id
-        document["created"] = True
-        return document
+                cur.execute(
+                    sql.SQL(
+                        """
+                        INSERT INTO {} (
+                            schema_version, fingerprint, code, component, severity,
+                            severity_rank, title, message, recommended_action, source,
+                            state, is_open, opened_at, first_seen_at, last_seen_at,
+                            updated_at, occurrence_count, cycle_id, tyre_id, sku_name,
+                            zone, context, acknowledgement, recovery
+                        ) VALUES (
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s,
+                            'ACTIVE', TRUE, %s, %s, %s,
+                            %s, 1, %s, %s, %s,
+                            %s, %s, NULL, NULL
+                        )
+                        RETURNING *
+                        """
+                    ).format(self._table()),
+                    (
+                        values["schema_version"], values["fingerprint"], values["code"],
+                        values["component"], values["severity"], values["severity_rank"],
+                        values["title"], values["message"], values["recommended_action"],
+                        values["source"], now, now, now, now, values["cycle_id"],
+                        values["tyre_id"], values["sku_name"], values["zone"],
+                        Jsonb(json_safe(values["context"])),
+                    ),
+                )
+                document = self._to_document(cur.fetchone()) or {}
+                document["created"] = True
+                return document
 
     def acknowledge(
         self,
@@ -162,7 +185,9 @@ class AlarmRepository:
         user: Mapping[str, Any],
         note: str = "",
     ) -> Optional[Dict[str, Any]]:
-        identifier = self._coerce_id(alarm_id)
+        identifier = _as_uuid(alarm_id)
+        if identifier is None:
+            return None
         now = utc_now()
         acknowledgement = {
             "user_id": user.get("user_id"),
@@ -172,18 +197,18 @@ class AlarmRepository:
             "note": str(note or "").strip(),
             "acknowledged_at": now,
         }
-        result = self.collection.find_one_and_update(
-            {"_id": identifier, "is_open": True},
-            {
-                "$set": {
-                    "state": "ACKNOWLEDGED",
-                    "acknowledgement": acknowledgement,
-                    "updated_at": now,
-                }
-            },
-            return_document=ReturnDocument.AFTER,
+        row = self.db.fetch_one(
+            sql.SQL(
+                """
+                UPDATE {}
+                SET state = 'ACKNOWLEDGED', acknowledgement = %s, updated_at = %s
+                WHERE id = %s AND is_open = TRUE
+                RETURNING *
+                """
+            ).format(self._table()),
+            (Jsonb(json_safe(acknowledgement)), now, identifier),
         )
-        return result
+        return self._to_document(row)
 
     def recover_by_fingerprint(
         self,
@@ -192,41 +217,45 @@ class AlarmRepository:
         message: str = "Component recovered automatically",
         context: Optional[Mapping[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        existing = self.collection.find_one({"fingerprint": fingerprint, "is_open": True})
-        if not existing:
-            return None
         now = utc_now()
-        opened_at = existing.get("opened_at")
-        duration_sec = None
-        if isinstance(opened_at, datetime):
-            try:
-                if opened_at.tzinfo is None:
-                    opened_at = opened_at.replace(tzinfo=timezone.utc)
-                duration_sec = max(0.0, (now - opened_at.astimezone(timezone.utc)).total_seconds())
-            except Exception:
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "SELECT * FROM {} WHERE fingerprint = %s AND is_open = TRUE FOR UPDATE"
+                    ).format(self._table()),
+                    (fingerprint,),
+                )
+                existing = cur.fetchone()
+                if not existing:
+                    return None
+                opened_at = existing.get("opened_at")
                 duration_sec = None
-
-        recovery = {
-            "message": _safe_text(message, "Component recovered automatically"),
-            "recovered_at": now,
-            "duration_sec": duration_sec,
-            "context": dict(context or {}),
-        }
-        self.collection.update_one(
-            {"_id": existing["_id"], "is_open": True},
-            {
-                "$set": {
-                    "state": "RECOVERED",
-                    "is_open": False,
+                if isinstance(opened_at, datetime):
+                    if opened_at.tzinfo is None:
+                        opened_at = opened_at.replace(tzinfo=timezone.utc)
+                    duration_sec = max(
+                        0.0, (now - opened_at.astimezone(timezone.utc)).total_seconds()
+                    )
+                recovery = {
+                    "message": _safe_text(message, "Component recovered automatically"),
                     "recovered_at": now,
-                    "recovery": recovery,
-                    "updated_at": now,
+                    "duration_sec": duration_sec,
+                    "context": dict(context or {}),
                 }
-            },
-        )
-        recovered = self.collection.find_one({"_id": existing["_id"]}) or existing
-        recovered.update({"state": "RECOVERED", "is_open": False, "recovery": recovery})
-        return recovered
+                cur.execute(
+                    sql.SQL(
+                        """
+                        UPDATE {}
+                        SET state = 'RECOVERED', is_open = FALSE, recovered_at = %s,
+                            recovery = %s, updated_at = %s
+                        WHERE id = %s AND is_open = TRUE
+                        RETURNING *
+                        """
+                    ).format(self._table()),
+                    (now, Jsonb(json_safe(recovery)), now, existing["id"]),
+                )
+                return self._to_document(cur.fetchone())
 
     def recover_by_id(
         self,
@@ -235,9 +264,8 @@ class AlarmRepository:
         user: Mapping[str, Any],
         note: str,
     ) -> Optional[Dict[str, Any]]:
-        identifier = self._coerce_id(alarm_id)
-        existing = self.collection.find_one({"_id": identifier, "is_open": True})
-        if not existing:
+        existing = self.get_by_id(alarm_id)
+        if not existing or not existing.get("is_open"):
             return None
         context = {
             "manual": True,
@@ -248,69 +276,65 @@ class AlarmRepository:
             "note": str(note or "").strip(),
         }
         return self.recover_by_fingerprint(
-            existing.get("fingerprint", ""),
+            str(existing.get("fingerprint") or ""),
             message="Alarm manually cleared by an authorized user",
             context=context,
         )
 
-    # ------------------------------------------------------------------
-    # Read operations
-    # ------------------------------------------------------------------
-    def build_query(self, filters: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    def _where(self, filters: Optional[Mapping[str, Any]] = None):
         filters = dict(filters or {})
-        clauses: List[Dict[str, Any]] = []
+        clauses: List[sql.SQL] = []
+        params: List[Any] = []
 
         state = str(filters.get("state") or "").strip().upper()
         if state == "OPEN":
-            clauses.append({"is_open": True})
+            clauses.append(sql.SQL("is_open = TRUE"))
         elif state in ALARM_STATES:
-            clauses.append({"state": state})
+            clauses.append(sql.SQL("state = %s"))
+            params.append(state)
 
         severity = str(filters.get("severity") or "").strip().upper()
         if severity in SEVERITIES:
-            clauses.append({"severity": severity})
+            clauses.append(sql.SQL("severity = %s"))
+            params.append(severity)
 
         component = str(filters.get("component") or "").strip().upper()
         if component and component != "ALL":
-            clauses.append({"component": component})
+            clauses.append(sql.SQL("component = %s"))
+            params.append(component)
 
         code = str(filters.get("code") or "").strip().upper()
         if code:
-            clauses.append({"code": code})
+            clauses.append(sql.SQL("code = %s"))
+            params.append(code)
 
         search = str(filters.get("search") or "").strip()
         if search:
-            safe = self._escape_regex(search)
+            pattern = f"%{search}%"
             clauses.append(
-                {
-                    "$or": [
-                        {"code": {"$regex": safe, "$options": "i"}},
-                        {"component": {"$regex": safe, "$options": "i"}},
-                        {"title": {"$regex": safe, "$options": "i"}},
-                        {"message": {"$regex": safe, "$options": "i"}},
-                        {"cycle_id": {"$regex": safe, "$options": "i"}},
-                        {"tyre_id": {"$regex": safe, "$options": "i"}},
-                        {"sku_name": {"$regex": safe, "$options": "i"}},
-                    ]
-                }
+                sql.SQL(
+                    "(code ILIKE %s OR component ILIKE %s OR title ILIKE %s OR "
+                    "message ILIKE %s OR cycle_id ILIKE %s OR tyre_id ILIKE %s OR "
+                    "sku_name ILIKE %s)"
+                )
             )
+            params.extend([pattern] * 7)
 
         date_from = filters.get("date_from")
         date_to = filters.get("date_to")
-        if date_from or date_to:
-            time_query: Dict[str, Any] = {}
-            if isinstance(date_from, datetime):
-                time_query["$gte"] = date_from
-            if isinstance(date_to, datetime):
-                time_query["$lte"] = date_to
-            if time_query:
-                clauses.append({"opened_at": time_query})
+        if isinstance(date_from, datetime):
+            clauses.append(sql.SQL("opened_at >= %s"))
+            params.append(date_from)
+        if isinstance(date_to, datetime):
+            clauses.append(sql.SQL("opened_at <= %s"))
+            params.append(date_to)
 
-        if not clauses:
-            return {}
-        if len(clauses) == 1:
-            return clauses[0]
-        return {"$and": clauses}
+        return (sql.SQL(" AND ").join(clauses) if clauses else sql.SQL("TRUE"), params)
+
+    def build_query(self, filters: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        # Compatibility/debug representation for callers that displayed the old
+        # MongoDB query. SQL generation remains internal and parameterized.
+        return json_safe(dict(filters or {}))
 
     def list_alarms(
         self,
@@ -321,82 +345,82 @@ class AlarmRepository:
     ) -> Dict[str, Any]:
         page = max(1, int(page))
         page_size = min(200, max(1, int(page_size)))
-        query = self.build_query(filters)
-        total = int(self.collection.count_documents(query))
-        cursor = (
-            self.collection.find(query)
-            .sort([("is_open", DESCENDING), ("severity_rank", ASCENDING), ("opened_at", DESCENDING)])
-            .skip((page - 1) * page_size)
-            .limit(page_size)
+        where_sql, params = self._where(filters)
+        total = int(
+            (self.db.fetch_one(
+                sql.SQL("SELECT COUNT(*) AS count FROM {} WHERE {}").format(
+                    self._table(), where_sql
+                ),
+                params,
+            ) or {}).get("count", 0)
         )
-        rows = [json_safe(document) for document in cursor]
+        rows = self.db.fetch_all(
+            sql.SQL(
+                """
+                SELECT * FROM {}
+                WHERE {}
+                ORDER BY is_open DESC, severity_rank ASC, opened_at DESC
+                LIMIT %s OFFSET %s
+                """
+            ).format(self._table(), where_sql),
+            [*params, page_size, (page - 1) * page_size],
+        )
         total_pages = max(1, (total + page_size - 1) // page_size)
         return {
-            "rows": rows,
+            "rows": [self._to_document(row) for row in rows],
             "total": total,
             "page": page,
             "page_size": page_size,
             "total_pages": total_pages,
-            "query": json_safe(query),
+            "query": self.build_query(filters),
         }
 
     def summary(self, filters: Optional[Mapping[str, Any]] = None) -> Dict[str, int]:
-        base_query = self.build_query(filters)
-
-        def combine(extra: Mapping[str, Any]) -> Dict[str, Any]:
-            if not base_query:
-                return dict(extra)
-            return {"$and": [base_query, dict(extra)]}
-
-        return {
-            "total": int(self.collection.count_documents(base_query)),
-            "open": int(self.collection.count_documents(combine({"is_open": True}))),
-            "critical": int(
-                self.collection.count_documents(combine({"is_open": True, "severity": "CRITICAL"}))
-            ),
-            "high": int(self.collection.count_documents(combine({"is_open": True, "severity": "HIGH"}))),
-            "warning": int(
-                self.collection.count_documents(combine({"is_open": True, "severity": "WARNING"}))
-            ),
-            "acknowledged": int(
-                self.collection.count_documents(combine({"is_open": True, "state": "ACKNOWLEDGED"}))
-            ),
-            "recovered": int(self.collection.count_documents(combine({"state": "RECOVERED"}))),
-        }
+        where_sql, params = self._where(filters)
+        row = self.db.fetch_one(
+            sql.SQL(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE is_open = TRUE) AS open,
+                    COUNT(*) FILTER (WHERE is_open = TRUE AND severity = 'CRITICAL') AS critical,
+                    COUNT(*) FILTER (WHERE is_open = TRUE AND severity = 'HIGH') AS high,
+                    COUNT(*) FILTER (WHERE is_open = TRUE AND severity = 'WARNING') AS warning,
+                    COUNT(*) FILTER (WHERE is_open = TRUE AND state = 'ACKNOWLEDGED') AS acknowledged,
+                    COUNT(*) FILTER (WHERE state = 'RECOVERED') AS recovered
+                FROM {} WHERE {}
+                """
+            ).format(self._table(), where_sql),
+            params,
+        ) or {}
+        return {key: int(row.get(key) or 0) for key in (
+            "total", "open", "critical", "high", "warning", "acknowledged", "recovered"
+        )}
 
     def filter_options(self) -> Dict[str, List[str]]:
-        components = sorted(
-            str(value) for value in self.collection.distinct("component") if str(value or "").strip()
+        components = self.db.fetch_all(
+            sql.SQL(
+                "SELECT DISTINCT component FROM {} WHERE component <> '' ORDER BY component"
+            ).format(self._table())
         )
-        codes = sorted(str(value) for value in self.collection.distinct("code") if str(value or "").strip())
+        codes = self.db.fetch_all(
+            sql.SQL("SELECT DISTINCT code FROM {} WHERE code <> '' ORDER BY code").format(
+                self._table()
+            )
+        )
         return {
-            "components": components,
-            "codes": codes,
+            "components": [str(row["component"]) for row in components],
+            "codes": [str(row["code"]) for row in codes],
             "severities": list(SEVERITIES),
             "states": list(ALARM_STATES),
         }
 
     def get_by_id(self, alarm_id: Any) -> Optional[Dict[str, Any]]:
-        document = self.collection.find_one({"_id": self._coerce_id(alarm_id)})
-        return json_safe(document) if document else None
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _escape_regex(value: str) -> str:
-        import re
-
-        return re.escape(value)
-
-    @staticmethod
-    def _coerce_id(value: Any) -> Any:
-        if ObjectId is not None and isinstance(value, ObjectId):
-            return value
-        text = str(value or "").strip()
-        if ObjectId is not None:
-            try:
-                return ObjectId(text)
-            except Exception:
-                pass
-        return value
+        identifier = _as_uuid(alarm_id)
+        if identifier is None:
+            return None
+        row = self.db.fetch_one(
+            sql.SQL("SELECT * FROM {} WHERE id = %s").format(self._table()),
+            (identifier,),
+        )
+        return self._to_document(row)

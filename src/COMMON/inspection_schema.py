@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-"""Standard MongoDB document builder for Apollo tyre inspection cycles.
+"""Standard PostgreSQL JSONB document builder for Apollo inspection cycles.
 
-The builder deliberately preserves all legacy ``TYRE DETAILS`` fields while
-adding schema-versioned, typed sections for new code. It performs no database
-writes; persistence belongs to ``inspection_repository.py``.
+The builder preserves approved legacy field names for backward-compatible UI
+and exports while producing the schema-versioned document stored in PostgreSQL.
 """
 
 import os
@@ -12,8 +11,6 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
-
-from bson import ObjectId  # type: ignore
 
 from src.COMMON.config import get_config
 
@@ -32,9 +29,11 @@ _FAILED_LABELS = {"INVALID", "FAILED", "ERROR"}
 
 
 def mongo_safe(value: Any) -> Any:
-    """Convert common AI/runtime values into BSON-safe Python values."""
-    if value is None or isinstance(value, (str, int, float, bool, datetime, ObjectId)):
+    """Convert common AI/runtime values into JSONB-safe Python values."""
+    if value is None or isinstance(value, (str, int, float, bool, datetime)):
         return value
+    if value.__class__.__name__ == "ObjectId":
+        return str(value)
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, Enum):

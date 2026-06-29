@@ -18,7 +18,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QSize, QTimer, Qt, pyqtSignal, QEvent
 from PyQt5.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
 from src.COMMON.db import (
-    get_db,
     save_cycle_metadata,
     count_inspection_cycles_for_date,
     get_inspection_sync_service,
@@ -29,6 +28,7 @@ import time
 import subprocess
 import platform
 from src.COMMON.config import get_config, get_config_manager
+from src.COMMON.runtime_backend import get_runtime_backend_settings
 from src.COMMON.structured_logging import (
     configure_logging,
     get_logger,
@@ -161,12 +161,22 @@ logger.info(
         },
     },
 )
+runtime_backend = get_runtime_backend_settings()
+logger.info(
+    "Runtime data backend selected",
+    extra={
+        "event_code": "RUNTIME_BACKEND_SELECTED",
+        "details": {
+            "data_backend": runtime_backend.data_backend,
+            "mongodb_fallback_enabled": runtime_backend.mongodb_fallback_enabled,
+            "mongodb_migration_mode": runtime_backend.mongodb_migration_mode,
+        },
+    },
+)
 
-# MongoDB Connections
-mydb = get_db()
-new_sku_col = mydb["New SKU"]
-repeatability_col = mydb["Repeatability"]
-accounts_col = mydb["Accounts"]
+# Phase 5 runtime storage is PostgreSQL-only. Legacy MongoDB is available
+# exclusively through explicit migration/fallback switches and is not opened
+# during normal GUI startup.
 
 LOCAL_MULTI_SIDE_TEST_FOLDER = env_vars.get(
     "MULTI_CAPTURE_ROOT",

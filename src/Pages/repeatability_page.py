@@ -232,7 +232,7 @@ class RepeatabilityPage(QWidget):
         plc_box, self.plc_dot, self.plc_txt = indicator("PLC")
         cam_box, self.cam_dot, self.cam_txt = indicator("CAMERA")
         model_box, self.model_dot, self.model_txt = indicator("MODELS")
-        db_box, self.db_dot, self.db_txt = indicator("MONGODB")
+        db_box, self.db_dot, self.db_txt = indicator("POSTGRESQL")
 
         ind_l.addWidget(plc_box, 1)
         ind_l.addWidget(cam_box, 1)

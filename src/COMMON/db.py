@@ -6,14 +6,10 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from threading import Lock
 
-import cv2  # type: ignore
-import numpy as np  # type: ignore
-from bson import ObjectId  # type: ignore
-from gridfs import GridFS  # type: ignore
-from pymongo import MongoClient  # type: ignore
 
 from src.COMMON.config import get_config
 from src.COMMON.structured_logging import get_logger
+from src.COMMON.runtime_backend import require_mongodb_access
 
 logger = get_logger(__name__, component="DATABASE")
 
@@ -41,7 +37,7 @@ ALARM_EVENTS_COLLECTION = "Alarm Events"
 # =========================
 # SINGLETON CLIENT
 # =========================
-_client: Optional[MongoClient] = None
+_client: Optional[Any] = None
 _inspection_repository = None
 _inspection_repository_lock = Lock()
 _inspection_sync_service = None
@@ -50,11 +46,25 @@ _alarm_repository = None
 _alarm_repository_lock = Lock()
 _alarm_service = None
 _alarm_service_lock = Lock()
+_repeatability_repository = None
+_repeatability_repository_lock = Lock()
+_test_mode_repository = None
+_test_mode_repository_lock = Lock()
 
 
-def get_client() -> MongoClient:
+def get_client(*, force_legacy: bool = False):
+    """Return the legacy MongoDB client only when explicitly enabled.
+
+    Normal Phase 5 application startup never calls this function. Migration
+    tools may pass ``force_legacy=True`` while MongoDB is intentionally online.
+    """
     global _client
+    require_mongodb_access(force_legacy=force_legacy)
     if _client is None:
+        try:
+            from pymongo import MongoClient  # type: ignore
+        except ImportError as exc:  # pragma: no cover - migration-only path
+            raise RuntimeError("pymongo is required only for legacy migration/fallback") from exc
         _client = MongoClient(
             DB_URL,
             maxPoolSize=_config.database.pool_size,
@@ -64,35 +74,57 @@ def get_client() -> MongoClient:
             retryWrites=_config.database.retry_writes,
             retryReads=_config.database.retry_reads,
         )
-        logger.info(
-            "MongoDB client initialized",
+        logger.warning(
+            "Legacy MongoDB client initialized",
             extra={
-                "event_code": "DB_CLIENT_INITIALIZED",
+                "event_code": "LEGACY_MONGODB_CLIENT_INITIALIZED",
                 "details": {
                     "database": DB_NAME,
-                    "pool_size": _config.database.pool_size,
-                    "min_pool_size": _config.database.min_pool_size,
+                    "forced_for_migration": bool(force_legacy),
                 },
             },
         )
     return _client
 
 
-def get_db(db_name: Optional[str] = None):
+def get_db(db_name: Optional[str] = None, *, force_legacy: bool = False):
     name = db_name or DB_NAME
-    return get_client()[name]
+    return get_client(force_legacy=force_legacy)[name]
 
 
-def get_collection(collection_name: str, db_name: Optional[str] = None):
-    return get_db(db_name)[collection_name]
+def get_collection(
+    collection_name: str,
+    db_name: Optional[str] = None,
+    *,
+    force_legacy: bool = False,
+):
+    return get_db(db_name, force_legacy=force_legacy)[collection_name]
 
 
-def get_gridfs(bucket: Optional[str] = None, db_name: Optional[str] = None) -> GridFS:
-    return GridFS(get_db(db_name), collection=bucket or GRIDFS_BUCKET)
+def get_gridfs(
+    bucket: Optional[str] = None,
+    db_name: Optional[str] = None,
+    *,
+    force_legacy: bool = False,
+):
+    require_mongodb_access(force_legacy=force_legacy)
+    try:
+        from gridfs import GridFS  # type: ignore
+    except ImportError as exc:  # pragma: no cover - migration-only path
+        raise RuntimeError("gridfs/pymongo is required only for legacy migration/fallback") from exc
+    return GridFS(
+        get_db(db_name, force_legacy=force_legacy),
+        collection=bucket or GRIDFS_BUCKET,
+    )
 
 
-def ensure_collection(collection_name: str, db_name: Optional[str] = None) -> None:
-    db = get_db(db_name)
+def ensure_collection(
+    collection_name: str,
+    db_name: Optional[str] = None,
+    *,
+    force_legacy: bool = False,
+) -> None:
+    db = get_db(db_name, force_legacy=force_legacy)
     if collection_name not in db.list_collection_names():
         db.create_collection(collection_name)
 
@@ -133,7 +165,6 @@ def get_inspection_repository():
 
                 _inspection_repository = InspectionRepository(
                     get_postgres_manager(),
-                    image_database=get_db(),
                 )
     return _inspection_repository
 
@@ -165,19 +196,20 @@ def get_inspection_sync_service():
 
 
 def get_alarm_events_collection():
-    """Return the MongoDB collection used by V5 Alarm & Event Center."""
+    """Legacy migration helper; normal runtime alarms use PostgreSQL."""
     return get_collection(ALARM_EVENTS_COLLECTION)
 
 
 def get_alarm_repository():
-    """Return the singleton MongoDB alarm repository."""
+    """Return the singleton PostgreSQL alarm repository."""
     global _alarm_repository
     if _alarm_repository is None:
         with _alarm_repository_lock:
             if _alarm_repository is None:
                 from src.COMMON.alarm_repository import AlarmRepository
+                from src.COMMON.postgres import get_postgres_manager
 
-                _alarm_repository = AlarmRepository(get_alarm_events_collection())
+                _alarm_repository = AlarmRepository(get_postgres_manager())
     return _alarm_repository
 
 
@@ -266,6 +298,10 @@ def reset_password(identifier: str, new_password: str):
 # GENERIC IMAGE / GRIDFS HELPERS
 # =========================
 def nparray_to_bytes(db, img_array, filename, cycle):
+    import cv2  # type: ignore
+    from gridfs import GridFS  # type: ignore
+
+    require_mongodb_access()
     date = datetime.now().strftime("%d-%m-%Y")
     success, encoded = cv2.imencode(".jpg", img_array)
     if not success:
@@ -283,6 +319,7 @@ def nparray_to_bytes(db, img_array, filename, cycle):
 
 
 def recent_cycle(mydb):
+    require_mongodb_access()
     file_collection = mydb[TYRE_DETAILS_COLLECTION]
     current_date = datetime.now()
 
@@ -327,6 +364,11 @@ def recent_cycle(mydb):
 
 
 def db_to_images(cycle, db, download_loc, date):
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+    from gridfs import GridFS  # type: ignore
+
+    require_mongodb_access()
     os.makedirs(download_loc, exist_ok=True)
 
     file_collection = db[f"{GRIDFS_BUCKET}.files"]
@@ -499,22 +541,34 @@ def save_new_sku_image(
 # =========================
 # REPEATABILITY
 # =========================
+def get_repeatability_repository():
+    global _repeatability_repository
+    if _repeatability_repository is None:
+        with _repeatability_repository_lock:
+            if _repeatability_repository is None:
+                from src.COMMON.repositories.operational_repository import RepeatabilityRepository
+                from src.COMMON.postgres import get_postgres_manager
+
+                _repeatability_repository = RepeatabilityRepository(get_postgres_manager())
+    return _repeatability_repository
+
+
 def insert_repeatability_log(doc: dict):
-    col = get_repeatability_collection()
-    return col.insert_one(doc)
+    """Persist one repeatability event to PostgreSQL."""
+    return get_repeatability_repository().insert(doc)
 
 # =========================
 # TEST MODE RESULTS
 # =========================
 def _mongo_safe(value):
     """
-    Convert objects into Mongo-safe values.
+    Convert live hardware objects into JSON-safe values.
 
     Hardware check result contains live Python objects like:
     - snap7 PLC client
     - multi camera manager
 
-    Those cannot be inserted into MongoDB directly.
+    Those cannot be serialized into PostgreSQL JSONB directly.
     """
     if value is None:
         return None
@@ -547,12 +601,11 @@ def _mongo_safe(value):
 
 def save_test_mode_result(result: Dict[str, Any], operator: str = ""):
     """
-    Save one Full Hardware Check result to MongoDB.
+    Save one Full Hardware Check result to PostgreSQL.
 
-    Collection:
-        Test Mode Results
+    Table:
+        apollo.test_mode_results
     """
-    col = get_test_mode_results_collection()
 
     result = result or {}
     details = result.get("details", {}) or {}
@@ -626,10 +679,21 @@ def save_test_mode_result(result: Dict[str, Any], operator: str = ""):
         "raw_result": _mongo_safe(raw_result),
     }
 
-    return col.insert_one(doc)
+    global _test_mode_repository
+    if _test_mode_repository is None:
+        with _test_mode_repository_lock:
+            if _test_mode_repository is None:
+                from src.COMMON.repositories.operational_repository import TestModeResultRepository
+                from src.COMMON.postgres import get_postgres_manager
+
+                _test_mode_repository = TestModeResultRepository(get_postgres_manager())
+    return _test_mode_repository.insert(doc)
 
 
-def fetch_gridfs_bytes(file_id: str | ObjectId, bucket: Optional[str] = None) -> bytes:
+def fetch_gridfs_bytes(file_id: Any, bucket: Optional[str] = None) -> bytes:
+    """Read a legacy GridFS object only when fallback/migration is enabled."""
+    from bson import ObjectId  # type: ignore
+
     fs = get_gridfs(bucket=bucket)
-    oid = file_id if isinstance(file_id, ObjectId) else ObjectId(file_id)
+    oid = file_id if isinstance(file_id, ObjectId) else ObjectId(str(file_id))
     return fs.get(oid).read()

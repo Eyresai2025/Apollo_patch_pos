@@ -2,9 +2,8 @@ from __future__ import annotations
 
 """PostgreSQL-backed Apollo inspection repository.
 
-Phase 4A stores inspection metadata and image binaries in PostgreSQL. Existing
-MongoDB GridFS content remains available as a read fallback for historical
-records. A durable SQLite outbox remains available when PostgreSQL is unavailable.
+Phase 5 stores inspection metadata and image binaries in PostgreSQL only.
+A durable SQLite outbox remains available when PostgreSQL is unavailable.
 """
 
 import threading
@@ -14,7 +13,6 @@ from typing import Any, Callable, Dict, Mapping, Optional
 
 from psycopg import Error as PsycopgError
 from psycopg_pool import PoolTimeout
-from pymongo.errors import PyMongoError  # type: ignore
 
 from src.COMMON.config import get_config
 from src.COMMON.inspection_image_store import InspectionImageStore
@@ -39,7 +37,7 @@ class InspectionRepository:
     ):
         self.manager = manager or get_postgres_manager()
         self.cycles = InspectionCycleRepository(self.manager)
-        self.image_database = image_database
+        self.image_database = None  # retained argument is ignored after final cutover
         self.config = get_config().inspection
         self._indexes_ready = False
         self._index_lock = threading.Lock()
@@ -158,7 +156,7 @@ class InspectionRepository:
                 self._outbox.mark_synced_by_uid(cycle_uid)
             return response
 
-        except (PsycopgError, PoolTimeout, PyMongoError) as exc:
+        except (PsycopgError, PoolTimeout) as exc:
             if not (allow_outbox and self.config.offline_outbox_enabled):
                 logger.exception(
                     "PostgreSQL inspection save failed",
@@ -185,7 +183,7 @@ class InspectionRepository:
                 record = self.get_outbox().enqueue(payload, error=str(exc))
             except Exception:
                 logger.exception(
-                    "PostgreSQL/GridFS failed and the local inspection outbox could not be written",
+                    "PostgreSQL failed and the local inspection outbox could not be written",
                     extra={
                         "event_code": "INSPECTION_OUTBOX_WRITE_FAILED",
                         "error_code": "DB-OUTBOX-001",

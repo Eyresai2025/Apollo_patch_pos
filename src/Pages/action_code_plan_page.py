@@ -582,7 +582,7 @@ class ActionCodePlanPage(QWidget):
             tile.setToolTip("")
 
             # New support:
-            # 1. MongoDB GridFS image using gridfs_file_id
+            # 1. PostgreSQL asset using asset_id, with legacy GridFS fallback
             # 2. Fallback old local image_path
             pix = self._pixmap_from_catalog_image(img)
 
@@ -598,7 +598,7 @@ class ActionCodePlanPage(QWidget):
                 tile.setText("Image\nnot loaded")
 
             # Open popup using full image document.
-            # Popup should load from GridFS or fallback path.
+            # Popup loads from PostgreSQL, legacy GridFS, or fallback path.
             tile.mousePressEvent = lambda event, d=dict(img): self.open_image_popup(d)
 
             grid.addWidget(tile, idx // 4, idx % 4)
@@ -648,7 +648,7 @@ class ActionCodePlanPage(QWidget):
             QMessageBox.warning(
                 self,
                 "Image Load Failed",
-                "Could not load OSC reference image from MongoDB/GridFS."
+                "Could not load OSC reference image from PostgreSQL or the legacy fallback."
             )
             return
 
