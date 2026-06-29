@@ -120,9 +120,9 @@ def get_tyre_details_collection():
 def get_inspection_repository():
     """Return the singleton PostgreSQL inspection repository.
 
-    Inspection metadata is stored in PostgreSQL from Phase 3 onward. The
-    existing MongoDB database is passed only to the GridFS image store so input
-    and output image preview remains backward compatible until Phase 4.
+    Inspection metadata and new image binaries are stored in PostgreSQL.
+    The existing MongoDB database remains available only for historical
+    GridFS image fallback during the Phase 4 transition.
     """
     global _inspection_repository
     if _inspection_repository is None:
@@ -143,12 +143,12 @@ def ensure_inspection_indexes():
 
 
 def get_inspection_outbox():
-    """Return the durable local queue used when PostgreSQL/GridFS is unavailable."""
+    """Return the durable local queue used when PostgreSQL is unavailable."""
     return get_inspection_repository().get_outbox()
 
 
 def get_inspection_sync_service():
-    """Return the singleton automatic PostgreSQL/GridFS recovery service."""
+    """Return the singleton automatic PostgreSQL recovery service."""
     global _inspection_sync_service
     if _inspection_sync_service is None:
         with _inspection_sync_service_lock:
@@ -419,53 +419,81 @@ def save_new_sku_image(
     sku_meta: Optional[Dict[str, Any]] = None,
     meta_collection: Optional[str] = None,
     gridfs_bucket: Optional[str] = None,
-) -> ObjectId:
-    sku_meta = sku_meta or {}
-    meta_collection = meta_collection or NEW_SKU_META_COLLECTION
-    gridfs_bucket = gridfs_bucket or GRIDFS_BUCKET
+) -> str:
+    """Store one New SKU image in PostgreSQL chunked binary tables.
 
-    ensure_collection(meta_collection)
+    ``meta_collection`` and ``gridfs_bucket`` are retained only for call-site
+    compatibility. New writes no longer use MongoDB GridFS.
+    """
+    import mimetypes
 
-    fs = get_gridfs(bucket=gridfs_bucket)
-    meta_col = get_collection(meta_collection)
+    from src.COMMON.postgres import PostgreSQLAssetStore, get_postgres_manager
+    from src.COMMON.repositories.new_sku_image_repository import (
+        NewSKUImageRepository,
+    )
 
-    file_name = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path)
+    del meta_collection, gridfs_bucket
+    metadata = dict(sku_meta or {})
+    sku_name = str(metadata.get("sku_name") or "UNKNOWN_SKU").strip()
+    camera_serial = str(metadata.get("camera_serial") or label or "").strip() or None
+    raw_index = metadata.get("capture_index")
+    try:
+        capture_index = int(raw_index) if raw_index not in (None, "") else None
+    except (TypeError, ValueError):
+        capture_index = None
 
-    ext = os.path.splitext(file_name)[1].lower()
-    content_type = "image/jpeg" if ext in [".jpg", ".jpeg"] else "image/png"
+    manager = get_postgres_manager()
+    assets = PostgreSQLAssetStore(manager)
+    images = NewSKUImageRepository(manager)
+    existing = images.get(capture_id, camera_serial, capture_index)
+    old_asset_id = existing.get("asset_id") if existing else None
 
-    with open(file_path, "rb") as f:
-        file_id = fs.put(
-            f,
-            filename=file_name,
-            contentType=content_type,
-            metadata={
+    content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    file_stat = os.stat(file_path)
+    asset = assets.store_path(
+        file_path,
+        asset_type="NEW_SKU_IMAGE",
+        content_type=content_type,
+        metadata={
+            **metadata,
+            "capture_id": capture_id,
+            "label": label,
+            "camera_serial": camera_serial,
+            "capture_index": capture_index,
+        },
+        source_backend="APOLLO_NEW_SKU_LOCAL",
+        source_id=(
+            f"{capture_id}:{camera_serial or label}:{capture_index}:"
+            f"{file_stat.st_size}:{file_stat.st_mtime_ns}"
+        ),
+    )
+    images.upsert(
+        sku_name=sku_name,
+        capture_id=capture_id,
+        camera_serial=camera_serial,
+        capture_index=capture_index,
+        save_group=metadata.get("save_group"),
+        label=label,
+        asset_id=asset["id"],
+        metadata={**metadata, "filename": os.path.basename(file_path)},
+    )
+    if old_asset_id and str(old_asset_id) != str(asset["id"]):
+        assets.delete_if_unreferenced(old_asset_id)
+
+    logger.info(
+        "New SKU image persisted to PostgreSQL assets",
+        extra={
+            "event_code": "NEW_SKU_ASSET_STORED",
+            "sku_name": sku_name,
+            "details": {
                 "capture_id": capture_id,
-                "label": label,
-                "sku_meta": sku_meta,
-                "source_file_path": file_path,
-                "file_size": file_size,
-                "created_at": datetime.utcnow(),
+                "camera_serial": camera_serial,
+                "capture_index": capture_index,
+                "asset_id": str(asset["id"]),
             },
-        )
-
-    meta_doc = {
-        "type": "image_meta",
-        "capture_id": capture_id,
-        "label": label,
-        "file_name": file_name,
-        "file_path": file_path,
-        "file_size": file_size,
-        "status": "stored",
-        "created_at": datetime.utcnow(),
-        "sku_meta": sku_meta,
-        "gridfs_bucket": gridfs_bucket,
-        "gridfs_file_id": file_id,
-    }
-    meta_col.insert_one(meta_doc)
-
-    return file_id
+        },
+    )
+    return str(asset["id"])
 
 
 # =========================

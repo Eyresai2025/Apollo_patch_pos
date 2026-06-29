@@ -1,10 +1,8 @@
-"""PostgreSQL foundation for the Apollo VIT application.
+"""PostgreSQL services used by the Apollo VIT application."""
 
-Phase 1 keeps the existing MongoDB implementation untouched and exposes a
-parallel PostgreSQL connection/migration layer. Business repositories are
-added in later migration phases.
-"""
-
+# Import the connection/settings foundation first. Repository modules import
+# these names from ``src.COMMON.postgres``; exposing them before importing the
+# asset store prevents partially-initialized-module errors.
 from .connection import (
     PostgreSQLConnectionManager,
     close_postgres,
@@ -12,8 +10,10 @@ from .connection import (
     reset_postgres_manager,
 )
 from .settings import PostgreSQLSettings, get_postgres_settings
+from .asset_store import PostgreSQLAssetStore
 
 __all__ = [
+    "PostgreSQLAssetStore",
     "PostgreSQLConnectionManager",
     "PostgreSQLSettings",
     "close_postgres",

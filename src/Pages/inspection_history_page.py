@@ -151,7 +151,7 @@ class InspectionHistoryPage(QWidget):
         title_box = QVBoxLayout()
         title = QLabel("Inspection History & Traceability")
         title.setObjectName("pageTitle")
-        subtitle_text = "PostgreSQL cycle history, five-zone results and GridFS images"
+        subtitle_text = "PostgreSQL cycle history, five-zone results and binary images"
         if self.recent_days:
             subtitle_text += f" · Operator access is limited to the latest {self.recent_days} days"
         if self.maintenance_mode:
@@ -239,7 +239,7 @@ class InspectionHistoryPage(QWidget):
         self.offline_combo = QComboBox()
         self.offline_combo.addItem("All storage", "ALL")
         self.offline_combo.addItem("Offline recovered", "RECOVERED")
-        self.offline_combo.addItem("Direct MongoDB", "DIRECT")
+        self.offline_combo.addItem("Direct PostgreSQL", "DIRECT")
         self.defect_edit = QLineEdit()
         self.defect_edit.setPlaceholderText("Defect type/name")
 
@@ -373,7 +373,7 @@ class InspectionHistoryPage(QWidget):
         self.image_status = QLabel("Images are loaded only when requested.")
         self.image_status.setObjectName("pageSubtitle")
         image_layout.addWidget(self.image_status)
-        image_tab_index = self.tabs.addTab(image_tab, "GridFS Images")
+        image_tab_index = self.tabs.addTab(image_tab, "Images")
         if self.maintenance_mode:
             self.tabs.setTabEnabled(image_tab_index, False)
             self.tabs.setTabToolTip(image_tab_index, "Image access is hidden for the Maintenance role.")

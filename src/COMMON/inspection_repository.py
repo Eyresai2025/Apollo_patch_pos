@@ -2,9 +2,9 @@ from __future__ import annotations
 
 """PostgreSQL-backed Apollo inspection repository.
 
-Phase 3 moves inspection-cycle metadata and traceability to PostgreSQL while
-keeping the existing MongoDB GridFS image buckets unchanged. A durable SQLite
-outbox remains available when PostgreSQL or GridFS cannot be reached.
+Phase 4A stores inspection metadata and image binaries in PostgreSQL. Existing
+MongoDB GridFS content remains available as a read fallback for historical
+records. A durable SQLite outbox remains available when PostgreSQL is unavailable.
 """
 
 import threading
@@ -47,8 +47,8 @@ class InspectionRepository:
         self._outbox_lock = threading.Lock()
         self._sync_wakeup: Optional[Callable[[], None]] = None
         self.image_store = (
-            InspectionImageStore(image_database)
-            if image_database is not None and self.config.gridfs_enabled
+            InspectionImageStore(self.manager)
+            if self.config.gridfs_enabled
             else None
         )
 
@@ -76,11 +76,7 @@ class InspectionRepository:
             return []
 
     def ensure_indexes(self) -> Dict[str, Any]:
-        """Validate Phase 3 tables and ensure MongoDB GridFS indexes.
-
-        PostgreSQL indexes are created by numbered SQL migrations. Only the
-        existing GridFS metadata indexes need runtime checking.
-        """
+        """Validate PostgreSQL inspection metadata and binary-asset tables."""
         if self._indexes_ready:
             return {
                 "created": [],
@@ -110,7 +106,7 @@ class InspectionRepository:
             )
             self._indexes_ready = True
             logger.info(
-                "Inspection PostgreSQL schema and GridFS indexes checked",
+                "Inspection PostgreSQL schema and asset tables checked",
                 extra={
                     "event_code": "INSPECTION_INDEXES_READY",
                     "details": {
@@ -256,11 +252,6 @@ class InspectionRepository:
         if should_store_images and self.image_store is not None:
             try:
                 image_refs = self.image_store.store_cycle_images(result)
-            except PyMongoError:
-                # GridFS remains part of the completed-cycle write in Phase 3.
-                # Queue the complete payload so image and metadata recovery stay
-                # coordinated.
-                raise
             except Exception as exc:
                 image_refs = {
                     "enabled": True,
@@ -272,10 +263,10 @@ class InspectionRepository:
                     "outputs": {},
                 }
                 logger.exception(
-                    "Inspection GridFS persistence failed; PostgreSQL metadata will still be saved",
+                    "Inspection PostgreSQL asset persistence failed; metadata will still be saved",
                     extra={
-                        "event_code": "INSPECTION_GRIDFS_FAILED",
-                        "error_code": "DB-GRIDFS-001",
+                        "event_code": "INSPECTION_ASSET_STORE_FAILED",
+                        "error_code": "DB-ASSET-001",
                         "cycle_id": result.get("cycle_id"),
                         "tyre_id": result.get("tyre_name"),
                         "sku_name": result.get("sku_name"),
@@ -311,11 +302,22 @@ class InspectionRepository:
             event_status="SYNCED" if recovered_from_outbox else "SUCCESS",
             event_data={
                 "recovered_from_outbox": bool(recovered_from_outbox),
-                "gridfs_input_count": int(image_refs.get("input_count", 0) or 0),
-                "gridfs_output_count": int(image_refs.get("output_count", 0) or 0),
-                "gridfs_failed_count": int(image_refs.get("failed_count", 0) or 0),
+                "asset_input_count": int(image_refs.get("input_count", 0) or 0),
+                "asset_output_count": int(image_refs.get("output_count", 0) or 0),
+                "asset_failed_count": int(image_refs.get("failed_count", 0) or 0),
             },
         )
+        if image_refs and self.image_store is not None:
+            link_result = self.image_store.link_cycle_images(cycle_uid, image_refs)
+            if link_result.get("errors"):
+                logger.warning(
+                    "Some PostgreSQL inspection image mappings could not be linked",
+                    extra={
+                        "event_code": "INSPECTION_ASSET_LINK_PARTIAL",
+                        "cycle_id": cycle_id,
+                        "details": link_result,
+                    },
+                )
 
         database_time_ms = round((time.perf_counter() - started) * 1000.0, 3)
         try:
@@ -363,9 +365,9 @@ class InspectionRepository:
                     "document_revision": response["document_revision"],
                     "lifecycle_status": lifecycle_status,
                     "recovered_from_outbox": bool(recovered_from_outbox),
-                    "gridfs_input_count": response["image_storage"]["input_count"],
-                    "gridfs_output_count": response["image_storage"]["output_count"],
-                    "gridfs_failed_count": response["image_storage"]["failed_count"],
+                    "asset_input_count": response["image_storage"]["input_count"],
+                    "asset_output_count": response["image_storage"]["output_count"],
+                    "asset_failed_count": response["image_storage"]["failed_count"],
                 },
             },
         )

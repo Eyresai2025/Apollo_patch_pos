@@ -230,6 +230,8 @@ def _build_zone_result(
             "input_image": {
                 "filename": input_ref.get("image_name") or (os.path.basename(input_path) if input_path else None),
                 "local_path": input_path if get_config().inspection.gridfs_keep_local_paths else None,
+                "asset_id": input_ref.get("asset_id"),
+                "storage_backend": input_ref.get("storage_backend"),
                 "gridfs_id": input_ref.get("gridfs_file_id"),
                 "gridfs_bucket": input_ref.get("gridfs_bucket"),
                 "status": input_ref.get("status"),
@@ -237,6 +239,8 @@ def _build_zone_result(
             "output_image": {
                 "filename": output_ref.get("image_name"),
                 "local_path": output_ref.get("original_path") if get_config().inspection.gridfs_keep_local_paths else None,
+                "asset_id": output_ref.get("asset_id"),
+                "storage_backend": output_ref.get("storage_backend"),
                 "gridfs_id": output_ref.get("gridfs_file_id"),
                 "gridfs_bucket": output_ref.get("gridfs_bucket"),
                 "status": output_ref.get("status"),
@@ -280,6 +284,8 @@ def _build_zone_result(
         "input_image": {
             "filename": input_ref.get("image_name") or (os.path.basename(input_path) if input_path else None),
             "local_path": input_path if get_config().inspection.gridfs_keep_local_paths else None,
+            "asset_id": input_ref.get("asset_id"),
+            "storage_backend": input_ref.get("storage_backend"),
             "gridfs_id": input_ref.get("gridfs_file_id"),
             "gridfs_bucket": input_ref.get("gridfs_bucket"),
             "status": input_ref.get("status"),
@@ -287,6 +293,8 @@ def _build_zone_result(
         "output_image": {
             "filename": output_ref.get("image_name") or (os.path.basename(output_path) if output_path else None),
             "local_path": (output_ref.get("original_path") or output_path) if get_config().inspection.gridfs_keep_local_paths else None,
+            "asset_id": output_ref.get("asset_id"),
+            "storage_backend": output_ref.get("storage_backend"),
             "gridfs_id": output_ref.get("gridfs_file_id"),
             "gridfs_bucket": output_ref.get("gridfs_bucket"),
             "status": output_ref.get("status"),
@@ -424,11 +432,15 @@ def build_inspection_document(
         zone_results[zone] = zone_doc
         images[zone] = {
             "input_filename": zone_doc["input_image"]["filename"],
+            "input_asset_id": zone_doc["input_image"].get("asset_id"),
+            "input_storage_backend": zone_doc["input_image"].get("storage_backend"),
             "input_local_path": zone_doc["input_image"]["local_path"],
             "input_gridfs_id": zone_doc["input_image"]["gridfs_id"],
             "input_gridfs_bucket": zone_doc["input_image"].get("gridfs_bucket"),
             "input_status": zone_doc["input_image"].get("status"),
             "output_filename": zone_doc["output_image"]["filename"],
+            "output_asset_id": zone_doc["output_image"].get("asset_id"),
+            "output_storage_backend": zone_doc["output_image"].get("storage_backend"),
             "output_local_path": zone_doc["output_image"]["local_path"],
             "output_gridfs_id": zone_doc["output_image"]["gridfs_id"],
             "output_gridfs_bucket": zone_doc["output_image"].get("gridfs_bucket"),
@@ -493,22 +505,38 @@ def build_inspection_document(
         "plc": _plc_document(plc_status, normalized_final),
         "action_decision": action_decision,
         "image_storage": {
+            "backend": image_refs.get("backend") or "POSTGRESQL_CHUNKED",
             "input_metadata_id": image_refs.get("input_metadata_id"),
             "output_metadata_id": image_refs.get("output_metadata_id"),
             "input_bucket": image_refs.get("input_bucket"),
             "output_bucket": image_refs.get("output_bucket"),
         },
         "storage_status": {
-            "mongo_saved": True,
-            "images_saved": any(bool(value.get("input_local_path")) for value in images.values()),
+            "mongo_saved": any(
+                bool(value.get("input_gridfs_id") or value.get("output_gridfs_id"))
+                for value in images.values()
+            ),
+            "images_saved": any(
+                bool(value.get("input_local_path") or value.get("input_asset_id") or value.get("output_asset_id"))
+                for value in images.values()
+            ),
+            "asset_linked": any(
+                bool(value.get("input_asset_id") or value.get("output_asset_id"))
+                for value in images.values()
+            ),
+            "asset_input_count": int(image_refs.get("input_count", 0) or 0),
+            "asset_output_count": int(image_refs.get("output_count", 0) or 0),
+            "asset_failed_count": int(image_refs.get("failed_count", 0) or 0),
+            "asset_errors": mongo_safe(image_refs.get("errors") or []),
+            "image_backend": image_refs.get("backend") or "POSTGRESQL_CHUNKED",
             "gridfs_linked": any(
                 bool(value.get("input_gridfs_id") or value.get("output_gridfs_id"))
                 for value in images.values()
             ),
-            "gridfs_input_count": int(image_refs.get("input_count", 0) or 0),
-            "gridfs_output_count": int(image_refs.get("output_count", 0) or 0),
-            "gridfs_failed_count": int(image_refs.get("failed_count", 0) or 0),
-            "gridfs_errors": mongo_safe(image_refs.get("errors") or []),
+            "gridfs_input_count": 0,
+            "gridfs_output_count": 0,
+            "gridfs_failed_count": 0,
+            "gridfs_errors": [],
             "offline_recovered": False,
         },
         "updated_at": now_utc,

@@ -173,6 +173,10 @@ class InspectionCycleRepository:
             "gridfs_input_count": max(0, self._int(storage.get("gridfs_input_count"), 0)),
             "gridfs_output_count": max(0, self._int(storage.get("gridfs_output_count"), 0)),
             "gridfs_failed_count": max(0, self._int(storage.get("gridfs_failed_count"), 0)),
+            "asset_linked": bool(storage.get("asset_linked", False)),
+            "asset_input_count": max(0, self._int(storage.get("asset_input_count"), 0)),
+            "asset_output_count": max(0, self._int(storage.get("asset_output_count"), 0)),
+            "asset_failed_count": max(0, self._int(storage.get("asset_failed_count"), 0)),
             "inspection_document": normalized_document,
         }
 
@@ -198,6 +202,7 @@ class InspectionCycleRepository:
                 plc_sent, plc_display, lifecycle_status, schema_version,
                 storage_status, offline_recovered, gridfs_linked,
                 gridfs_input_count, gridfs_output_count, gridfs_failed_count,
+                asset_linked, asset_input_count, asset_output_count, asset_failed_count,
                 inspection_document
             )
             VALUES (
@@ -210,6 +215,7 @@ class InspectionCycleRepository:
                 %(plc_sent)s, %(plc_display)s, %(lifecycle_status)s, %(schema_version)s,
                 %(storage_status)s, %(offline_recovered)s, %(gridfs_linked)s,
                 %(gridfs_input_count)s, %(gridfs_output_count)s, %(gridfs_failed_count)s,
+                %(asset_linked)s, %(asset_input_count)s, %(asset_output_count)s, %(asset_failed_count)s,
                 %(inspection_document)s
             )
             ON CONFLICT (cycle_uid) DO UPDATE SET
@@ -236,6 +242,10 @@ class InspectionCycleRepository:
                 gridfs_input_count = EXCLUDED.gridfs_input_count,
                 gridfs_output_count = EXCLUDED.gridfs_output_count,
                 gridfs_failed_count = EXCLUDED.gridfs_failed_count,
+                asset_linked = EXCLUDED.asset_linked,
+                asset_input_count = EXCLUDED.asset_input_count,
+                asset_output_count = EXCLUDED.asset_output_count,
+                asset_failed_count = EXCLUDED.asset_failed_count,
                 inspection_document = EXCLUDED.inspection_document,
                 document_revision = existing.document_revision + 1
             RETURNING id, cycle_uid, cycle_id, document_revision,

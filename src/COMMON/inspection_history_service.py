@@ -2,9 +2,8 @@ from __future__ import annotations
 
 """Read-only PostgreSQL inspection-history and traceability service.
 
-Phase 3 reads inspection metadata from PostgreSQL. Existing input/output image
-binaries remain in MongoDB GridFS and are resolved using the IDs retained in
-the inspection_document JSONB payload.
+Phase 4A reads inspection metadata and new image binaries from PostgreSQL.
+Existing MongoDB GridFS IDs remain supported as a historical fallback.
 """
 
 from datetime import date, datetime, timedelta
@@ -17,7 +16,8 @@ from psycopg import sql
 
 from src.COMMON.config import get_config
 from src.COMMON.db import get_db
-from src.COMMON.postgres import PostgreSQLConnectionManager, get_postgres_manager
+from src.COMMON.postgres import PostgreSQLAssetStore, PostgreSQLConnectionManager, get_postgres_manager
+from src.COMMON.repositories.inspection_image_repository import InspectionImageRepository
 from src.COMMON.repositories.json_utils import json_safe
 from src.COMMON.structured_logging import get_logger
 
@@ -60,7 +60,7 @@ def normalize_result(value: Any) -> str:
 
 
 class InspectionHistoryService:
-    """Paginated read-only access to PostgreSQL metadata and GridFS images."""
+    """Paginated access to PostgreSQL metadata/assets with GridFS fallback."""
 
     def __init__(
         self,
@@ -73,6 +73,8 @@ class InspectionHistoryService:
         self.schema = self.db.settings.schema
         self.config = get_config().inspection
         self.enable_image_read = bool(enable_image_read)
+        self.asset_store = PostgreSQLAssetStore(self.db)
+        self.image_repository = InspectionImageRepository(self.db)
         self.image_database = (
             image_database
             if image_database is not None
@@ -447,11 +449,18 @@ class InspectionHistoryService:
         zone_result = zone_results.get(zone) if isinstance(zone_results.get(zone), Mapping) else {}
         result_image = zone_result.get(f"{image_type}_image") if isinstance(zone_result.get(f"{image_type}_image"), Mapping) else {}
 
+        asset_id = zone_images.get(f"{image_type}_asset_id") or result_image.get("asset_id")
+        storage_backend = (
+            zone_images.get(f"{image_type}_storage_backend")
+            or result_image.get("storage_backend")
+        )
         file_id = zone_images.get(f"{image_type}_gridfs_id") or result_image.get("gridfs_id")
         bucket = zone_images.get(f"{image_type}_gridfs_bucket") or result_image.get("gridfs_bucket")
         local_path = zone_images.get(f"{image_type}_local_path") or result_image.get("local_path")
         filename = zone_images.get(f"{image_type}_filename") or result_image.get("filename")
         return {
+            "asset_id": asset_id,
+            "storage_backend": storage_backend,
             "file_id": file_id,
             "bucket": bucket,
             "local_path": local_path,
@@ -461,6 +470,37 @@ class InspectionHistoryService:
 
     def read_image(self, document: Mapping[str, Any], zone: str, image_type: str) -> Dict[str, Any]:
         reference = self.get_image_reference(document, zone, image_type)
+        cycle_uid = str(document.get("cycle_uid") or document.get("cycle_id") or "")
+
+        # PostgreSQL child-table mapping is authoritative for Phase 4A. This
+        # also lets migrated historical documents work without rewriting every
+        # nested JSONB image reference.
+        if not reference.get("asset_id") and cycle_uid:
+            mapping = self.image_repository.get(cycle_uid, zone, image_type)
+            if mapping:
+                reference["asset_id"] = mapping.get("asset_id")
+                reference["storage_backend"] = "POSTGRESQL_CHUNKED"
+                metadata = mapping.get("metadata") if isinstance(mapping.get("metadata"), Mapping) else {}
+                reference["filename"] = reference.get("filename") or metadata.get("filename") or metadata.get("image_name")
+                reference["status"] = mapping.get("image_status") or reference.get("status")
+
+        asset_id = reference.get("asset_id")
+        if asset_id and self.enable_image_read:
+            try:
+                payload = self.asset_store.read_bytes(asset_id)
+                return {
+                    **reference,
+                    "available": True,
+                    "source": "POSTGRESQL",
+                    "data": payload["data"],
+                    "filename": payload.get("filename") or reference.get("filename"),
+                    "content_type": payload.get("content_type"),
+                    "checksum_sha256": payload.get("checksum_sha256"),
+                }
+            except Exception as exc:
+                reference["postgres_asset_error"] = str(exc)
+
+        # Historical fallback until all legacy GridFS files are migrated.
         file_id = reference.get("file_id")
         bucket = reference.get("bucket") or (
             self.config.input_gridfs_bucket if image_type == "input" else self.config.output_gridfs_bucket
