@@ -133,14 +133,14 @@ class InspectionSyncService:
                     self.outbox.mark_synced(record["id"])
                     synced += 1
                     logger.info(
-                        "Offline inspection synchronized to MongoDB",
+                        "Offline inspection synchronized to PostgreSQL",
                         extra={
                             "event_code": "INSPECTION_OUTBOX_SYNCED",
                             "cycle_id": record.get("cycle_id"),
                             "status": "SYNCED",
                             "details": {
                                 "cycle_uid": record.get("cycle_uid"),
-                                "mongo_status": response.get("status"),
+                                "postgres_status": response.get("status"),
                                 "retry_count": int(record.get("retry_count", 0)) + 1,
                             },
                         },
@@ -170,7 +170,7 @@ class InspectionSyncService:
                             },
                         },
                     )
-                    # A MongoDB outage normally affects the whole batch. Stop here
+                    # A PostgreSQL/GridFS outage normally affects the whole batch. Stop here
                     # and retry later instead of waiting through the connection
                     # timeout once for every queued cycle.
                     break

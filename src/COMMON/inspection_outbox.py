@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Durable local outbox for inspection records that could not reach MongoDB.
+"""Durable local outbox for inspection records that could not reach PostgreSQL/GridFS.
 
-MongoDB remains the permanent system of record. SQLite is used only as a
+PostgreSQL is the permanent metadata store in Phase 3. SQLite is used only as a
 small local queue for failed inspection writes and is automatically replayed
-when MongoDB becomes available again.
+when PostgreSQL/GridFS becomes available again.
 """
 
 import json

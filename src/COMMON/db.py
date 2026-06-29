@@ -118,16 +118,22 @@ def get_tyre_details_collection():
 
 
 def get_inspection_repository():
-    """Return the singleton schema-versioned TYRE DETAILS repository."""
+    """Return the singleton PostgreSQL inspection repository.
+
+    Inspection metadata is stored in PostgreSQL from Phase 3 onward. The
+    existing MongoDB database is passed only to the GridFS image store so input
+    and output image preview remains backward compatible until Phase 4.
+    """
     global _inspection_repository
     if _inspection_repository is None:
         with _inspection_repository_lock:
             if _inspection_repository is None:
                 from src.COMMON.inspection_repository import InspectionRepository
+                from src.COMMON.postgres import get_postgres_manager
 
                 _inspection_repository = InspectionRepository(
-                    get_tyre_details_collection(),
-                    database=get_db(),
+                    get_postgres_manager(),
+                    image_database=get_db(),
                 )
     return _inspection_repository
 
@@ -137,12 +143,12 @@ def ensure_inspection_indexes():
 
 
 def get_inspection_outbox():
-    """Return the durable local queue used only when MongoDB is unavailable."""
+    """Return the durable local queue used when PostgreSQL/GridFS is unavailable."""
     return get_inspection_repository().get_outbox()
 
 
 def get_inspection_sync_service():
-    """Return the singleton automatic MongoDB recovery service."""
+    """Return the singleton automatic PostgreSQL/GridFS recovery service."""
     global _inspection_sync_service
     if _inspection_sync_service is None:
         with _inspection_sync_service_lock:
@@ -352,7 +358,7 @@ def db_to_images(cycle, db, download_loc, date):
             print(f"Image with filename '{file}' not found.")
 
 # =========================
-# CYCLE METADATA IN MONGODB
+# CYCLE METADATA IN POSTGRESQL
 # =========================
 def _extract_cycle_no(cycle_id: str) -> str:
     try:
@@ -370,6 +376,11 @@ def _count_defect_sides(side_results: dict) -> int:
     return count
 
 
+def count_inspection_cycles_for_date(value=None) -> int:
+    """Return the PostgreSQL inspection count for one date."""
+    return get_inspection_repository().count_for_date(value)
+
+
 def save_cycle_metadata(
     result: dict,
     *,
@@ -380,10 +391,12 @@ def save_cycle_metadata(
     lifecycle_status: str = "AI_COMPLETED",
     store_images: Optional[bool] = None,
 ):
-    """Upsert one inspection cycle into the existing TYRE DETAILS collection.
+    """Upsert one inspection cycle into PostgreSQL.
 
-    Existing fields remain available while schema V2 fields are added. Calling
-    this function more than once for the same cycle updates the same document.
+    The full schema-versioned document is stored in JSONB while important
+    fields remain available as relational columns. Calling this function more
+    than once for the same cycle updates the same row and increments its
+    document revision.
     """
     return get_inspection_repository().save_cycle(
         result,

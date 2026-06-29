@@ -20,6 +20,7 @@ from PyQt5.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
 from src.COMMON.db import (
     get_db,
     save_cycle_metadata,
+    count_inspection_cycles_for_date,
     get_inspection_sync_service,
     get_alarm_service,
 )
@@ -163,7 +164,6 @@ logger.info(
 
 # MongoDB Connections
 mydb = get_db()
-tyre_details_col = mydb["TYRE DETAILS"]
 new_sku_col = mydb["New SKU"]
 repeatability_col = mydb["Repeatability"]
 accounts_col = mydb["Accounts"]
@@ -611,23 +611,13 @@ class MainWindow(QMainWindow):
 
 
     def update_label_async(self):
-        """
-        Count today's inspected tyres from MongoDB and update sidebar safely.
-        """
+        """Count today's PostgreSQL inspection rows without blocking Qt."""
 
         def worker():
             try:
-                currentdate = datetime.now().strftime("%d-%m-%Y")
-
-                cnt = tyre_details_col.count_documents(
-                    {"inspectionDate": currentdate},
-                    maxTimeMS=3000
-                )
-
-                # logger.info(f"[TYRE COUNT] date={currentdate} count={cnt}")
-
+                cnt = count_inspection_cycles_for_date(datetime.now().date())
             except Exception as e:
-                logger.warning(f"MongoDB count unavailable: {e}")
+                logger.warning(f"PostgreSQL inspection count unavailable: {e}")
                 cnt = 0
 
             self.tyre_count_ready.emit(int(cnt))

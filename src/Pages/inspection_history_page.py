@@ -151,7 +151,7 @@ class InspectionHistoryPage(QWidget):
         title_box = QVBoxLayout()
         title = QLabel("Inspection History & Traceability")
         title.setObjectName("pageTitle")
-        subtitle_text = "MongoDB cycle history, five-zone results and GridFS images"
+        subtitle_text = "PostgreSQL cycle history, five-zone results and GridFS images"
         if self.recent_days:
             subtitle_text += f" · Operator access is limited to the latest {self.recent_days} days"
         if self.maintenance_mode:
