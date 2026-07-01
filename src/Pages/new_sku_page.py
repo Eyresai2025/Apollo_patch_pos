@@ -19,7 +19,7 @@ from src.COMMON.common import load_env
 from src.COMMON.db import save_new_sku_image
 from src.COMMON.recipe_service import RecipeService
 from src.models.template_extracter import TemplateExtractorPage
-from src.models.feature_threshold.threshold_page import FeatureThresholdPage
+from src.models.feature_thresh.threshold_page import FeatureThresholdPage
 
 try:
     from src.camera.new_sku_software_capture import capture_new_sku_images # type: ignore

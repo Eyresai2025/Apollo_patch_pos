@@ -40,7 +40,7 @@ import numpy as np
 
 from src.COMMON.config import get_config
 from src.COMMON.structured_logging import get_logger
-from src.models.feature_threshold.config import (
+from src.models.feature_thresh.config import (
     COVER_COMPLETE_IMAGE,
     IMAGE_BATCH_SIZE,
     PATCH_HEIGHT,
@@ -50,7 +50,7 @@ from src.models.feature_threshold.config import (
     RESIZED_R_HEIGHT,
     RESIZED_R_WIDTH,
 )
-from src.models.feature_threshold.patch_generator import patchify_index_grouped
+from src.models.feature_thresh.patch_generator import patchify_index_grouped
 
 logger = get_logger(__name__, component="PATCHCORE")
 
@@ -621,8 +621,8 @@ class PatchCoreSideRuntime:
 
         # Heavy imports and model construction happen only when the operator has
         # selected a SKU and Start Live begins the preload step.
-        from src.models.feature_threshold.patchcore_scorer import PatchCoreScorer
-        from src.models.feature_threshold import r_crop_utils
+        from src.models.feature_thresh.patchcore_scorer import PatchCoreScorer
+        from src.models.feature_thresh import r_crop_utils
 
         self._rc = r_crop_utils
         self.scorer = PatchCoreScorer(
