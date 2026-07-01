@@ -4,3 +4,4 @@ Output
 new_sku_images
 feature_threshold
 logs
+__pycache__
