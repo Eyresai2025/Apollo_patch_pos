@@ -53,7 +53,7 @@ def main() -> int:
 
         mode = "EXECUTE" if args.execute else "DRY-RUN"
         print("=" * 72)
-        print("Apollo VIT - MongoDB Inspection Metadata Migration")
+        print("Apollo Tyre Inspection - MongoDB Inspection Metadata Migration")
         print("=" * 72)
         print(f"Mode              : {mode}")
         print(f"Mongo collection  : {config.inspection.collection_name}")

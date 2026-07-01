@@ -1,4 +1,4 @@
--- Apollo VIT PostgreSQL Phase 3: inspection-cycle metadata and traceability.
+-- Apollo Tyre Inspection PostgreSQL Phase 3: inspection-cycle metadata and traceability.
 -- Actual inspection image binaries remain in the existing MongoDB GridFS
 -- buckets during this phase. The GridFS references are retained inside the
 -- inspection_document JSONB payload.
@@ -107,7 +107,7 @@ INSERT INTO {{schema}}.application_settings (
 VALUES (
     'postgres_phase',
     '{"phase": 3, "status": "inspection_metadata_ready", "image_backend": "mongodb_gridfs"}'::jsonb,
-    'Tracks the active PostgreSQL migration phase for Apollo VIT.'
+    'Tracks the active PostgreSQL migration phase for Apollo Tyre Inspection.'
 )
 ON CONFLICT (setting_key) DO UPDATE SET
     setting_value = EXCLUDED.setting_value,

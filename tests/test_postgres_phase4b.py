@@ -152,7 +152,7 @@ class PostgreSQLPhase4BIntegrationTest(unittest.TestCase):
             str(self.model_path),
             model_name=f"MODEL_{self.token}",
             model_version="1.0",
-            model_type="VIT_AUTOENCODER",
+            model_type="GENERIC_MODEL",
             framework="PYTORCH",
             sku_name=f"SKU_{self.token}",
             zone="sidewall1",

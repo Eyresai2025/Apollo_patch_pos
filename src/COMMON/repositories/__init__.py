@@ -1,4 +1,4 @@
-"""PostgreSQL business repositories used by Apollo VIT."""
+"""PostgreSQL business repositories used by Apollo Tyre Inspection."""
 
 from .action_catalog_repository import ActionCatalogRepository
 from .ai_model_repository import AIModelRepository

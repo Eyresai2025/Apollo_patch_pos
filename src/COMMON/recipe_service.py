@@ -430,9 +430,6 @@ class RecipeService:
         laser_axis_targets: Optional[Dict[str, Any]] = None,
         camera_config_links: Optional[Dict[str, Any]] = None,
         laser_config_links: Optional[Dict[str, Any]] = None,
-        vit_model_path: str = "",
-        training_summary: Optional[Dict[str, Any]] = None,
-        validation_result: Optional[Dict[str, Any]] = None,
         author: str = "operator",
         recipe_axis_targets: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -447,9 +444,6 @@ class RecipeService:
 
         next_version = self.get_next_version(sku_name)
 
-        validation_result = validation_result or {}
-        training_summary = training_summary or {}
-
         camera_axis_targets = camera_axis_targets or {}
         laser_axis_targets = laser_axis_targets or {}
         recipe_axis_targets = recipe_axis_targets or {}
@@ -459,7 +453,7 @@ class RecipeService:
             "sku_name": sku_name,
             "sku_folder": _safe_name(sku_name),
             "version": next_version,
-            "status": "DRAFT" if not validation_result.get("accepted") else "ACCEPTED",
+            "status": "DRAFT",
 
             "tyre_name": sku_meta.get("tyre_name", ""),
             "tyre_size": sku_meta.get("tyre_size", ""),
@@ -486,13 +480,6 @@ class RecipeService:
 
             "camera_config_links": camera_config_links or {},
             "laser_config_links": laser_config_links or {},
-
-            "vit_model_path": vit_model_path or "",
-            "training_date": training_summary.get("training_date", _now_iso()),
-            "training_summary": training_summary,
-
-            "validation_score": validation_result.get("f1_macro"),
-            "validation_result": validation_result,
 
             "created_at": _now_iso(),
             "updated_at": _now_iso(),

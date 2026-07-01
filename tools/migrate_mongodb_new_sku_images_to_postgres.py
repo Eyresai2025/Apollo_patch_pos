@@ -34,7 +34,7 @@ def main() -> int:
     migrated = failed = 0
     try:
         print("=" * 72)
-        print("Apollo VIT - MongoDB New SKU Image Migration")
+        print("Apollo Tyre Inspection - MongoDB New SKU Image Migration")
         print("=" * 72)
         print(f"Mode : {mode}")
         print(f"Rows : {len(docs)}")

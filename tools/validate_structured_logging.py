@@ -1,4 +1,4 @@
-"""Write and verify Apollo VIT structured log files without hardware."""
+"""Write and verify Apollo Tyre Inspection structured log files without hardware."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def main() -> int:
     shutdown_logging()
 
     print("=" * 78)
-    print("APOLLO VIT STRUCTURED LOGGING VALIDATION")
+    print("APOLLO TYRE INSPECTION STRUCTURED LOGGING VALIDATION")
     print("=" * 78)
     failures = []
     for kind in ("text", "json", "error"):

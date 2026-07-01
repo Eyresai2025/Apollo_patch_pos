@@ -9,7 +9,7 @@ from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent, QSize  # type:
 from PyQt5.QtGui import QPixmap  # type: ignore
 from PyQt5.QtWidgets import (  # type: ignore
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
-    QPushButton, QProgressBar, QMessageBox, QSizePolicy, QApplication,
+    QPushButton, QMessageBox, QSizePolicy, QApplication,
     QGridLayout, QScrollArea, QDialog, QStackedWidget,
     QFormLayout, QLineEdit, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView,QComboBox
@@ -18,13 +18,8 @@ from PyQt5.QtWidgets import (  # type: ignore
 from src.COMMON.common import load_env
 from src.COMMON.db import save_new_sku_image
 from src.COMMON.recipe_service import RecipeService
-from src.COMMON.model_validation_service import run_validation_for_sku
-from src.COMMON.ai_model_store import (
-    publish_registered_models,
-    register_training_summary_models,
-    update_registered_models_validation,
-)
-from src.training.central_vit_trainer import run_training_for_sku
+from src.models.template_extracter import TemplateExtractorPage
+from src.models.feature_threshold.threshold_page import FeatureThresholdPage
 
 try:
     from src.camera.new_sku_software_capture import capture_new_sku_images # type: ignore
@@ -37,13 +32,13 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 TAB_SKU_SETUP = 0
 TAB_AXIS_TEACHING = 1
 TAB_CAPTURE = 2
-TAB_TRAINING = 3
-TAB_VALIDATION = 4
+TAB_TEMPLATE_EXTRACTOR = 3
+TAB_FEATURE_THRESHOLD = 4
 TAB_SAVE_RECIPE = 5
 
 
 # =========================
-# CAMERA / TRAINING CONFIG
+# CAMERA CONFIG
 # =========================
 BASE_SRC_DIR = Path(__file__).resolve().parents[1]   # .../src
 PROJECT_ROOT = BASE_SRC_DIR.parent
@@ -60,18 +55,16 @@ CAMERA_ROLE_ORDER = [
 ]
 CAMERA_ROLE_ORDER = [item for item in CAMERA_ROLE_ORDER if item[2]]
 
-CAMERA_PIPELINE_MAP = {serial: role for role, title, serial in CAMERA_ROLE_ORDER}
 CAMERA_SERIAL_ORDER = [serial for role, title, serial in CAMERA_ROLE_ORDER]
-CAMERA_TITLE_MAP = {serial: title for role, title, serial in CAMERA_ROLE_ORDER}
-
-TRAINING_DIR = BASE_SRC_DIR / "training"
-VIT_TRAINING_ROOT = str(TRAINING_DIR / "VIT_Training")
-
-_PREFERRED_R_WEIGHTS = [
-    TRAINING_DIR / "best (1) 1.pt",
-    TRAINING_DIR / "R_Detection_185_70_R14_AMZ4G.pt",
-]
-YOLO_R_PATH = str(next((p for p in _PREFERRED_R_WEIGHTS if p.exists()), _PREFERRED_R_WEIGHTS[0]))
+CAMERA_SERIAL_MAP = {
+    role: serial
+    for role, _title, serial in CAMERA_ROLE_ORDER
+}
+SIDEWALL_SERIAL_MAP = {
+    role: serial
+    for role, serial in CAMERA_SERIAL_MAP.items()
+    if role in ("sidewall1", "sidewall2")
+}
 
 
 def _ensure_dir(path: str) -> str:
@@ -277,63 +270,23 @@ class AspectImageLabel(QLabel):
         self.setPixmap(scaled)
 
 
-class TrainingWorker(QThread):
-    status_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(dict)
-    error_signal = pyqtSignal(str)
 
-    def __init__(
-        self,
-        media_path: str,
-        sku_name: str,
-        serial_pipeline_map: dict,
-        vit_training_root: str,
-        yolo_r_path: str,
-        device: str = "cuda",
-        rebuild_dataset: bool = True,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.media_path = media_path
-        self.sku_name = sku_name
-        self.serial_pipeline_map = serial_pipeline_map
-        self.vit_training_root = vit_training_root
-        self.yolo_r_path = yolo_r_path
-        self.device = device
-        self.rebuild_dataset = rebuild_dataset
+class FlexibleStackedWidget(QStackedWidget):
+    """Stacked page container that does not enlarge the main window.
 
-    def run(self):
-        try:
-            summary = run_training_for_sku(
-                media_path=self.media_path,
-                sku_name=self.sku_name,
-                serial_pipeline_map=self.serial_pipeline_map,
-                vit_training_root=self.vit_training_root,
-                yolo_r_path=self.yolo_r_path,
-                device=self.device,
-                rebuild_dataset=self.rebuild_dataset,
-                logger=self.status_signal.emit,
-            )
-            summary = dict(summary or {})
-            try:
-                self.status_signal.emit("[MODEL-REGISTRY] Storing trained model binaries in PostgreSQL...")
-                summary["postgres_models"] = register_training_summary_models(
-                    self.sku_name,
-                    summary,
-                    created_by="new_sku_training",
-                )
-                self.status_signal.emit(
-                    f"[MODEL-REGISTRY] Registered {len(summary['postgres_models'])} model(s) in PostgreSQL"
-                )
-            except Exception as registry_error:
-                # Training remains successful. The operator can retry model registration
-                # after restoring the PostgreSQL connection.
-                summary["postgres_models"] = []
-                summary["postgres_model_registry_error"] = str(registry_error)
-                self.status_signal.emit(f"[MODEL-REGISTRY-WARN] {registry_error}")
-            self.finished_signal.emit(summary)
-        except Exception as e:
-            self.error_signal.emit(str(e))
+    QStackedWidget normally derives its size hint from the largest child page,
+    including hidden pages. The New SKU workflow contains several large forms,
+    so that default behaviour can push the Windows minimum track size beyond
+    the available desktop height. The parent layout should use the space that
+    is actually available and allow each page to lay itself out inside it.
+    """
+
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+    def sizeHint(self):
+        return QSize(0, 0)
+
 
 class CaptureWorker(QThread):
     status_signal = pyqtSignal(str)
@@ -395,6 +348,8 @@ class NewSKUPage(QWidget):
         parent=None,
     ):
         super().__init__(parent)
+        self.setMinimumSize(0, 0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.media_path = media_path
         self.raw_dir = raw_dir
@@ -413,14 +368,12 @@ class NewSKUPage(QWidget):
         self.img_labels: List[AspectImageLabel] = []
         self.status_lbl: Optional[QLabel] = None
         self.capture_btn: Optional[QPushButton] = None
-        self.training_btn: Optional[QPushButton] = None
+        self.template_btn: Optional[QPushButton] = None
         self.refresh_btn: Optional[QPushButton] = None
         self.close_btn: Optional[QPushButton] = None
 
         self.capture_in_progress = False
-        self.training_in_progress = False
         self.latest_preview_paths: Dict[str, str] = {}
-        self.training_worker: Optional[TrainingWorker] = None
         self.capture_worker: Optional[CaptureWorker] = None
         self.recipe_service = RecipeService(
             media_path=self.media_path,
@@ -430,9 +383,9 @@ class NewSKUPage(QWidget):
         self.saved_recipe_doc: Optional[Dict[str, Any]] = None
         self.saved_recipe_result: Optional[Dict[str, Any]] = None
         self.load_machine_btn: Optional[QPushButton] = None
+        self.latest_template_assets: Dict[str, Dict[str, Any]] = {}
+        self.latest_threshold_assets: Dict[str, Dict[str, Any]] = {}
 
-        self.latest_training_summary: Dict[str, Any] = {}
-        self.latest_validation_result: Dict[str, Any] = {}
 
         self.tab_buttons: List[QPushButton] = []
         self.wizard_widgets: Dict[str, Any] = {}
@@ -441,33 +394,18 @@ class NewSKUPage(QWidget):
         self.wizard_page: Optional[QWidget] = None
         self.axis_teaching_page: Optional[QWidget] = None
         self.capture_page: Optional[QWidget] = None
-        self.training_page: Optional[QWidget] = None
-        self.validation_page: Optional[QWidget] = None
+        self.template_extractor_page: Optional[TemplateExtractorPage] = None
+        self.feature_threshold_page: Optional[FeatureThresholdPage] = None
         self.recipe_page: Optional[QWidget] = None
         self.axis_entry_mode = "capture"
         self.axis_entry_mode_combo = None
         self.apply_manual_axis_btn = None
         self.axis_table: Optional[QTableWidget] = None
-        self.validation_status_lbl: Optional[QLabel] = None
-        self.validation_metrics_lbl: Optional[QLabel] = None
         self.recipe_summary_lbl: Optional[QLabel] = None
 
-        self.training_progress: Optional[QProgressBar] = None
-        self.training_status_lbl: Optional[QLabel] = None
-        self.training_summary_lbl: Optional[QLabel] = None
-        self.training_current_action_lbl: Optional[QLabel] = None
-        self.training_percent_lbl: Optional[QLabel] = None
 
-        self.camera_result_labels: Dict[str, QLabel] = {}
-        self.camera_status_boxes: Dict[str, QFrame] = {}
-        self.serial_status_state: Dict[str, str] = {}
 
-        self.serial_to_title = dict(CAMERA_TITLE_MAP)
         self.camera_serial_order = list(CAMERA_SERIAL_ORDER)
-        self.enabled_training_serials: List[str] = []
-        self.serial_stage_progress: Dict[str, float] = {}
-        self.active_training_serial = None
-        self.current_gpu_training_serial = None
 
         self._build_ui()
 
@@ -486,6 +424,8 @@ class NewSKUPage(QWidget):
     def _on_capture_finished(self, result: dict):
         self.latest_preview_paths = result or {}
         self._update_preview_from_latest()
+        if self.template_extractor_page is not None:
+            self.template_extractor_page.refresh_context()
 
         sku_name = _safe_name(self._get_sku_name())
 
@@ -687,6 +627,8 @@ class NewSKUPage(QWidget):
         self.sku_meta = dict(sku_meta or {})
         self.sku_meta.pop("machine_serial", None)
         self._apply_sku_meta_to_form()
+        if self.template_extractor_page is not None:
+            self.template_extractor_page.refresh_context()
 
     def _apply_sku_meta_to_form(self):
         if not self.wizard_widgets:
@@ -744,7 +686,7 @@ class NewSKUPage(QWidget):
         return paths[:len(self.labels)]
 
     def load_raw_images_for_preview(self):
-        if self.capture_in_progress or self.training_in_progress:
+        if self.capture_in_progress:
             return
         self.latest_preview_paths = {}
         preview_keys = self._preview_serial_order()
@@ -802,11 +744,17 @@ class NewSKUPage(QWidget):
         for i, btn in enumerate(self.tab_buttons):
             btn.setStyleSheet(self._tab_button_style(i == idx))
 
+        if idx == TAB_TEMPLATE_EXTRACTOR and self.template_extractor_page is not None:
+            self.template_extractor_page.refresh_context()
+        elif idx == TAB_FEATURE_THRESHOLD and self.feature_threshold_page is not None:
+            self.feature_threshold_page.refresh_context()
+
     def _build_ui(self):
         self.setStyleSheet(self._page_stylesheet())
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 10, 18, 12)
+        # Keep the workflow inside the available maximized desktop height.
+        root.setContentsMargins(18, 8, 18, 6)
         root.setSpacing(12)
 
         nav_frame = QFrame()
@@ -817,7 +765,14 @@ class NewSKUPage(QWidget):
         nav_l.setSpacing(0)
 
         self.tab_buttons = []
-        tab_names = ["SKU Setup", "Axis Teaching", "Capture", "Training", "Validation", "Save Recipe"]
+        tab_names = [
+            "SKU Setup",
+            "Axis Teaching",
+            "Capture",
+            "Template Extractor",
+            "Feature & Threshold",
+            "Save Recipe",
+        ]
         for idx, name in enumerate(tab_names):
             btn = QPushButton(name)
             btn.setCursor(Qt.PointingHandCursor)
@@ -832,33 +787,89 @@ class NewSKUPage(QWidget):
         nav_l.addWidget(version_lbl)
         root.addWidget(nav_frame)
 
-        self.stack = QStackedWidget()
+        self.stack = FlexibleStackedWidget()
         self.stack.setMinimumSize(0, 0)
         self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.stack.currentChanged.connect(lambda _index: self.stack.updateGeometry())
 
         self.wizard_page = QWidget()
         self.axis_teaching_page = QWidget()
         self.capture_page = QWidget()
-        self.training_page = QWidget()
-        self.validation_page = QWidget()
+        self.template_extractor_page = TemplateExtractorPage(
+            media_path=self.media_path,
+            sku_name_provider=self._get_sku_name,
+            sidewall_serials=SIDEWALL_SERIAL_MAP,
+            parent=self,
+        )
+        self.template_extractor_page.templateSaved.connect(self._on_template_saved)
+        self.template_extractor_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_FEATURE_THRESHOLD)
+        )
+
+        self.feature_threshold_page = FeatureThresholdPage(
+            media_path=self.media_path,
+            project_root=str(PROJECT_ROOT),
+            sku_name_provider=self._get_sku_name,
+            camera_serials=CAMERA_SERIAL_MAP,
+            template_assets_provider=self._collect_template_assets,
+            parent=self,
+        )
+        self.feature_threshold_page.thresholdSaved.connect(self._on_threshold_saved)
+        self.feature_threshold_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_SAVE_RECIPE)
+        )
         self.recipe_page = QWidget()
 
         self._build_wizard_page()
         self._build_axis_teaching_page()
         self._build_capture_page()
-        self._build_training_page()
-        self._build_validation_page()
         self._build_recipe_page()
 
         self.stack.addWidget(self.wizard_page)
         self.stack.addWidget(self.axis_teaching_page)
         self.stack.addWidget(self.capture_page)
-        self.stack.addWidget(self.training_page)
-        self.stack.addWidget(self.validation_page)
+        self.stack.addWidget(self.template_extractor_page)
+        self.stack.addWidget(self.feature_threshold_page)
         self.stack.addWidget(self.recipe_page)
 
         root.addWidget(self.stack, 1)
         self._switch_tab(TAB_SKU_SETUP)
+
+    def _on_template_saved(self, role: str, payload: dict):
+        self.latest_template_assets[str(role)] = dict(payload or {})
+        self.recipe_doc["template_assets"] = dict(self.latest_template_assets)
+
+        if self.status_lbl is not None:
+            display_name = payload.get("display_name", role)
+            output_path = payload.get("template_image", "")
+            self.status_lbl.setText(f"{display_name} template saved: {output_path}")
+
+    def _collect_template_assets(self) -> Dict[str, Dict[str, Any]]:
+        assets = dict(self.latest_template_assets)
+        if self.template_extractor_page is not None:
+            assets.update(self.template_extractor_page.get_template_assets())
+        self.latest_template_assets = assets
+        self.recipe_doc["template_assets"] = dict(assets)
+        return assets
+
+    def _on_threshold_saved(self, role: str, payload: dict):
+        self.latest_threshold_assets[str(role)] = dict(payload or {})
+        self.recipe_doc["threshold_assets"] = dict(self.latest_threshold_assets)
+
+        if self.status_lbl is not None:
+            threshold = payload.get("threshold")
+            output_path = payload.get("threshold_json_path", "")
+            self.status_lbl.setText(
+                f"{role} threshold saved: {threshold} | {output_path}"
+            )
+
+    def _collect_threshold_assets(self) -> Dict[str, Dict[str, Any]]:
+        assets = dict(self.latest_threshold_assets)
+        if self.feature_threshold_page is not None:
+            assets.update(self.feature_threshold_page.get_threshold_assets())
+        self.latest_threshold_assets = assets
+        self.recipe_doc["threshold_assets"] = dict(assets)
+        return assets
 
     # ======================================================================
     # F-015 SKU SETUP
@@ -1658,7 +1669,7 @@ class NewSKUPage(QWidget):
         title_lbl = QLabel("New SKU Image Capture")
         title_lbl.setObjectName("PageTitle")
         header_left.addWidget(title_lbl)
-        subtitle_lbl = QLabel("Capture and verify all tyre views before starting training.")
+        subtitle_lbl = QLabel("Capture and verify all tyre views before saving the SKU recipe.")
         subtitle_lbl.setObjectName("PageSubTitle")
         header_left.addWidget(subtitle_lbl)
         header_row.addLayout(header_left)
@@ -1740,15 +1751,15 @@ class NewSKUPage(QWidget):
 
         self.capture_btn = self._make_button("Start Capture", "primary")
         self.capture_btn.clicked.connect(self.confirm_and_start_capture)
-        self.training_btn = self._make_button("Start Training", "secondary")
-        self.training_btn.clicked.connect(self.confirm_and_start_training)
+        self.template_btn = self._make_button("Template Extractor", "secondary")
+        self.template_btn.clicked.connect(lambda: self._switch_tab(TAB_TEMPLATE_EXTRACTOR))
         self.refresh_btn = self._make_button("Refresh Preview", "secondary")
         self.refresh_btn.clicked.connect(self.refresh_preview_with_raw_load)
         self.close_btn = self._make_button("Close", "secondary")
         self.close_btn.clicked.connect(self.close_page)
 
         action_l.addWidget(self.capture_btn)
-        action_l.addWidget(self.training_btn)
+        action_l.addWidget(self.template_btn)
         action_l.addWidget(self.refresh_btn)
         action_l.addStretch(1)
         action_l.addWidget(self.close_btn)
@@ -1771,7 +1782,7 @@ class NewSKUPage(QWidget):
         root.addWidget(main_card, 1)
 
     def _set_controls_enabled(self, enabled: bool):
-        for btn in [self.capture_btn, self.training_btn, self.refresh_btn, self.close_btn]:
+        for btn in [self.capture_btn, self.template_btn, self.refresh_btn, self.close_btn]:
             if btn is not None:
                 btn.setEnabled(enabled)
         if self.tab_buttons:
@@ -1780,7 +1791,7 @@ class NewSKUPage(QWidget):
                 tab_btn.setEnabled(True if enabled else idx == current_idx)
 
     def refresh_preview_only(self):
-        if self.capture_in_progress or self.training_in_progress:
+        if self.capture_in_progress:
             return
         if not self.latest_preview_paths:
             self.load_raw_images_for_preview()
@@ -1792,7 +1803,7 @@ class NewSKUPage(QWidget):
                 self.img_labels[i].set_image_path(preview_paths[i])
 
     def refresh_preview_with_raw_load(self):
-        if self.capture_in_progress or self.training_in_progress:
+        if self.capture_in_progress:
             return
         self.load_raw_images_for_preview()
         self.refresh_preview_only()
@@ -1825,7 +1836,7 @@ class NewSKUPage(QWidget):
         return total, good_count, expected
 
     def confirm_and_start_capture(self):
-        if self.capture_in_progress or self.training_in_progress:
+        if self.capture_in_progress:
             return
 
         total, good_count, expected = self._get_capture_plan()
@@ -1852,7 +1863,7 @@ class NewSKUPage(QWidget):
 
 
     def start_capture(self):
-        if self.capture_in_progress or self.training_in_progress:
+        if self.capture_in_progress:
             return
 
         if capture_new_sku_images is None:
@@ -1910,534 +1921,14 @@ class NewSKUPage(QWidget):
 
         self.capture_worker.start()
 
-    # ======================================================================
-    # F-018 TRAINING
-    # ======================================================================
-    def _build_training_page(self):
-        root = QVBoxLayout(self.training_page)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(12)
 
-        main_card = QFrame()
-        main_card.setObjectName("PageCard")
-        main_l = QVBoxLayout(main_card)
-        main_l.setContentsMargins(18, 16, 18, 16)
-        main_l.setSpacing(14)
-
-        header_row = QHBoxLayout()
-        header_left = QVBoxLayout()
-        title_lbl = QLabel("Model Training")
-        title_lbl.setObjectName("PageTitle")
-        header_left.addWidget(title_lbl)
-        subtitle_lbl = QLabel("Monitor dataset preparation, epoch progress, and final result for each camera pipeline.")
-        subtitle_lbl.setObjectName("PageSubTitle")
-        subtitle_lbl.setWordWrap(True)
-        header_left.addWidget(subtitle_lbl)
-        header_row.addLayout(header_left)
-        header_row.addStretch(1)
-        badge_lbl = QLabel("VIT Training")
-        badge_lbl.setAlignment(Qt.AlignCenter)
-        badge_lbl.setFixedHeight(28)
-        badge_lbl.setStyleSheet("""
-            QLabel {
-                background: #f4eefb;
-                color: #571c86;
-                border: 1px solid #e5d8f4;
-                border-radius: 14px;
-                font: 700 11px 'Segoe UI';
-                padding: 0 12px;
-            }
-        """)
-        header_row.addWidget(badge_lbl)
-        main_l.addLayout(header_row)
-
-        top_card = QFrame()
-        top_card.setObjectName("InnerCard")
-        top_l = QVBoxLayout(top_card)
-        top_l.setContentsMargins(16, 14, 16, 14)
-        self.training_status_lbl = QLabel("Training status: Waiting")
-        self.training_status_lbl.setObjectName("SectionTitle")
-        top_l.addWidget(self.training_status_lbl)
-        self.training_summary_lbl = QLabel("No training started yet.")
-        self.training_summary_lbl.setObjectName("PageSubTitle")
-        self.training_summary_lbl.setWordWrap(True)
-        top_l.addWidget(self.training_summary_lbl)
-        self.training_current_action_lbl = QLabel("Current action: Waiting")
-        self.training_current_action_lbl.setObjectName("HintText")
-        self.training_current_action_lbl.setWordWrap(True)
-        top_l.addWidget(self.training_current_action_lbl)
-        main_l.addWidget(top_card)
-
-        progress_card = QFrame()
-        progress_card.setObjectName("InnerCard")
-        progress_l = QVBoxLayout(progress_card)
-        progress_l.setContentsMargins(16, 14, 16, 14)
-        prog_title = QLabel("Overall Progress")
-        prog_title.setObjectName("SectionTitle")
-        progress_l.addWidget(prog_title)
-        prog_row = QHBoxLayout()
-        self.training_progress = QProgressBar()
-        self.training_progress.setRange(0, 100)
-        self.training_progress.setValue(0)
-        self.training_progress.setTextVisible(False)
-        self.training_progress.setFixedHeight(12)
-        self.training_progress.setStyleSheet("""
-            QProgressBar { background:#eee9f5; border-radius:6px; border:none; }
-            QProgressBar::chunk { background:#571c86; border-radius:6px; }
-        """)
-        prog_row.addWidget(self.training_progress, 1)
-        self.training_percent_lbl = QLabel("0%")
-        self.training_percent_lbl.setAlignment(Qt.AlignCenter)
-        self.training_percent_lbl.setFixedSize(54, 28)
-        self.training_percent_lbl.setStyleSheet("""
-            QLabel {
-                background:#ffffff;
-                border:1px solid #ddd2ea;
-                border-radius:14px;
-                font: 700 11px 'Segoe UI';
-                color:#571c86;
-            }
-        """)
-        prog_row.addWidget(self.training_percent_lbl)
-        progress_l.addLayout(prog_row)
-        main_l.addWidget(progress_card)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(16)
-        self.camera_result_labels = {}
-        self.camera_status_boxes = {}
-
-        serials = list(CAMERA_SERIAL_ORDER)
-        if not serials:
-            empty = QLabel("No camera serials configured in .env. Add CAM_SIDEWALL1_SERIAL, CAM_SIDEWALL2_SERIAL, CAM_INNERWALL_SERIAL, CAM_TREAD_SERIAL, CAM_BEAD_SERIAL.")
-            empty.setObjectName("InfoBox")
-            main_l.addWidget(empty)
-        else:
-            for idx, serial in enumerate(serials):
-                card = QFrame()
-                card.setObjectName("InnerCard")
-                card.setMinimumHeight(150)
-                card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                cl = QVBoxLayout(card)
-                cl.setContentsMargins(14, 14, 14, 14)
-                top_row = QHBoxLayout()
-                title = QLabel(self.serial_to_title.get(serial, serial))
-                title.setObjectName("SectionTitle")
-                top_row.addWidget(title)
-                top_row.addStretch(1)
-                pipe_name = CAMERA_PIPELINE_MAP.get(serial, "not configured")
-                pipe_badge = QLabel(pipe_name)
-                pipe_badge.setAlignment(Qt.AlignCenter)
-                pipe_badge.setFixedHeight(24)
-                pipe_badge.setStyleSheet("""
-                    QLabel {
-                        background:#f3edf9;
-                        color:#6b4b8f;
-                        border:1px solid #e2d8ef;
-                        border-radius:12px;
-                        font: 600 10px 'Segoe UI';
-                        padding: 0 10px;
-                    }
-                """)
-                top_row.addWidget(pipe_badge)
-                cl.addLayout(top_row)
-                serial_lbl = QLabel(f"Camera Serial: {serial}")
-                serial_lbl.setObjectName("HintText")
-                cl.addWidget(serial_lbl)
-
-                status_box = QFrame()
-                status_box.setStyleSheet("QFrame { background:#f7f3fb; border:1px solid #e8def2; border-radius:12px; }")
-                status_box_l = QVBoxLayout(status_box)
-                status_box_l.setContentsMargins(12, 10, 12, 10)
-                status_title = QLabel("Pipeline Status")
-                status_title.setObjectName("SectionTitle")
-                status_box_l.addWidget(status_title)
-                result_lbl = QLabel("Status: Not started")
-                result_lbl.setWordWrap(True)
-                result_lbl.setMinimumHeight(48)
-                result_lbl.setStyleSheet("font: 600 11px 'Segoe UI'; color:#6f6a7a;")
-                status_box_l.addWidget(result_lbl)
-                cl.addWidget(status_box, 1)
-
-                self.camera_result_labels[serial] = result_lbl
-                self.camera_status_boxes[serial] = status_box
-                grid.addWidget(card, idx // 2, idx % 2)
-            grid.setColumnStretch(0, 1)
-            grid.setColumnStretch(1, 1)
-            main_l.addLayout(grid, 1)
-
-        root.addWidget(main_card, 1)
-
-    def _status_theme(self, state: str):
-        themes = {
-            "waiting": ("#6f6a7a", "#f7f3fb", "#e8def2"),
-            "prep": ("#b16e2c", "#fff7ee", "#efd8b3"),
-            "queued": ("#1f6390", "#eef7ff", "#bfdcf2"),
-            "training": ("#1f6390", "#eef4ff", "#c9daf8"),
-            "done": ("#2a6e2f", "#eefaf0", "#cbe8cf"),
-            "failed": ("#bd3b2b", "#fff1ef", "#f3c7c1"),
-            "skipped": ("#9a92ae", "#f5f3f8", "#dfd9e8"),
-            "unknown": ("#333333", "#f7f3fb", "#e8def2"),
-        }
-        return themes.get(state, themes["unknown"])
-
-    def _set_camera_status(self, serial: str, text: str, color: str = "#333", state: str = "unknown"):
-        lbl = self.camera_result_labels.get(serial)
-        box = self.camera_status_boxes.get(serial)
-        if lbl is not None:
-            lbl.setText(text)
-            lbl.setStyleSheet(f"font: 600 11px 'Segoe UI'; color: {color};")
-        fg, bg, border = self._status_theme(state)
-        if box is not None:
-            box.setStyleSheet(f"QFrame {{ background: {bg}; border: 1px solid {border}; border-radius: 12px; }}")
-        self.serial_status_state[serial] = state
-        self._refresh_training_summary_counts()
-
-    def _refresh_training_summary_counts(self):
-        if not self.enabled_training_serials:
-            return
-        counts = {k: 0 for k in ["prep", "queued", "training", "done", "failed", "skipped", "waiting"]}
-        for serial in self.enabled_training_serials:
-            state = self.serial_status_state.get(serial, "waiting")
-            counts[state if state in counts else "waiting"] += 1
-        parts = []
-        if counts["prep"]: parts.append(f"{counts['prep']} preparing")
-        if counts["queued"]: parts.append(f"{counts['queued']} waiting for GPU")
-        if counts["training"]: parts.append(f"{counts['training']} training")
-        if counts["done"]: parts.append(f"{counts['done']} done")
-        if counts["failed"]: parts.append(f"{counts['failed']} failed")
-        if counts["skipped"]: parts.append(f"{counts['skipped']} skipped")
-        if counts["waiting"]: parts.append(f"{counts['waiting']} waiting")
-        if self.training_summary_lbl is not None and self.training_in_progress:
-            self.training_summary_lbl.setText(", ".join(parts) if parts else "Training is in progress.")
-
-    def _compact_training_msg(self, msg: str, max_len: int = 120) -> str:
-        msg = (msg or "").strip().replace("\n", " ")
-        return msg if len(msg) <= max_len else msg[:max_len - 3] + "..."
-
-    def _reset_training_cards(self):
-        self.serial_status_state = {}
-        for serial in list(CAMERA_SERIAL_ORDER):
-            if CAMERA_PIPELINE_MAP.get(serial):
-                self._set_camera_status(serial, "Status: Waiting", "#6f6a7a", "waiting")
-            else:
-                self._set_camera_status(serial, "Status: Not configured", "#b3aac5", "skipped")
-
-    def _reset_training_progress(self):
-        self.enabled_training_serials = [s for s, p in CAMERA_PIPELINE_MAP.items() if p]
-        self.serial_stage_progress = {s: 0.0 for s in self.enabled_training_serials}
-        self.active_training_serial = None
-        self.current_gpu_training_serial = None
-        if self.training_progress is not None:
-            self.training_progress.setRange(0, 100)
-            self.training_progress.setValue(0)
-        if self.training_percent_lbl is not None:
-            self.training_percent_lbl.setText("0%")
-
-    def _set_serial_progress(self, serial: str, frac: float):
-        if serial not in self.serial_stage_progress or not self.enabled_training_serials:
-            return
-        frac = max(0.0, min(1.0, frac))
-        self.serial_stage_progress[serial] = max(self.serial_stage_progress.get(serial, 0.0), frac)
-        total_frac = sum(self.serial_stage_progress.values()) / max(len(self.enabled_training_serials), 1)
-        pct = int(total_frac * 100)
-        if self.training_progress is not None:
-            self.training_progress.setValue(pct)
-        if self.training_percent_lbl is not None:
-            self.training_percent_lbl.setText(f"{pct}%")
-
-    def _update_training_card_from_log(self, msg: str):
-        compact_msg = self._compact_training_msg(msg)
-        if self.training_current_action_lbl is not None:
-            self.training_current_action_lbl.setText(f"Current action: {compact_msg}")
-
-        m = re.search(r"\[PREP\]\s+serial=(\d+)", msg)
-        if m:
-            serial = m.group(1)
-            self._set_camera_status(serial, "Status: Preparing dataset...", "#b16e2c", "prep")
-            self._set_serial_progress(serial, 0.10)
-            return
-        m = re.search(r"\[PREP-DONE\]\s+serial=(\d+)", msg)
-        if m:
-            serial = m.group(1)
-            self._set_camera_status(serial, "Status: Dataset ready.\nWaiting for GPU training...", "#1f6390", "queued")
-            self._set_serial_progress(serial, 0.45)
-            return
-        m = re.search(r"\[PREP-FAIL\]\s+serial=(\d+)\s+\|\s+(.*)", msg)
-        if m:
-            serial = m.group(1)
-            self._set_camera_status(serial, f"Status: Prep failed\n{m.group(2)[:70]}", "#bd3b2b", "failed")
-            self._set_serial_progress(serial, 1.0)
-            return
-        m = re.search(r"\[TRAIN\]\s+serial=(\d+)", msg)
-        if m:
-            serial = m.group(1)
-            self.current_gpu_training_serial = serial
-            self._set_camera_status(serial, "Status: Training started on GPU...", "#1f6390", "training")
-            self._set_serial_progress(serial, 0.60)
-            return
-        m = re.search(r"Epoch\s*\[(\d+)/(\d+)\]", msg)
-        if m and self.current_gpu_training_serial:
-            ep = int(m.group(1))
-            total = int(m.group(2))
-            frac = 0.60 + 0.35 * (ep / max(total, 1))
-            serial = self.current_gpu_training_serial
-            self._set_camera_status(serial, f"Status: Training epoch {ep}/{total}", "#1f6390", "training")
-            self._set_serial_progress(serial, frac)
-            return
-        m = re.search(r"\[DONE\]\s+serial=(\d+)", msg)
-        if m:
-            serial = m.group(1)
-            self._set_camera_status(serial, "Status: Completed", "#2a6e2f", "done")
-            self._set_serial_progress(serial, 1.0)
-            if self.current_gpu_training_serial == serial:
-                self.current_gpu_training_serial = None
-            return
-        m = re.search(r"\[FAIL\]\s+serial=(\d+)\s+\|\s+(.*)", msg)
-        if m:
-            serial = m.group(1)
-            self._set_camera_status(serial, f"Status: Failed\n{m.group(2)[:70]}", "#bd3b2b", "failed")
-            self._set_serial_progress(serial, 1.0)
-            if self.current_gpu_training_serial == serial:
-                self.current_gpu_training_serial = None
-            return
-        m = re.search(r"\[SKIP\]\s+serial=(\d+)\s+\|\s+(.*)", msg)
-        if m:
-            serial = m.group(1)
-            self._set_camera_status(serial, f"Status: Skipped\n{m.group(2)[:70]}", "#9a92ae", "skipped")
-            self._set_serial_progress(serial, 1.0)
-
-    def confirm_and_start_training(self):
-        if self.capture_in_progress or self.training_in_progress:
-            return
-        sku_name = self._get_sku_name()
-        sku_folder = _safe_name(sku_name)
-        sku_root = os.path.join(self.media_path, "new_sku_images", sku_folder)
-        if not os.path.exists(sku_root):
-            QMessageBox.warning(self, "Training", f"SKU folder not found:\n{sku_root}\n\nCapture first.")
-            return
-        reply = QMessageBox.question(
-            self,
-            "Start Training",
-            "Start VIT training now?\n\nTraining will use train/good images from each camera serial folder and reference images from each serial root.",
-            QMessageBox.Ok | QMessageBox.Cancel,
-            QMessageBox.Cancel,
-        )
-        if reply == QMessageBox.Ok:
-            self.start_training()
-
-    def start_training(self):
-        if self.capture_in_progress or self.training_in_progress:
-            return
-        self.training_in_progress = True
-        self._set_controls_enabled(False)
-        if self.preview_timer:
-            self.preview_timer.stop()
-        sku_name = self._get_sku_name()
-        self._switch_tab(TAB_TRAINING)
-        self._reset_training_cards()
-        self._reset_training_progress()
-        if self.training_status_lbl is not None:
-            self.training_status_lbl.setText(f"Training status: Starting for SKU={sku_name}")
-        if self.training_summary_lbl is not None:
-            self.training_summary_lbl.setText("Dataset preparation and training are in progress.")
-        if self.training_current_action_lbl is not None:
-            self.training_current_action_lbl.setText("Current action: Waiting for training to start...")
-        if self.status_lbl is not None:
-            self.status_lbl.setText(f"Training running for SKU={sku_name} ...")
-
-        self.training_worker = TrainingWorker(
-            media_path=self.media_path,
-            sku_name=sku_name,
-            serial_pipeline_map=CAMERA_PIPELINE_MAP,
-            vit_training_root=VIT_TRAINING_ROOT,
-            yolo_r_path=YOLO_R_PATH,
-            device="cuda",
-            rebuild_dataset=True,
-            parent=self,
-        )
-        self.training_worker.status_signal.connect(self._on_training_status)
-        self.training_worker.finished_signal.connect(self._on_training_finished)
-        self.training_worker.error_signal.connect(self._on_training_error)
-        self.training_worker.start()
-
-    def _on_training_status(self, msg: str):
-        if self.training_status_lbl is not None:
-            self.training_status_lbl.setText("Training status: Running")
-        if self.training_summary_lbl is not None:
-            self.training_summary_lbl.setText("Dataset preparation and training are in progress.")
-        if self.status_lbl is not None:
-            self.status_lbl.setText(self._compact_training_msg(msg, 90))
-        self._update_training_card_from_log(msg)
-
-    def _extract_model_path_from_training_summary(self, summary: dict) -> str:
-        if not summary:
-            return ""
-        direct_keys = ["vit_model_path", "model_path", "checkpoint_path", "best_model_path", "final_model_path"]
-        for key in direct_keys:
-            value = summary.get(key)
-            if value:
-                return str(value)
-        for item in summary.get("results", []) or []:
-            for key in direct_keys:
-                value = item.get(key)
-                if value:
-                    return str(value)
-            run_dir = item.get("run_dir")
-            if run_dir:
-                for candidate in ["best.pth", "checkpoint_best.pth", "checkpoint_epoch_49.pth", "model.pth"]:
-                    path = os.path.join(run_dir, candidate)
-                    if os.path.exists(path):
-                        return path
-        return ""
-
-    def _on_training_finished(self, summary: dict):
-        self.training_in_progress = False
-        self._set_controls_enabled(True)
-        if self.preview_timer:
-            self.preview_timer.start(1500)
-        self.latest_training_summary = summary or {}
-        self.recipe_doc["training_summary"] = dict(self.latest_training_summary)
-        self.recipe_doc["vit_model_path"] = self._extract_model_path_from_training_summary(summary or {})
-        self.recipe_doc["vit_model_assets"] = list(
-            (self.latest_training_summary or {}).get("postgres_models", []) or []
-        )
-        if self.recipe_doc["vit_model_assets"]:
-            self.recipe_doc["vit_model_asset_id"] = self.recipe_doc["vit_model_assets"][0].get("asset_id")
-
-        if self.training_progress is not None:
-            self.training_progress.setValue(100)
-        if self.training_percent_lbl is not None:
-            self.training_percent_lbl.setText("100%")
-        if self.training_status_lbl is not None:
-            self.training_status_lbl.setText("Training status: Completed")
-        if self.training_summary_lbl is not None:
-            self.training_summary_lbl.setText("Training completed. Review validation before saving the recipe.")
-        if self.status_lbl is not None:
-            self.status_lbl.setText("Training completed")
-
-        for item in (summary or {}).get("results", []) or []:
-            serial = str(item.get("serial", ""))
-            if not serial:
-                continue
-            if item.get("status") in ("done", "success", "completed"):
-                self._set_camera_status(serial, "Status: Completed", "#2a6e2f", "done")
-            elif item.get("status") in ("skipped",):
-                self._set_camera_status(serial, f"Status: Skipped\n{item.get('reason', '')}", "#9a92ae", "skipped")
-            else:
-                self._set_camera_status(serial, "Status: Completed", "#2a6e2f", "done")
-
-        QMessageBox.information(self, "Training", "Training completed. Please run validation next.")
-        self._switch_tab(TAB_VALIDATION)
-
-    def _on_training_error(self, err: str):
-        self.training_in_progress = False
-        self._set_controls_enabled(True)
-        if self.preview_timer:
-            self.preview_timer.start(1500)
-        if self.training_status_lbl is not None:
-            self.training_status_lbl.setText("Training status: Failed")
-        if self.status_lbl is not None:
-            self.status_lbl.setText("Training failed")
-        QMessageBox.critical(self, "Training Error", err)
-        self._switch_tab(TAB_TRAINING)
 
     # ======================================================================
     # F-019 VALIDATION
     # ======================================================================
-    def _build_validation_page(self):
-        root = QVBoxLayout(self.validation_page)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(12)
 
-        card = QFrame()
-        card.setObjectName("PageCard")
-        lay = QVBoxLayout(card)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(16)
-        lay.addLayout(self._section_header(
-            "VIT Model Accuracy Validation",
-            "Review validation metrics such as precision, recall, F1 score and confusion matrix before accepting the model.",
-        ))
 
-        self.validation_status_lbl = QLabel("Validation Status: Not run")
-        self.validation_status_lbl.setObjectName("StatusPill")
-        lay.addWidget(self.validation_status_lbl)
 
-        self.validation_metrics_lbl = QLabel("No validation report available yet.")
-        self.validation_metrics_lbl.setObjectName("InfoBox")
-        self.validation_metrics_lbl.setWordWrap(True)
-        self.validation_metrics_lbl.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.validation_metrics_lbl.setMinimumHeight(420)
-        lay.addWidget(self.validation_metrics_lbl, 1)
-
-        btn_row = QHBoxLayout()
-        run_btn = self._make_button("Run Validation", "primary")
-        run_btn.clicked.connect(self._run_validation)
-        accept_btn = self._make_button("Accept Model", "success")
-        accept_btn.clicked.connect(lambda: self._set_validation_acceptance(True))
-        reject_btn = self._make_button("Reject Model", "danger")
-        reject_btn.clicked.connect(lambda: self._set_validation_acceptance(False))
-        next_btn = self._make_button("Next: Save Recipe", "secondary")
-        next_btn.clicked.connect(lambda: self._switch_tab(TAB_SAVE_RECIPE))
-        btn_row.addWidget(run_btn)
-        btn_row.addWidget(accept_btn)
-        btn_row.addWidget(reject_btn)
-        btn_row.addStretch(1)
-        btn_row.addWidget(next_btn)
-        lay.addLayout(btn_row)
-
-        root.addWidget(card)
-
-    def _run_validation(self):
-        sku_name = self._get_sku_name()
-        result = run_validation_for_sku(
-            media_path=self.media_path,
-            sku_name=sku_name,
-            training_summary=self.latest_training_summary,
-        )
-        self.latest_validation_result = result or {}
-        self.recipe_doc["validation_result"] = dict(self.latest_validation_result)
-        self._refresh_validation_ui()
-
-    def _set_validation_acceptance(self, accepted: bool):
-        if not self.latest_validation_result:
-            QMessageBox.warning(self, "Validation", "Run validation first.")
-            return
-        self.latest_validation_result["accepted"] = accepted
-        self.latest_validation_result["status"] = "ACCEPTED" if accepted else "REJECTED"
-        self.recipe_doc["validation_result"] = dict(self.latest_validation_result)
-        try:
-            updated_models = update_registered_models_validation(
-                (self.latest_training_summary or {}).get("postgres_models", []) or [],
-                accepted=accepted,
-                validation_score=self.latest_validation_result.get("f1_macro"),
-            )
-            if updated_models:
-                self.latest_training_summary["postgres_models"] = updated_models
-                self.recipe_doc["vit_model_assets"] = list(updated_models)
-        except Exception as registry_error:
-            self.latest_validation_result["model_registry_warning"] = str(registry_error)
-        self._refresh_validation_ui()
-
-    def _refresh_validation_ui(self):
-        result = self.latest_validation_result or {}
-        status = result.get("status", "UNKNOWN")
-        accepted = bool(result.get("accepted", False))
-        if self.validation_status_lbl is not None:
-            self.validation_status_lbl.setText(f"Validation Status: {status} | Accepted: {'YES' if accepted else 'NO'}")
-        text = (
-            f"F1 Macro: {result.get('f1_macro')}\n\n"
-            f"Precision:\n{result.get('precision', {})}\n\n"
-            f"Recall:\n{result.get('recall', {})}\n\n"
-            f"F1:\n{result.get('f1', {})}\n\n"
-            f"Confusion Matrix:\n{result.get('confusion_matrix', [])}\n\n"
-            f"Report:\n{result.get('report_path', '')}\n\n"
-            f"Message:\n{result.get('message', '')}"
-        )
-        if self.validation_metrics_lbl is not None:
-            self.validation_metrics_lbl.setText(text)
 
     # ======================================================================
     # F-020 / F-041 / F-042 SAVE RECIPE
@@ -2453,8 +1944,8 @@ class NewSKUPage(QWidget):
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(16)
         lay.addLayout(self._section_header(
-            "Save SKU Recipe & Link Model",
-            "Save the complete SKU recipe including axis targets, camera/laser profile links, model path and validation result.",
+            "Save SKU Recipe",
+            "Save the complete SKU recipe including axis targets, sidewall R templates and camera/laser profile links.",
         ))
 
         self.recipe_summary_lbl = QLabel("Recipe preview not generated yet.")
@@ -2554,20 +2045,13 @@ class NewSKUPage(QWidget):
             recipe_axis_targets=recipe_axis_targets,
             camera_config_links=self._collect_camera_config_links(),
             laser_config_links=self._collect_laser_config_links(),
-            vit_model_path=self.recipe_doc.get("vit_model_path", ""),
-            training_summary=self.latest_training_summary,
-            validation_result=self.latest_validation_result,
             author=str(self.sku_meta.get("operator") or "operator"),
         )
 
         recipe_doc["recipe_number"] = recipe_number
         recipe_doc["plc_recipe_number"] = recipe_number
-        recipe_doc["vit_model_assets"] = list(
-            (self.latest_training_summary or {}).get("postgres_models", []) or []
-        )
-        if recipe_doc["vit_model_assets"]:
-            recipe_doc["vit_model_asset_id"] = recipe_doc["vit_model_assets"][0].get("asset_id")
-
+        recipe_doc["template_assets"] = self._collect_template_assets()
+        recipe_doc["threshold_assets"] = self._collect_threshold_assets()
         return recipe_doc
 
     def _preview_recipe(self):
@@ -2592,6 +2076,34 @@ class NewSKUPage(QWidget):
                 )
                 return
             recipe_axis_targets = recipe_doc.get("recipe_axis_targets", {}) or {}
+            template_assets = recipe_doc.get("template_assets", {}) or {}
+            sidewall1_template = (template_assets.get("sidewall1", {}) or {}).get("template_image", "Not saved")
+            sidewall2_template = (template_assets.get("sidewall2", {}) or {}).get("template_image", "Not saved")
+            threshold_assets = recipe_doc.get("threshold_assets", {}) or {}
+            threshold_role_names = {
+                "sidewall1": "Sidewall 1",
+                "sidewall2": "Sidewall 2",
+                "innerwall": "Inner Side",
+                "tread": "Tread",
+                "bead": "Bead",
+            }
+            threshold_summary_lines = []
+            for threshold_role, threshold_display in threshold_role_names.items():
+                threshold_item = threshold_assets.get(threshold_role, {}) or {}
+                threshold_summary_lines.append(
+                    f"{threshold_display} Threshold: "
+                    f"{threshold_item.get('threshold', 'Not calculated')}"
+                )
+                threshold_summary_lines.append(
+                    f"{threshold_display} Percentile: "
+                    f"{threshold_item.get('percentile', 'Not set')}"
+                )
+                threshold_summary_lines.append(
+                    f"{threshold_display} Threshold File:\n"
+                    f"{threshold_item.get('threshold_json_path', 'Not saved')}"
+                )
+                threshold_summary_lines.append("")
+            threshold_summary = "\n".join(threshold_summary_lines).rstrip()
 
             machine_count = sum(
                 1 for v in recipe_axis_targets.values()
@@ -2628,8 +2140,11 @@ class NewSKUPage(QWidget):
                 f"Legacy Camera Axis Targets: {len(recipe_doc.get('camera_axis_targets', {}))}\n"
                 f"Legacy Laser Axis Targets: {len(recipe_doc.get('laser_axis_targets', {}))}\n\n"
 
-                f"VIT Model Path:\n{recipe_doc.get('vit_model_path')}\n\n"
-                f"Validation F1 Macro: {recipe_doc.get('validation_score')}\n"
+                f"Sidewall 1 R Template:\n{sidewall1_template}\n\n"
+                f"Sidewall 2 R Template:\n{sidewall2_template}\n\n"
+
+                f"Feature & Threshold Results:\n{threshold_summary}\n\n"
+
                 f"Status: {recipe_doc.get('status')}"
             )
 
@@ -2786,17 +2301,6 @@ class NewSKUPage(QWidget):
 
             self.saved_recipe_result = dict(result)
 
-            try:
-                if bool((self.latest_validation_result or {}).get("accepted", False)):
-                    published_models = publish_registered_models(
-                        (self.latest_training_summary or {}).get("postgres_models", []) or []
-                    )
-                    if published_models:
-                        self.latest_training_summary["postgres_models"] = published_models
-                        self.saved_recipe_doc["vit_model_assets"] = list(published_models)
-            except Exception as registry_error:
-                self.saved_recipe_result["model_registry_warning"] = str(registry_error)
-
             if self.load_machine_btn is not None:
                 self.load_machine_btn.setEnabled(True)
             plc_result = result.get("plc_result", {}) or {}
@@ -2864,8 +2368,15 @@ class NewSKUPage(QWidget):
             QMessageBox.critical(self, "Recipe Save Error", str(e))
 
     def close_page(self):
-        if self.capture_in_progress or self.training_in_progress:
-            QMessageBox.warning(self, "New SKU", "Please wait until capture/training is completed.")
+        if self.capture_in_progress:
+            QMessageBox.warning(self, "New SKU", "Please wait until capture is completed.")
+            return
+        if self.feature_threshold_page is not None and self.feature_threshold_page.is_running:
+            QMessageBox.warning(
+                self,
+                "New SKU",
+                "Please wait until feature extraction and threshold calculation are completed.",
+            )
             return
         if self.on_close:
             self.on_close()

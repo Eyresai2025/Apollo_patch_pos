@@ -3,6 +3,7 @@ import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
+from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets, QtPrintSupport # type: ignore
 
@@ -230,8 +231,14 @@ class TimeCard(CardWidget):
         self.lbl_time.setText(now.strftime("%I:%M %p").lstrip("0"))
         self.lbl_date.setText(now.strftime("%A, %d %b %Y"))
 
+# Shared dropdown icon used by the embedded dashboard controls.
+_DASHBOARD_ARROW_PATH = (
+    Path(__file__).resolve().parents[2] / "media" / "img" / "dropdown.png"
+).as_posix()
+
+
 # ----------------------------
-# Filter Bar (NO CSS for DateTime + SKU combo)
+# Filter Bar
 # - DateTimeEdit + ComboBox will use default OS/Qt style
 # - Only Apply/PDF buttons are styled (optional)
 # ----------------------------
@@ -279,6 +286,58 @@ class FilterBar(CardWidget):
         self.cmb_sku.setFixedSize(140, 30)
         self.cmb_sku.addItem("All SKUs")
         self.cmb_sku.addItems(skus)
+
+        filter_input_style = f"""
+            QDateTimeEdit,
+            QComboBox {{
+                background: #FFFFFF;
+                color: #182230;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 4px 30px 4px 8px;
+                selection-background-color: #7C3AED;
+                selection-color: #FFFFFF;
+            }}
+
+            QDateTimeEdit:focus,
+            QComboBox:focus {{
+                border: 1px solid #7C3AED;
+            }}
+
+            QDateTimeEdit::drop-down,
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1px solid #CBD5E1;
+                background: #F8FAFC;
+                border-top-right-radius: 6px;
+                border-bottom-right-radius: 6px;
+            }}
+
+            QDateTimeEdit::down-arrow,
+            QComboBox::down-arrow {{
+                image: url("{_DASHBOARD_ARROW_PATH}");
+                width: 12px;
+                height: 12px;
+            }}
+
+            QComboBox QAbstractItemView {{
+                background: #FFFFFF;
+                color: #182230;
+                border: 1px solid #CBD5E1;
+                outline: none;
+                selection-background-color: #F3E8FF;
+                selection-color: #5B21B6;
+            }}
+        """
+
+        self.dt_from.setStyleSheet(filter_input_style)
+        self.dt_to.setStyleSheet(filter_input_style)
+        self.cmb_sku.setStyleSheet(filter_input_style)
+
+        self.dt_from.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.dt_to.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
 
         # ----------- Buttons (you can keep style) -----------
         self.btn_apply = QtWidgets.QPushButton("Apply")
@@ -349,6 +408,40 @@ class FilterBar(CardWidget):
 class DashboardCardsPage(QtWidgets.QWidget):
     def __init__(self, store: InspectionDataStore, title: str, default_range: tuple[datetime, datetime], parent=None):
         super().__init__(parent)
+        self.setStyleSheet("""
+            QCalendarWidget QWidget {
+                background: #FFFFFF;
+                color: #182230;
+            }
+
+            QCalendarWidget QToolButton {
+                background: #FFFFFF;
+                color: #182230;
+                border: none;
+                padding: 5px;
+                font-weight: 700;
+            }
+
+            QCalendarWidget QMenu {
+                background: #FFFFFF;
+                color: #182230;
+            }
+
+            QCalendarWidget QSpinBox {
+                background: #FFFFFF;
+                color: #182230;
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                padding: 3px 6px;
+            }
+
+            QCalendarWidget QAbstractItemView:enabled {
+                background: #FFFFFF;
+                color: #182230;
+                selection-background-color: #7C3AED;
+                selection-color: #FFFFFF;
+            }
+        """)
         self.store = store
         self.page_title = title
 

@@ -1,4 +1,4 @@
--- Apollo VIT PostgreSQL Phase 4A: chunked binary assets for inspection and New SKU images.
+-- Apollo Tyre Inspection PostgreSQL Phase 4A: chunked binary assets for inspection and New SKU images.
 -- Existing MongoDB GridFS content remains untouched and can be used as a read fallback.
 -- Do not edit this migration after it has been applied.
 
@@ -147,7 +147,7 @@ INSERT INTO {{schema}}.application_settings (
 VALUES (
     'postgres_phase',
     '{"phase": "4A", "status": "binary_assets_ready", "image_backend": "postgresql_chunked", "gridfs_fallback": true}'::jsonb,
-    'Tracks the active PostgreSQL migration phase for Apollo VIT.'
+    'Tracks the active PostgreSQL migration phase for Apollo Tyre Inspection.'
 )
 ON CONFLICT (setting_key) DO UPDATE SET
     setting_value = EXCLUDED.setting_value,

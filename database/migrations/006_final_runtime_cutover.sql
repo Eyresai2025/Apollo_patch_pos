@@ -1,4 +1,4 @@
--- Apollo VIT PostgreSQL Phase 5
+-- Apollo Tyre Inspection PostgreSQL Phase 5
 -- Final runtime cutover tables for alarms, repeatability and hardware-test data.
 -- MongoDB is no longer required by normal application startup/runtime.
 

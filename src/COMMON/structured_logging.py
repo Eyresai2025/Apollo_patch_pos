@@ -1,4 +1,4 @@
-"""Thread-safe structured logging for the Apollo VIT application.
+"""Thread-safe structured logging for the Apollo Tyre Inspection application.
 
 The module keeps standard ``logging.getLogger`` calls compatible while adding:
 - rotating human-readable, JSONL and error files;

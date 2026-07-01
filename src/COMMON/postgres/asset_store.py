@@ -1,4 +1,4 @@
-"""Chunked PostgreSQL binary-asset storage for Apollo VIT."""
+"""Chunked PostgreSQL binary-asset storage for Apollo Tyre Inspection."""
 
 from __future__ import annotations
 

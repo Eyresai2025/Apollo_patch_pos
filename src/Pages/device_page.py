@@ -2,10 +2,11 @@ from PyQt5.QtWidgets import (
     QScrollArea, QSizePolicy, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTabWidget, QTableWidget, QTableWidgetItem, QComboBox,
     QLineEdit, QFormLayout, QGroupBox, QMessageBox, QCheckBox,
-    QAbstractItemView, QHeaderView,QFrame
+    QAbstractItemView, QHeaderView, QFrame,
+    QSpinBox, QDoubleSpinBox
 )
 from PyQt5.QtGui import QPixmap
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QObject, QEvent
 
 from src.device.camera_profile_manager import (
     CameraProfileManager,
@@ -27,9 +28,156 @@ from src.workers.laser_live_profile_worker import LaserLiveProfileWorker
 from src.workers.laser_capture_worker import LaserCaptureWorker
 from src.device.sku_device_profile_store import SKUDeviceProfileStore
 
+class WheelChangeBlocker(QObject):
+    """
+    Prevent accidental value changes while scrolling the settings panel.
+
+    Combo boxes and spin boxes respond to the mouse wheel only after the
+    operator clicks the field and it receives keyboard focus.
+    """
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel:
+            if not watched.hasFocus():
+                event.ignore()
+                return True
+
+        return super().eventFilter(watched, event)
+
 class DevicePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.wheel_change_blocker = WheelChangeBlocker(self)
+        self.setObjectName("DevicePage")
+        self.setStyleSheet("""
+            QWidget#DevicePage {
+                background: #F3F5F9;
+                color: #182230;
+            }
+
+            QWidget#DevicePage QTabWidget::pane {
+                background: #FFFFFF;
+                border: 1px solid #DCE3EC;
+                border-radius: 8px;
+            }
+
+            QWidget#DevicePage QTabBar::tab {
+                background: #F8FAFC;
+                color: #475569;
+                border: 1px solid #DCE3EC;
+                padding: 8px 18px;
+                min-width: 90px;
+            }
+
+            QWidget#DevicePage QTabBar::tab:selected {
+                background: #FFFFFF;
+                color: #6D28D9;
+                font-weight: 700;
+                border-bottom-color: #FFFFFF;
+            }
+
+            QWidget#DevicePage QGroupBox {
+                background: #FFFFFF;
+                color: #182230;
+                border: 1px solid #DCE3EC;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding-top: 8px;
+                font: 700 11px "Segoe UI";
+            }
+
+            QWidget#DevicePage QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                background: #FFFFFF;
+                color: #182230;
+            }
+
+            QWidget#DevicePage QLabel {
+                color: #182230;
+                background: transparent;
+            }
+
+            QWidget#DevicePage QLineEdit,
+            QWidget#DevicePage QComboBox,
+            QWidget#DevicePage QSpinBox,
+            QWidget#DevicePage QDoubleSpinBox {
+                background: #FFFFFF;
+                color: #182230;
+                border: 1px solid #CBD5E1;
+                border-radius: 5px;
+                padding: 4px 7px;
+                selection-background-color: #7C3AED;
+                selection-color: #FFFFFF;
+            }
+
+            QWidget#DevicePage QLineEdit:focus,
+            QWidget#DevicePage QComboBox:focus,
+            QWidget#DevicePage QSpinBox:focus,
+            QWidget#DevicePage QDoubleSpinBox:focus {
+                border: 1px solid #7C3AED;
+            }
+
+            QWidget#DevicePage QComboBox::drop-down {
+                width: 24px;
+                border-left: 1px solid #CBD5E1;
+                background: #F8FAFC;
+            }
+
+            QWidget#DevicePage QPushButton {
+                background: #FFFFFF;
+                color: #182230;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font: 600 10px "Segoe UI";
+            }
+
+            QWidget#DevicePage QPushButton:hover {
+                background: #F5F3FF;
+                border-color: #7C3AED;
+                color: #5B21B6;
+            }
+
+            QWidget#DevicePage QPushButton:disabled {
+                background: #F1F5F9;
+                color: #94A3B8;
+                border-color: #CBD5E1;
+            }
+
+            QWidget#DevicePage QTableWidget {
+                background: #FFFFFF;
+                alternate-background-color: #F8FAFC;
+                color: #182230;
+                gridline-color: #E2E8F0;
+                border: 1px solid #DCE3EC;
+            }
+
+            QWidget#DevicePage QHeaderView::section {
+                background: #F1F5F9;
+                color: #334155;
+                border: none;
+                border-right: 1px solid #DCE3EC;
+                border-bottom: 1px solid #DCE3EC;
+                padding: 6px;
+                font-weight: 700;
+            }
+
+            QWidget#DevicePage QCheckBox {
+                color: #182230;
+                background: transparent;
+            }
+
+            QWidget#DevicePage QScrollArea {
+                background: #FFFFFF;
+                border: none;
+            }
+
+            QWidget#DevicePage QScrollArea > QWidget > QWidget {
+                background: #FFFFFF;
+            }
+        """)
 
         self.profile_manager = CameraProfileManager()
         self.camera_manager = ArenaCameraManager()
@@ -58,7 +206,7 @@ class DevicePage(QWidget):
         main_layout = QVBoxLayout(self)
 
         title = QLabel("Device Configuration")
-        title.setStyleSheet("font-size: 20px; font-weight: bold;")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #111827; background: transparent;")
         main_layout.addWidget(title)
 
         self.tabs = QTabWidget()
@@ -73,6 +221,22 @@ class DevicePage(QWidget):
         self.build_camera_tab()
         self.build_laser_tab()
 
+    def disable_accidental_wheel_changes(self, parent_widget):
+        """
+        Wheel scrolling moves the page normally.
+
+        A combo/spin value changes only when that particular field has first
+        been clicked and focused.
+        """
+        wheel_widgets = (
+            parent_widget.findChildren(QComboBox)
+            + parent_widget.findChildren(QSpinBox)
+            + parent_widget.findChildren(QDoubleSpinBox)
+        )
+
+        for widget in wheel_widgets:
+            widget.setFocusPolicy(Qt.StrongFocus)
+            widget.installEventFilter(self.wheel_change_blocker)
     def build_camera_tab(self):
         layout = QVBoxLayout(self.camera_tab)
 
@@ -107,6 +271,8 @@ class DevicePage(QWidget):
         self.camera_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.camera_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.camera_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.camera_table.setMinimumHeight(90)
+        self.camera_table.setMaximumHeight(145)
 
         layout.addWidget(self.camera_table)
 
@@ -115,15 +281,21 @@ class DevicePage(QWidget):
         self.settings_box = self.create_settings_box()
         self.preview_box = self.create_preview_box()
 
-        bottom_row.addWidget(self.settings_box, 1)
+        camera_settings_scroll = self.make_scrollable_widget(
+            self.settings_box,
+            min_width=430,
+        )
+
+        bottom_row.addWidget(camera_settings_scroll, 1)
         bottom_row.addWidget(self.preview_box, 2)
 
-        layout.addLayout(bottom_row)
+        layout.addLayout(bottom_row, 1)
 
         self.refresh_btn.clicked.connect(self.refresh_cameras)
         self.load_profile_btn.clicked.connect(self.load_profile)
         self.save_profile_btn.clicked.connect(self.save_profile)
         self.camera_table.cellClicked.connect(self.on_camera_selected)
+        self.disable_accidental_wheel_changes(self.camera_tab)
 
     def build_laser_tab(self):
         layout = QVBoxLayout(self.laser_tab)
@@ -185,7 +357,8 @@ class DevicePage(QWidget):
         self.load_laser_profile_btn.clicked.connect(self.load_laser_profile)
         self.save_laser_profile_btn.clicked.connect(self.save_laser_profile)
         self.laser_table.cellClicked.connect(self.on_laser_selected)
-
+        self.disable_accidental_wheel_changes(self.laser_tab)
+        
     def create_settings_box(self):
         box = QGroupBox("Selected Camera Settings")
         layout = QFormLayout(box)
@@ -242,6 +415,71 @@ class DevicePage(QWidget):
 
         self.stop_preview_btn.setEnabled(False)
 
+        self.apply_settings_btn.setStyleSheet("""
+            QPushButton {
+                background: #6D28D9;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: #5B21B6; }
+            QPushButton:disabled {
+                background: #CBD5E1;
+                color: #64748B;
+            }
+        """)
+
+        self.start_preview_btn.setStyleSheet("""
+            QPushButton {
+                background: #15803D;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: #166534; }
+            QPushButton:disabled {
+                background: #CBD5E1;
+                color: #64748B;
+            }
+        """)
+
+        self.stop_preview_btn.setStyleSheet("""
+            QPushButton {
+                background: #FFFFFF;
+                color: #DC2626;
+                border: 1px solid #EF4444;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: #FEF2F2; }
+            QPushButton:disabled {
+                color: #94A3B8;
+                border-color: #CBD5E1;
+                background: #F8FAFC;
+            }
+        """)
+
+        self.capture_one_btn.setStyleSheet("""
+            QPushButton {
+                background: #2563EB;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: #1D4ED8; }
+            QPushButton:disabled {
+                background: #CBD5E1;
+                color: #64748B;
+            }
+        """)
+
         layout.addRow("Selected Serial:", self.selected_camera_label)
         layout.addRow(self.hardware_trigger_checkbox)
         layout.addRow("Current Mode:", self.mode_status_label)
@@ -290,7 +528,11 @@ class DevicePage(QWidget):
 
         self.preview_label = QLabel("No Image")
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumHeight(520)
+        self.preview_label.setMinimumHeight(320)
+        self.preview_label.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Expanding,
+        )
         self.preview_label.setStyleSheet("""
             QLabel {
                 background-color: #111;
@@ -954,6 +1196,71 @@ class DevicePage(QWidget):
 
         self.stop_laser_preview_btn.setEnabled(False)
 
+        self.apply_laser_settings_btn.setStyleSheet("""
+            QPushButton {
+                background: #6D28D9;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: #5B21B6; }
+            QPushButton:disabled {
+                background: #CBD5E1;
+                color: #64748B;
+            }
+        """)
+
+        self.start_laser_preview_btn.setStyleSheet("""
+            QPushButton {
+                background: #15803D;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: #166534; }
+            QPushButton:disabled {
+                background: #CBD5E1;
+                color: #64748B;
+            }
+        """)
+
+        self.stop_laser_preview_btn.setStyleSheet("""
+            QPushButton {
+                background: #FFFFFF;
+                color: #DC2626;
+                border: 1px solid #EF4444;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: #FEF2F2; }
+            QPushButton:disabled {
+                color: #94A3B8;
+                border-color: #CBD5E1;
+                background: #F8FAFC;
+            }
+        """)
+
+        self.capture_laser_profile_btn.setStyleSheet("""
+            QPushButton {
+                background: #2563EB;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background: #1D4ED8; }
+            QPushButton:disabled {
+                background: #CBD5E1;
+                color: #64748B;
+            }
+        """)
+
         layout.addRow("Selected Laser:", self.selected_laser_label)
         layout.addRow(self.laser_use_user_set_checkbox)
         layout.addRow("User Set:", self.laser_user_set_input)
@@ -1181,18 +1488,34 @@ class DevicePage(QWidget):
         scroll.setFrameShape(QFrame.NoFrame) 
         scroll.setStyleSheet("""
             QScrollArea {
-                background: transparent;
+                background: #FFFFFF;
                 border: none;
             }
+
+            QScrollArea > QWidget > QWidget {
+                background: #FFFFFF;
+            }
+
             QScrollBar:vertical {
-                background: #f1f1f1;
+                background: #F1F5F9;
                 width: 10px;
+                margin: 2px;
                 border-radius: 5px;
             }
+
             QScrollBar::handle:vertical {
-                background: #b5b5b5;
+                background: #CBD5E1;
                 border-radius: 5px;
                 min-height: 30px;
+            }
+
+            QScrollBar::handle:vertical:hover {
+                background: #94A3B8;
+            }
+
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         """)
         return scroll

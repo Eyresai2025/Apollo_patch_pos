@@ -117,8 +117,3 @@ def patchify_index_grouped(
     print("\n✅ Done. All patches saved to:")
     print(f"   {base_out}")
     return base_out
-
-
-if __name__ == "__main__":
-    src = r"C:\Users\Admin\OneDrive - radometech.com\Desktop\Apollo\VIT+Autoencoder\Dataset_Captured\165_80_R14_85T_AMZ_4G\165_80_R14_85T_AMZ_4G\Defs_9020081560\250500041_Sidewall\trial"
-    patchify_index_grouped(src, 1630, 1024, 1630, 1024, cover_edges=True)

@@ -18,7 +18,7 @@ def main() -> int:
     settings = manager.settings
 
     print("=" * 72)
-    print("Apollo VIT - PostgreSQL Phase 1 Connection Check")
+    print("Apollo Tyre Inspection - PostgreSQL Phase 1 Connection Check")
     print("=" * 72)
     print(f"Enabled          : {settings.enabled}")
     print(f"Database URL     : {settings.masked_url()}")

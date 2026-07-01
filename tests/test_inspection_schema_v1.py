@@ -66,8 +66,8 @@ class InspectionSchemaV1Tests(unittest.TestCase):
                 "tread": r"C:\\Apollo\\Capture_Input\\SKU_001\\23-06-2026\\Cycle_10\\b.png",
             },
             "side_results": {
-                "sidewall1": {"final_label": "DEFECT", "vit_time": 0.1},
-                "tread": {"final_label": "OK", "vit_time": 0.2},
+                "sidewall1": {"final_label": "DEFECT", "pipeline_time": 0.1},
+                "tread": {"final_label": "OK", "pipeline_time": 0.2},
             },
         }
 

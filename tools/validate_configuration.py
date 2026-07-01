@@ -1,4 +1,4 @@
-"""Validate Apollo VIT configuration without connecting to hardware."""
+"""Validate Apollo Tyre Inspection configuration without connecting to hardware."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def main() -> int:
     report = manager.validation_report
 
     print("=" * 78)
-    print("APOLLO VIT CONFIGURATION VALIDATION")
+    print("APOLLO TYRE INSPECTION CONFIGURATION VALIDATION")
     print("=" * 78)
     print(f"Project root : {manager.project_root}")
     print(f"Environment  : {manager.env_path}")

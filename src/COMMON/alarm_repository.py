@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""PostgreSQL persistence for Apollo VIT alarms and events."""
+"""PostgreSQL persistence for Apollo Tyre Inspection alarms and events."""
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional

@@ -1,4 +1,4 @@
-"""Thread-safe PostgreSQL connection-pool manager for Apollo VIT."""
+"""Thread-safe PostgreSQL connection-pool manager for Apollo Tyre Inspection."""
 
 from __future__ import annotations
 

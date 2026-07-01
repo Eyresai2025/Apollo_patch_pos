@@ -70,7 +70,7 @@ def main() -> int:
     mongo_db = get_db()
     rows = list(mongo_db[COLLECTION_NAME].find({})) if COLLECTION_NAME in mongo_db.list_collection_names() else []
     print("=" * 72)
-    print("Apollo VIT - MongoDB AI Model Migration")
+    print("Apollo Tyre Inspection - MongoDB AI Model Migration")
     print("=" * 72)
     print(f"Mode              : {'EXECUTE' if args.execute else 'DRY-RUN'}")
     print(f"Mongo collection  : {COLLECTION_NAME}")
@@ -132,7 +132,7 @@ def main() -> int:
                 repo.upsert_model(
                     model_name=model_name,
                     model_version=model_version,
-                    model_type=str(_pick(doc, "model_type", "type", default="VIT")),
+                    model_type=str(_pick(doc, "model_type", "type", default="UNSPECIFIED")),
                     framework=_pick(doc, "framework"),
                     sku_name=_pick(doc, "sku_name", "sku"),
                     zone=_pick(doc, "zone", "side", "pipeline_kind"),

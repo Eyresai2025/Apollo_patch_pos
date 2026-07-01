@@ -23,7 +23,7 @@ def check(name, condition):
 
 def main() -> int:
     print("=" * 78)
-    print("APOLLO VIT ALARM & EVENT CENTER V5 - POSTGRESQL VALIDATION")
+    print("APOLLO TYRE INSPECTION ALARM & EVENT CENTER V5 - POSTGRESQL VALIDATION")
     print("=" * 78)
 
     required_files = [

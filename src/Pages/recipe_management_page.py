@@ -499,8 +499,6 @@ class RecipeManagementPage(QWidget):
         )
         tyre_size = _safe_text(recipe.get("tyre_size"))
         barcode = _safe_text(recipe.get("barcode_pattern") or recipe.get("barcode"))
-        model_path = _safe_text(recipe.get("vit_model_path"), "Not linked yet")
-        val_score = _safe_text(recipe.get("validation_score"), "Pending")
         created_at = _safe_text(recipe.get("created_at"))
         updated_at = _safe_text(recipe.get("updated_at"))
         author = _safe_text(recipe.get("author"), "operator")
@@ -518,10 +516,9 @@ class RecipeManagementPage(QWidget):
 
         summary = (
             f"SKU: {sku_name}    |    Recipe No: {recipe_number}    |    Version: {version}    |    Status: {status}\n"
-            f"Tyre Size: {tyre_size}    |    Barcode: {barcode}    |    Validation F1: {val_score}\n"
+            f"Tyre Size: {tyre_size}    |    Barcode: {barcode}\n"
             f"Author: {author}    |    Created: {created_at}    |    Updated: {updated_at}\n"
-            f"Targets: {target_count} ({target_mode})\n"
-            f"Model Path: {model_path}"
+            f"Targets: {target_count} ({target_mode})"
         )
         self.summary_lbl.setText(summary)
 

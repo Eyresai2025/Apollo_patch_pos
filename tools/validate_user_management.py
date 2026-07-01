@@ -73,7 +73,7 @@ def main() -> int:
         checks["AUDIT"] = "USER_ROLE_CHANGED" in audit_codes
 
     print("=" * 78)
-    print("APOLLO VIT USER MANAGEMENT VALIDATION")
+    print("APOLLO TYRE INSPECTION USER MANAGEMENT VALIDATION")
     print("=" * 78)
     for name, result in checks.items():
         print(f"{name:<34}: {'OK' if result else 'FAILED'}")

@@ -13,7 +13,7 @@ import threading
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QFrame, QHBoxLayout, QLineEdit, QLabel,
     QMainWindow, QMessageBox, QPushButton, QSizePolicy, QStackedWidget,
-    QStatusBar, QToolButton, QVBoxLayout, QWidget,
+    QStatusBar, QToolButton, QVBoxLayout, QWidget, QMenu, QComboBox,
 )
 from PyQt5.QtCore import QSize, QTimer, Qt, pyqtSignal, QEvent
 from PyQt5.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
@@ -57,6 +57,10 @@ from snap7 import Client # type: ignore
 
 ####Local files imports
 from src.Main_cam import CAMERA_CAPTURE_ENABLED, start_continuous_cycle
+from src.COMMON.cycle_engine import (
+    get_active_inspection_sides,
+    validate_sku_runtime_assets,
+)
 from src.COMMON.system_check import show_startup_system_popup
 from src.COMMON.full_hardware_check import is_hardware_ready, get_hardware_state
 from src.COMMON.component_health_service import ComponentHealthService
@@ -178,10 +182,14 @@ logger.info(
 # exclusively through explicit migration/fallback switches and is not opened
 # during normal GUI startup.
 
-LOCAL_MULTI_SIDE_TEST_FOLDER = env_vars.get(
-    "MULTI_CAPTURE_ROOT",
-    r"C:\Users\Hi\OneDrive - radometech.com\Desktop\New folder\media\capture\DEMO_CYCLE_FOLDER"
+_local_inspection_input = env_vars.get(
+    "LOCAL_INSPECTION_INPUT",
+    str(BASE_DIR / "media" / "raw images" / "1.png"),
 )
+_local_inspection_path = Path(str(_local_inspection_input).strip().strip('"').strip("'"))
+if not _local_inspection_path.is_absolute():
+    _local_inspection_path = BASE_DIR / _local_inspection_path
+LOCAL_MULTI_SIDE_TEST_FOLDER = str(_local_inspection_path.resolve())
 
 MAIN_SEG_MODEL_PATH = (
     str(app_config.models.segmentation_weight)
@@ -190,10 +198,6 @@ MAIN_SEG_MODEL_PATH = (
 MAIN_R_DETECTOR_PATH = (
     str(app_config.models.r_detector_onnx)
     if app_config.models.r_detector_onnx else None
-)
-MAIN_VIT_CHECKPOINT_PATH = (
-    str(app_config.models.vit_checkpoint)
-    if app_config.models.vit_checkpoint else None
 )
 
 # ---------------- TORCH DEVICE + CPU FALLBACK ----------------
@@ -431,9 +435,21 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(1500, self.refresh_component_health)
         
-        # ---------- BOTTOM MARQUEE COPYRIGHT BAR ----------
+        # ---------- PERMANENT BOTTOM STATUS / COPYRIGHT BAR ----------
         status_bar = QStatusBar()
-        status_bar.setStyleSheet("background-color: white;")
+        status_bar.setMinimumHeight(self.s(27))
+        status_bar.setStyleSheet("""
+            QStatusBar {
+                background: #FFFFFF;
+                border-top: 1px solid #E5E7EB;
+                color: #667085;
+                font: 500 9px 'Segoe UI';
+                padding: 1px 6px;
+            }
+            QStatusBar::item {
+                border: none;
+            }
+        """)
         status_bar.setSizeGripEnabled(False)
         self.setStatusBar(status_bar)
         self.plc_gui_command_service.started.connect(
@@ -469,17 +485,28 @@ class MainWindow(QMainWindow):
             "All Rights Reserved | Our privacy policy | www.radometechnologies.com | "
             "Version: v1.0"
         )
-        self.copy_padded_text = " " * 40 + self.copy_full_text + " " * 40
+        self.copy_padded_text = self.copy_full_text
         self.copy_index = 0
-        
-        self.copyright_label = QLabel()
-        self.copyright_label.setStyleSheet("font: bold 12px 'Arial'; color: black;")
+
+        self.copyright_label = QLabel(self.copy_full_text)
+        self.copyright_label.setObjectName("copyrightFooterLabel")
         self.copyright_label.setAlignment(Qt.AlignCenter)
-        status_bar.addWidget(self.copyright_label, 1)
-        
-        self.copy_timer = QTimer(self)
-        self.copy_timer.timeout.connect(self.update_marquee_text)
-        self.copy_timer.start(150)
+        self.copyright_label.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
+        self.copyright_label.setStyleSheet("""
+            QLabel#copyrightFooterLabel {
+                color: #667085;
+                font: 600 9px 'Segoe UI';
+                padding: 2px 12px;
+                background: transparent;
+            }
+        """)
+
+        # Permanent widgets remain visible even while statusBar().showMessage()
+        # displays cycle, preload, PLC, or error messages on the left.
+        status_bar.addPermanentWidget(self.copyright_label, 1)
     
     # ========================================================================
     # UI FREEZE DETECTION
@@ -579,7 +606,7 @@ class MainWindow(QMainWindow):
         self._alarm_future.add_done_callback(completed)
 
     def _apply_alarm_summary(self, summary):
-        """Update the header alarm badge on the Qt GUI thread."""
+        """Update the compact alarm chip on the Qt GUI thread."""
         open_count = int((summary or {}).get("open", 0) or 0)
         critical = int((summary or {}).get("critical", 0) or 0)
         high = int((summary or {}).get("high", 0) or 0)
@@ -587,30 +614,34 @@ class MainWindow(QMainWindow):
         if button is None:
             return
 
-        button.setText(f"Alarms: {open_count}")
+        button.setText(f"Alarm {open_count}")
+
         if critical > 0:
-            bg, hover = "#C92A2A", "#A51111"
-        elif high > 0:
-            bg, hover = "#E67700", "#CC5F00"
-        elif open_count > 0:
-            bg, hover = "#F08C00", "#D97706"
+            background, foreground, border, hover = (
+                "#FEF2F2", "#B91C1C", "#FECACA", "#FEE2E2"
+            )
+        elif high > 0 or open_count > 0:
+            background, foreground, border, hover = (
+                "#FFF7ED", "#C2410C", "#FED7AA", "#FFEDD5"
+            )
         else:
-            bg, hover = "#2F9E44", "#237A35"
+            background, foreground, border, hover = (
+                "#ECFDF3", "#166534", "#BBF7D0", "#DCFCE7"
+            )
+
         button.setStyleSheet(f"""
             QToolButton {{
-                font: 800 11px 'Segoe UI';
-                color: white;
-                background-color: {bg};
-                border: none;
-                border-radius: 8px;
-                padding: 6px 11px;
+                min-height: 27px;
+                padding: 0 10px;
+                background: {background};
+                color: {foreground};
+                border: 1px solid {border};
+                border-radius: 7px;
+                font: 700 10px 'Segoe UI';
             }}
-            QToolButton:hover {{ background-color: {hover}; }}
+            QToolButton:hover {{ background: {hover}; }}
+            QToolButton:pressed {{ padding-top: 1px; }}
         """)
-
-    # ========================================================================
-    # ASYNC LABEL UPDATE (Non-blocking DB query)
-    # ========================================================================
 
     def _set_tyre_count_label(self, cnt):
         try:
@@ -646,15 +677,15 @@ class MainWindow(QMainWindow):
         try:
             if not img_path or not os.path.exists(img_path):
                 label.clear()
-                label.setText("🖼️")
-                label.setStyleSheet("font: 48px; color: grey;")
+                label.setText("No image")
+                label.setStyleSheet("font: 600 13px 'Segoe UI'; color: #94A3B8; background: #FBFCFE;")
                 return False
             pixmap = QPixmap(img_path)
             if pixmap.isNull():
                 logger.warning(f"Invalid/corrupt image skipped: {img_path}")
                 label.clear()
-                label.setText("🖼️")
-                label.setStyleSheet("font: 48px; color: grey;")
+                label.setText("No image")
+                label.setStyleSheet("font: 600 12px 'Segoe UI'; color: #94A3B8; background: #FBFCFE;")
                 return False
             scaled = pixmap.scaled(
                 w, h,
@@ -666,8 +697,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"Failed to load image {img_path}: {e}")
             label.clear()
-            label.setText("🖼️")
-            label.setStyleSheet("font: 48px; color: grey;")
+            label.setText("No image")
+            label.setStyleSheet("font: 600 12px 'Segoe UI'; color: #94A3B8; background: #FBFCFE;")
             return False
     
     def s(self, value):
@@ -780,8 +811,8 @@ class MainWindow(QMainWindow):
                 else:
                     self.current_panel_image_paths[side_key] = None
                     label.clear()
-                    label.setText("🖼️")
-                    label.setStyleSheet("font: 48px; color: grey; background-color: white;")
+                    label.setText("No image")
+                    label.setStyleSheet("font: 600 12px 'Segoe UI'; color: #94A3B8; background: #FBFCFE;")
             
             # Single repaint
             self.update()
@@ -819,46 +850,73 @@ class MainWindow(QMainWindow):
     
     def open_live_selection_dialog(self):
         """
-        Live flow:
-        - Test Mode must already be completed.
-        - Read active recipe number from PLC.
-        - Map recipe number to SKU_XXX.
-        - User enters only tyre number.
-        - Start Live with resolved SKU.
+        Open the Live Inspection setup dialog.
+
+        DEPLOYMENT=True:
+            - Require completed hardware check.
+            - Read active recipe from PLC.
+            - Resolve the corresponding SKU automatically.
+
+        DEPLOYMENT=False:
+            - Do not access PLC or camera hardware.
+            - Allow the operator to select a locally available SKU.
+            - Process LOCAL_INSPECTION_INPUT after Load & Prepare.
         """
+        is_deployment = bool(deployment)
 
-        if str(deployment) == "True" and not is_hardware_ready():
-            QMessageBox.warning(
-                self,
-                "Test Mode Required",
-                "Please open Test Mode and complete the Full Hardware Check before starting Live Inspection.",
-            )
-            return
+        recipe_number = None
+        plc_tag = None
+        fixed_sku_name = None
+        available_skus = []
 
-        hardware_state = get_hardware_state()
-        plc_client_from_test = hardware_state.get("plc_client")
+        if is_deployment:
+            if not is_hardware_ready():
+                QMessageBox.warning(
+                    self,
+                    "Test Mode Required",
+                    "Please open Test Mode and complete the Full Hardware Check "
+                    "before starting Live Inspection.",
+                )
+                return
 
-        try:
-            resolved = resolve_live_sku_from_plc(
-                plc_client=plc_client_from_test,
-                media_path=MEDIA_PATH,
-                env_path=ENV_PATH,
-            )
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Active Recipe Error",
-                f"Could not resolve SKU from PLC active recipe.\n\n{e}",
-            )
-            return
+            hardware_state = get_hardware_state()
+            plc_client_from_test = hardware_state.get("plc_client")
 
-        recipe_number = resolved["recipe_number"]
-        sku_name = resolved["sku_name"]
-        plc_tag = resolved["tag"]
+            try:
+                resolved = resolve_live_sku_from_plc(
+                    plc_client=plc_client_from_test,
+                    media_path=MEDIA_PATH,
+                    env_path=ENV_PATH,
+                )
+            except Exception as error:
+                QMessageBox.critical(
+                    self,
+                    "Active Recipe Error",
+                    "Could not resolve SKU from PLC active recipe.\n\n"
+                    f"{error}",
+                )
+                return
+
+            recipe_number = resolved["recipe_number"]
+            fixed_sku_name = resolved["sku_name"]
+            plc_tag = resolved["tag"]
+        else:
+            available_skus = self.refresh_available_skus()
+            if not available_skus:
+                QMessageBox.critical(
+                    self,
+                    "Local SKU Error",
+                    "No locally configured SKU was found.\n\n"
+                    "Expected PatchCore files under:\n"
+                    "media/feature_threshold/<SKU>/sidewall1/\n\n"
+                    "and the matching template under:\n"
+                    "media/template_extractor/<SKU>/sidewall1/",
+                )
+                return
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Live Inspection")
-        dialog.resize(self.s(520), self.s(330))
+        dialog.resize(self.s(520), self.s(390 if not is_deployment else 330))
         dialog.setWindowIcon(QIcon(os.path.join(MEDIA_PATH, "img/smartQC-.ico")))
         dialog.setModal(True)
 
@@ -884,7 +942,7 @@ class MainWindow(QMainWindow):
                 padding: 12px;
                 font: 800 13px 'Segoe UI';
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 min-height: 44px;
                 background: white;
                 border: 2px solid #e2e8f0;
@@ -892,6 +950,10 @@ class MainWindow(QMainWindow):
                 padding: 0 12px;
                 font: 500 13px 'Segoe UI';
                 color: #2d3748;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 34px;
             }
             QPushButton#CancelBtn {
                 min-height: 44px;
@@ -927,14 +989,38 @@ class MainWindow(QMainWindow):
         title_label.setAlignment(Qt.AlignCenter)
         card_layout.addWidget(title_label)
 
-        sku_badge = QLabel(
-            f"PLC Active Recipe: {recipe_number}\n"
-            f"PLC Tag: {plc_tag}\n"
-            f"Resolved AI SKU: {sku_name}"
-        )
+        if is_deployment:
+            sku_badge = QLabel(
+                f"PLC Active Recipe: {recipe_number}\n"
+                f"PLC Tag: {plc_tag}\n"
+                f"Resolved AI SKU: {fixed_sku_name}"
+            )
+        else:
+            sku_badge = QLabel(
+                "LOCAL TEST MODE\n"
+                f"Input: {LOCAL_MULTI_SIDE_TEST_FOLDER}\n"
+                "PLC and cameras are not used"
+            )
+
         sku_badge.setObjectName("SkuBadge")
         sku_badge.setAlignment(Qt.AlignCenter)
+        sku_badge.setWordWrap(True)
         card_layout.addWidget(sku_badge)
+
+        sku_combo = None
+        if not is_deployment:
+            sku_label = QLabel("Select SKU")
+            sku_label.setObjectName("FieldLabel")
+            card_layout.addWidget(sku_label)
+
+            sku_combo = QComboBox()
+            sku_combo.addItems(available_skus)
+
+            preferred_sku = (self.selected_live_sku or "").strip()
+            if preferred_sku in available_skus:
+                sku_combo.setCurrentText(preferred_sku)
+
+            card_layout.addWidget(sku_combo)
 
         tyre_label = QLabel("Tyre Number")
         tyre_label.setObjectName("FieldLabel")
@@ -946,7 +1032,11 @@ class MainWindow(QMainWindow):
         tyre_edit.setMinimumHeight(self.s(44))
         card_layout.addWidget(tyre_edit)
 
-        info_badge = QLabel("AI files will be loaded based on PLC active recipe.")
+        info_badge = QLabel(
+            "AI files will be loaded using the PLC active recipe."
+            if is_deployment
+            else "AI files will be loaded for the selected local SKU."
+        )
         info_badge.setAlignment(Qt.AlignCenter)
         info_badge.setStyleSheet("""
             QLabel {
@@ -970,19 +1060,28 @@ class MainWindow(QMainWindow):
 
         def proceed():
             tyre_name = tyre_edit.text().strip()
+            sku_name = (
+                fixed_sku_name
+                if is_deployment
+                else (sku_combo.currentText().strip() if sku_combo else "")
+            )
+
+            if not sku_name:
+                QMessageBox.warning(dialog, "SKU", "Please select a SKU.")
+                return
 
             if not tyre_name:
                 QMessageBox.warning(dialog, "Tyre Number", "Please enter tyre number.")
                 return
 
             self.current_recipe_context = {
+                "source": "PLC" if is_deployment else "LOCAL",
                 "recipe_number": recipe_number,
                 "plc_tag": plc_tag,
                 "sku_name": sku_name,
             }
 
             dialog.accept()
-
             self.update_live_info_cards(sku_name, tyre_name)
             self.begin_live_flow(sku_name, tyre_name)
 
@@ -997,59 +1096,32 @@ class MainWindow(QMainWindow):
         root.addWidget(card)
 
         dialog.exec_()
-    
+
     def validate_selected_sku_calibration(self, sku_name):
-        sku_calibration_dir = os.path.join(
+        """Validate only the PatchCore artifacts required by active views."""
+        active_sides = get_active_inspection_sides()
+        ok, errors, resolved = validate_sku_runtime_assets(
             MEDIA_PATH,
-            "AI_Calibration_Files",
             sku_name,
+            active_sides,
         )
 
-        if not os.path.isdir(sku_calibration_dir):
+        if not ok:
             QMessageBox.critical(
                 self,
-                "Calibration Error",
-                f"Selected SKU folder not found:\n{sku_calibration_dir}",
+                "PatchCore Configuration Error",
+                "Selected SKU PatchCore files are incomplete.\n\n"
+                + "\n\n".join(errors[:8]),
             )
             return False
 
-        # required_side_dirs = [
-        #     "calibration_sidewall1",
-        #     "calibration_sidewall2",
-        #     "calibration_innerwall",
-        #     "calibration_tread",
-        #     "calibration_bead",
-        # ]
-
-        required_side_dirs = [
-            "calibration_sidewall1",
-            "calibration_sidewall2",
-            "calibration_tread",
-        ]
-
-        missing = []
-
-        for side_dir_name in required_side_dirs:
-            artifacts_dir = os.path.join(
-                sku_calibration_dir,
-                side_dir_name,
-                "artifacts",
-            )
-
-            if not os.path.isdir(artifacts_dir):
-                missing.append(artifacts_dir)
-
-        if missing:
-            QMessageBox.critical(
-                self,
-                "Calibration Error",
-                "Selected SKU calibration is incomplete.\n\nMissing:\n"
-                + "\n".join(missing[:8]),
-            )
-            return False
-
+        logger.info(
+            f"[PATCHCORE] SKU validated | SKU={sku_name} | "
+            f"sides={','.join(active_sides)} | "
+            f"models={','.join(item.model_path.name for item in resolved.values())}"
+        )
         return True
-    
+
     # REPLACE ENTIRE METHOD:
     def begin_live_flow(self, sku_name, tyre_name):
         """Start live inspection based on deployment mode"""
@@ -1057,7 +1129,7 @@ class MainWindow(QMainWindow):
 
         if not self.validate_selected_sku_calibration(sku_name):
             return
-        if str(deployment) == "True" and not is_hardware_ready():
+        if deployment and not is_hardware_ready():
             QMessageBox.warning(
                 self,
                 "Test Mode Required",
@@ -1073,7 +1145,7 @@ class MainWindow(QMainWindow):
         globals()["multi_cam"] = hardware_state.get("multi_cam")
         globals()["plc_client"] = hardware_state.get("plc_client")
 
-        if str(deployment) == "True" and CAMERA_CAPTURE_ENABLED:
+        if deployment and CAMERA_CAPTURE_ENABLED:
             self.start_continuous_inspection(sku_name, tyre_name)
         else:
             if self.thread_manager.active_threads.get("inspection"):
@@ -1102,14 +1174,11 @@ class MainWindow(QMainWindow):
         
         self.stop_continuous_inspection()
         
-        active_sides = ["sidewall1", "sidewall2", "tread"]
-        capture_sides = [
-            "sidewall1",
-            "sidewall2",
-            "innerwall",
-            "tread",
-            # "bead",
-        ]
+        active_sides = get_active_inspection_sides()
+        # Capture only the views currently enabled for AI. When later pipelines
+        # are ready, update PATCHCORE_ACTIVE_SIDES in .env; no GUI code change
+        # is required.
+        capture_sides = list(active_sides)
 
         self.continuous_worker = start_continuous_cycle(
             media_root=MEDIA_PATH,
@@ -1119,7 +1188,6 @@ class MainWindow(QMainWindow):
             min_capture_interval=2.0,
             seg_model_a_path=MAIN_SEG_MODEL_PATH,
             seg_model_b_path=MAIN_SEG_MODEL_PATH,
-            vit_checkpoint_path=MAIN_VIT_CHECKPOINT_PATH,
             r_detector_path=MAIN_R_DETECTOR_PATH,
             device="cuda" if TORCH_GPU_OK else "cpu",
             auto_preload=True,
@@ -1362,7 +1430,6 @@ class MainWindow(QMainWindow):
             device="cuda" if TORCH_GPU_OK else "cpu",
             seg_model_a_path=MAIN_SEG_MODEL_PATH,
             seg_model_b_path=MAIN_SEG_MODEL_PATH,
-            vit_checkpoint_path=MAIN_VIT_CHECKPOINT_PATH,
             r_detector_path=MAIN_R_DETECTOR_PATH,
         )
         
@@ -1417,30 +1484,6 @@ class MainWindow(QMainWindow):
         # using self.validate_selected_sku_calibration(sku_name).
         # So do not repeat media/AI_Calibration_Files/<SKU> validation here.
 
-        if not MAIN_SEG_MODEL_PATH or not os.path.isfile(MAIN_SEG_MODEL_PATH):
-            QMessageBox.critical(
-                self,
-                "Model Error",
-                f"Main model path invalid:\n{MAIN_SEG_MODEL_PATH}"
-            )
-            return
-
-        if not MAIN_VIT_CHECKPOINT_PATH or not os.path.isfile(MAIN_VIT_CHECKPOINT_PATH):
-            QMessageBox.critical(
-                self,
-                "Model Error",
-                f"VIT checkpoint path invalid:\n{MAIN_VIT_CHECKPOINT_PATH}"
-            )
-            return
-
-        if not MAIN_R_DETECTOR_PATH or not os.path.isfile(MAIN_R_DETECTOR_PATH):
-            QMessageBox.critical(
-                self,
-                "Model Error",
-                f"R detector path invalid:\n{MAIN_R_DETECTOR_PATH}"
-            )
-            return
-
         if CAMERA_CAPTURE_ENABLED:
             if self.multi_cam is None:
                 QMessageBox.critical(
@@ -1457,21 +1500,23 @@ class MainWindow(QMainWindow):
             cam_mgr = None
             demo_capture_root = LOCAL_MULTI_SIDE_TEST_FOLDER
 
-            if not demo_capture_root or not os.path.isdir(demo_capture_root):
+            if not demo_capture_root or not os.path.exists(demo_capture_root):
                 QMessageBox.critical(
                     self,
                     "Path Error",
-                    f"Demo capture folder not found:\n{demo_capture_root}"
+                    f"Local inspection input not found:\n{demo_capture_root}\n\n"
+                    "Set LOCAL_INSPECTION_INPUT in .env."
                 )
                 return
 
-        reset_live_progress(total_images=len(self.side_order))
+        active_side_count = len(get_active_inspection_sides())
+        reset_live_progress(total_images=active_side_count)
         set_live_progress(
             phase="CAPTURING",
             active_zone="All Zones",
             images_captured=0,
-            total_images=len(self.side_order),
-            message="Live inspection started",
+            total_images=active_side_count,
+            message="Live PatchCore inspection started",
         )
         apply_live_progress_to_gui(self)
 
@@ -1489,7 +1534,6 @@ class MainWindow(QMainWindow):
             device="cuda" if TORCH_GPU_OK else "cpu",
             seg_model_a_path=MAIN_SEG_MODEL_PATH,
             seg_model_b_path=MAIN_SEG_MODEL_PATH,
-            vit_checkpoint_path=MAIN_VIT_CHECKPOINT_PATH,
             r_detector_path=MAIN_R_DETECTOR_PATH,
             multi_camera_manager=cam_mgr,
             demo_capture_root=demo_capture_root,
@@ -1510,15 +1554,15 @@ class MainWindow(QMainWindow):
             set_live_progress(
                 phase="COMPLETED",
                 active_zone="All Zones",
-                images_captured=len(self.side_order),
-                total_images=len(self.side_order),
-                message="Inspection completed",
+                images_captured=len(get_active_inspection_sides()),
+                total_images=len(get_active_inspection_sides()),
+                message="PatchCore inspection completed",
             )
             apply_live_progress_to_gui(self)
 
             summary = update_live_result_from_cycle_result(
                 result,
-                total_zones=len(self.side_order),
+                total_zones=len(get_active_inspection_sides()),
             )
 
             plc_status = send_tyre_result_to_plc(
@@ -1634,7 +1678,6 @@ class MainWindow(QMainWindow):
             media_path=MEDIA_PATH,
             raw_dir=RAW_IMAGE_DIR,
             save_root_dir=save_root,
-            mydb=mydb,
             meta_collection="New SKU",
             gridfs_bucket="fs",
             sku_meta=sku_meta,
@@ -1671,230 +1714,367 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(200, self.refresh_component_health)
     
     def setup_header_bar(self, parent_layout):
+        """Build the modern header with compact status chips and icon buttons."""
         header_frame = QFrame()
-        header_frame.setStyleSheet("QFrame { background-color: white; border-radius: 8px; }")
+        header_frame.setObjectName("ModernHeader")
+        header_frame.setFixedHeight(max(self.s(54), 50))
+        header_frame.setStyleSheet("""
+            QFrame#ModernHeader {
+                background: #FFFFFF;
+                border: 1px solid #E5E7EB;
+                border-radius: 11px;
+            }
+        """)
+
         h = QHBoxLayout(header_frame)
-        h.setContentsMargins(10, 5, 10, 5)
-        h.setSpacing(8)
-        
-        cal_icon_path = os.path.join(MEDIA_PATH, "img", "calendar.png")
-        clock_icon_path = os.path.join(MEDIA_PATH, "img", "clock.png")
-        
-        cal_pix = QPixmap(cal_icon_path)
-        if not cal_pix.isNull():
-            cal_pix = cal_pix.scaled(18, 18, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        clock_pix = QPixmap(clock_icon_path)
-        if not clock_pix.isNull():
-            clock_pix = clock_pix.scaled(18, 18, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        
-        self.date_icon = QLabel()
-        self.date_icon.setPixmap(cal_pix)
-        self.date_label = QLabel()
-        self.date_label.setStyleSheet("font: 13px 'Segoe UI'; color: black;")
-        
-        date_box = QWidget()
-        date_layout = QHBoxLayout(date_box)
-        date_layout.setContentsMargins(0, 0, 0, 0)
-        date_layout.setSpacing(4)
-        date_layout.addWidget(self.date_icon)
-        date_layout.addWidget(self.date_label)
-        
-        self.time_icon = QLabel()
-        self.time_icon.setPixmap(clock_pix)
-        self.time_label = QLabel()
-        self.time_label.setStyleSheet("font: 13px 'Segoe UI'; color: black;")
-        
-        time_box = QWidget()
-        time_layout = QHBoxLayout(time_box)
-        time_layout.setContentsMargins(0, 0, 0, 0)
-        time_layout.setSpacing(4)
-        time_layout.addWidget(self.time_icon)
-        time_layout.addWidget(self.time_label)
-        
+        h.setContentsMargins(self.s(14), self.s(6), self.s(12), self.s(6))
+        h.setSpacing(self.s(8))
+
+        def load_header_icon(file_name, size=16):
+            icon_path = os.path.join(MEDIA_PATH, "img", file_name)
+            if not os.path.exists(icon_path):
+                return QIcon()
+            return QIcon(icon_path)
+
+        def make_datetime_item(icon_path):
+            box = QWidget()
+            box.setStyleSheet("background: transparent; border: none;")
+            layout = QHBoxLayout(box)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(self.s(5))
+
+            icon_label = QLabel()
+            icon_label.setStyleSheet("background: transparent; border: none;")
+            icon_label.setFixedSize(self.s(16), self.s(16))
+            icon_label.setAlignment(Qt.AlignCenter)
+            pixmap = QPixmap(icon_path)
+            if not pixmap.isNull():
+                icon_label.setPixmap(pixmap.scaled(
+                    self.s(15), self.s(15), Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                ))
+
+            value_label = QLabel()
+            value_label.setStyleSheet(
+                "color:#263244; background:transparent; border:none; "
+                "font:600 11px 'Segoe UI';"
+            )
+            layout.addWidget(icon_label)
+            layout.addWidget(value_label)
+            return box, value_label
+
+        date_box, self.date_label = make_datetime_item(
+            os.path.join(MEDIA_PATH, "img", "calendar.png")
+        )
+        time_box, self.time_label = make_datetime_item(
+            os.path.join(MEDIA_PATH, "img", "clock.png")
+        )
         h.addWidget(date_box)
-        h.addSpacing(10)
+        h.addSpacing(self.s(4))
         h.addWidget(time_box)
-        h.addStretch()
+
+        # Clear visual separation between time and machine-status chips.
+        h.addSpacing(self.s(22))
 
         self.alarm_indicator_btn = QToolButton()
-        self.alarm_indicator_btn.setText("Alarms: 0")
+        self.alarm_indicator_btn.setText("Alarm 0")
         self.alarm_indicator_btn.setCursor(Qt.PointingHandCursor)
         self.alarm_indicator_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.alarm_indicator_btn.setFixedHeight(max(self.s(29), 27))
         self.alarm_indicator_btn.setVisible(self._has_permission(Permission.ALARM_VIEW))
+        self.alarm_indicator_btn.setToolTip("Open Alarm Center")
         self.alarm_indicator_btn.clicked.connect(self.open_alarm_center)
         self.alarm_indicator_btn.setStyleSheet("""
             QToolButton {
-                font: 800 11px 'Segoe UI';
-                color: white;
-                background-color: #2F9E44;
-                border: none;
-                border-radius: 8px;
-                padding: 6px 11px;
+                padding: 0 11px; background:#FFF7ED; color:#C2410C;
+                border:1px solid #FED7AA; border-radius:7px;
+                font:700 10px 'Segoe UI';
             }
-            QToolButton:hover { background-color: #237A35; }
+            QToolButton:hover { background:#FFEDD5; }
         """)
         h.addWidget(self.alarm_indicator_btn)
+        h.addSpacing(self.s(6))
 
-        self.live_system_status_label = QLabel("System: NOT READY")
+        self.live_system_status_label = QLabel("System Not Ready")
         self.live_system_status_label.setAlignment(Qt.AlignCenter)
+        self.live_system_status_label.setFixedHeight(max(self.s(29), 27))
         self.live_system_status_label.setStyleSheet("""
             QLabel {
-                background: #eeeeee;
-                color: #333333;
-                border-radius: 10px;
-                padding: 6px 12px;
-                font: 800 12px 'Segoe UI';
+                padding:0 11px; background:#FEF2F2; color:#B91C1C;
+                border:1px solid #FECACA; border-radius:7px;
+                font:700 10px 'Segoe UI';
             }
         """)
         h.addWidget(self.live_system_status_label)
+        h.addSpacing(self.s(6))
 
-        self.mode_indicator_label = QLabel("Mode: UNKNOWN")
+        self.mode_indicator_label = QLabel("Mode Unknown")
         self.mode_indicator_label.setAlignment(Qt.AlignCenter)
+        self.mode_indicator_label.setFixedHeight(max(self.s(29), 27))
         self.mode_indicator_label.setStyleSheet("""
             QLabel {
-                background: #eeeeee;
-                color: #333333;
-                border-radius: 10px;
-                padding: 6px 12px;
-                font: 800 12px 'Segoe UI';
+                padding:0 11px; background:#F3F4F6; color:#4B5563;
+                border:1px solid #E5E7EB; border-radius:7px;
+                font:700 10px 'Segoe UI';
             }
         """)
         h.addWidget(self.mode_indicator_label)
+        h.addStretch(1)
 
-        def make_header_command_button(text, bg, hover):
-            b = QToolButton()
-            b.setText(text)
-            b.setCursor(Qt.PointingHandCursor)
-            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
-            b.setStyleSheet(f"""
-                QToolButton {{
-                    font: 800 12px 'Segoe UI';
-                    color: white;
-                    background-color: {bg};
-                    border: none;
-                    border-radius: 8px;
-                    padding: 6px 12px;
-                }}
-                QToolButton:hover {{
-                    background-color: {hover};
-                }}
-                QToolButton:disabled {{
-                    background-color: #999999;
-                    color: #eeeeee;
-                }}
-            """)
-            return b
-
-        self.auto_start_btn = make_header_command_button(
-            "Auto Start",
-            "#198754",
-            "#157347",
-        )
-        self.auto_start_btn.clicked.connect(
-            self._guarded_slot(
-                Permission.PLC_AUTO_START,
-                self.plc_gui_command_service.pulse_auto_start,
-                "PLC Auto Start",
-            )
-        )
-        self.auto_start_btn.setVisible(self._has_permission(Permission.PLC_AUTO_START))
-        h.addWidget(self.auto_start_btn)
-
-        self.servo_reset_btn = make_header_command_button(
-            "All Servo Reset",
-            "#dc3545",
-            "#bb2d3b",
-        )
-        self.servo_reset_btn.clicked.connect(
-            self._guarded_slot(
-                Permission.PLC_SERVO_RESET,
-                self.plc_gui_command_service.pulse_all_servo_reset,
-                "All Servo Reset",
-            )
-        )
-        self.servo_reset_btn.setVisible(self._has_permission(Permission.PLC_SERVO_RESET))
-        h.addWidget(self.servo_reset_btn)
-                
         self.back_btn = QToolButton()
         self.back_btn.setText("Back to Live")
-        self.back_btn.setIcon(QIcon(os.path.join(MEDIA_PATH, "img/human-machine.png")))
-        self.back_btn.setIconSize(QSize(self.s(18), self.s(18)))
+        self.back_btn.setIcon(load_header_icon("undo.png"))
+        self.back_btn.setIconSize(QSize(self.s(15), self.s(15)))
+        self.back_btn.setCursor(Qt.PointingHandCursor)
         self.back_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.back_btn.setFixedHeight(max(self.s(31), 29))
         self.back_btn.setStyleSheet("""
             QToolButton {
-                font: 600 13px 'Segoe UI';
-                color: #571c86;
-                background-color: white;
-                border: 1px solid #571c86;
-                border-radius: 8px;
-                padding: 5px 12px;
+                padding:0 12px; color:#5B21B6; background:#FFFFFF;
+                border:1px solid #7C3AED; border-radius:7px;
+                font:700 11px 'Segoe UI';
             }
-            QToolButton:hover { background-color: #e6e6e6; }
+            QToolButton:hover { background:#F5F3FF; }
         """)
         self.back_btn.clicked.connect(self.handle_back_to_dashboard)
         self.back_btn.setVisible(False)
         h.addWidget(self.back_btn)
-        
-        self.user_identity_label = QLabel(
-            f"{self.session.user.full_name}  •  {self.session.user.role.value.replace('_', ' ').title()}"
+
+        self.auto_start_btn = QToolButton()
+        self.auto_start_btn.setText("Auto Start")
+        self.auto_start_btn.setIcon(load_header_icon("play.png"))
+        self.auto_start_btn.setIconSize(QSize(self.s(15), self.s(15)))
+        self.auto_start_btn.setCursor(Qt.PointingHandCursor)
+        self.auto_start_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.auto_start_btn.setFixedHeight(max(self.s(31), 29))
+        self.auto_start_btn.setStyleSheet("""
+            QToolButton {
+                padding:0 13px; color:#FFFFFF; background:#14804A;
+                border:1px solid #14804A; border-radius:7px;
+                font:700 11px 'Segoe UI';
+            }
+            QToolButton:hover { background:#116B3E; border-color:#116B3E; }
+            QToolButton:disabled { background:#CBD5E1; border-color:#CBD5E1; }
+        """)
+        self.auto_start_btn.clicked.connect(self._guarded_slot(
+            Permission.PLC_AUTO_START,
+            self.plc_gui_command_service.pulse_auto_start,
+            "PLC Auto Start",
+        ))
+        self.auto_start_btn.setVisible(self._has_permission(Permission.PLC_AUTO_START))
+        h.addWidget(self.auto_start_btn)
+
+        self.servo_reset_btn = QToolButton()
+        self.servo_reset_btn.setText("Servo Reset")
+        self.servo_reset_btn.setIcon(load_header_icon("refresh_red.png"))
+        self.servo_reset_btn.setIconSize(QSize(self.s(15), self.s(15)))
+        self.servo_reset_btn.setCursor(Qt.PointingHandCursor)
+        self.servo_reset_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.servo_reset_btn.setFixedHeight(max(self.s(31), 29))
+        self.servo_reset_btn.setStyleSheet("""
+            QToolButton {
+                padding:0 13px; color:#DC2626; background:#FFFFFF;
+                border:1px solid #EF4444; border-radius:7px;
+                font:700 11px 'Segoe UI';
+            }
+            QToolButton:hover { background:#FEF2F2; }
+            QToolButton:disabled { color:#94A3B8; border-color:#CBD5E1; }
+        """)
+        self.servo_reset_btn.clicked.connect(self._guarded_slot(
+            Permission.PLC_SERVO_RESET,
+            self.plc_gui_command_service.pulse_all_servo_reset,
+            "All Servo Reset",
+        ))
+        self.servo_reset_btn.setVisible(self._has_permission(Permission.PLC_SERVO_RESET))
+        h.addWidget(self.servo_reset_btn)
+
+        role_title = self.session.user.role.value.replace("_", " ").title()
+
+        display_name = (
+            self.session.user.full_name
+            or self.session.user.username
+            or "User"
+        ).strip()
+
+        compact_name = display_name.split()[0] if display_name else "User"
+
+
+        # ============================================================
+        # PROFILE BUTTON
+        # ============================================================
+        self.profile_button = QPushButton(compact_name)
+
+        profile_icon_path = os.path.join(
+            MEDIA_PATH,
+            "img",
+            "Admin.png",
         )
-        self.user_identity_label.setStyleSheet("""
-            QLabel {
-                color:#334155; background:#F1F5F9; border:1px solid #CBD5E1;
-                border-radius:8px; padding:6px 10px; font:700 11px 'Segoe UI';
-            }
-        """)
-        h.addWidget(self.user_identity_label)
 
-        logout_btn = QToolButton()
-        logout_btn.setText("Sign Out")
-        logout_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        logout_btn.setStyleSheet("""
-            QToolButton {
-                font:700 12px 'Segoe UI'; color:#9F1239; background:#FFF1F2;
-                border:1px solid #FECDD3; border-radius:8px; padding:6px 10px;
-            }
-            QToolButton:hover { background:#FFE4E6; }
-        """)
-        logout_btn.clicked.connect(self.logout_user)
-        h.addWidget(logout_btn)
+        if os.path.isfile(profile_icon_path):
+            self.profile_button.setIcon(QIcon(profile_icon_path))
+            self.profile_button.setIconSize(
+                QSize(max(self.s(19), 18), max(self.s(19), 18))
+            )
 
-        help_btn = QToolButton()
-        help_btn.setText("Help")
-        help_btn.setIcon(QIcon(os.path.join(MEDIA_PATH, "img/help.png")))
-        help_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        help_btn.setStyleSheet("""
-            QToolButton {
-                font: bold 14px 'Segoe UI';
-                color: #571c86;
-                background-color: white;
-                border: 1px solid #571c86;
-                border-radius: 8px;
-                padding: 5px 10px;
+        self.profile_button.setToolTip(
+            f"Signed in as {display_name} ({role_title})"
+        )
+
+        self.profile_button.setCursor(Qt.PointingHandCursor)
+        self.profile_button.setFixedHeight(max(self.s(33), 31))
+        self.profile_button.setMinimumWidth(max(self.s(145), 140))
+        self.profile_button.setSizePolicy(
+            QSizePolicy.Fixed,
+            QSizePolicy.Fixed,
+        )
+
+        self.profile_button.setStyleSheet("""
+            QPushButton {
+                padding: 0 36px 0 10px;
+                color: #1F2937;
+                background: #F8FAFC;
+                border: 1px solid #D8DEE8;
+                border-radius: 7px;
+                font: 700 11px 'Segoe UI';
+                text-align: left;
             }
-            QToolButton:hover { background-color: #e6e6e6; }
-        """)
-        help_btn.clicked.connect(self.open_help_doc)
-        h.addWidget(help_btn)
-        
-        exit_btn = QToolButton()
-        exit_btn.setText("Exit")
-        exit_btn.setIcon(QIcon(os.path.join(MEDIA_PATH, "img/Logout1.png")))
-        exit_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        exit_btn.setStyleSheet("""
-            QToolButton {
-                font: bold 14px 'Segoe UI';
-                color: #571c86;
-                background-color: white;
-                border: 1px solid #571c86;
-                border-radius: 8px;
-                padding: 5px 15px;
+
+            QPushButton:hover {
+                background: #F1F5F9;
+                border-color: #C7D0DD;
             }
-            QToolButton:hover { background-color: #e6e6e6; }
+
+            QPushButton:pressed {
+                background: #E9EEF5;
+            }
+
+            QPushButton::menu-indicator {
+                image: url(media/img/dropdown.png);
+                subcontrol-origin: padding;
+                subcontrol-position: right center;
+                width: 18px;
+                height: 18px;
+                right: 9px;
+            }
         """)
-        exit_btn.clicked.connect(self.stop_server)
-        h.addWidget(exit_btn)
-        
+
+
+        # ============================================================
+        # PROFILE DROPDOWN MENU
+        # ============================================================
+        profile_menu = QMenu(self.profile_button)
+        profile_menu.setMinimumWidth(max(self.s(210), 200))
+
+        profile_menu.setStyleSheet("""
+            QMenu {
+                padding: 7px;
+                background: #FFFFFF;
+                color: #1F2937;
+                border: 1px solid #D8DEE8;
+                font: 600 11px 'Segoe UI';
+            }
+
+            QMenu::item {
+                padding: 9px 14px;
+                margin: 2px;
+                border-radius: 6px;
+            }
+
+            QMenu::item:selected {
+                color: #5B21B6;
+                background: #F5F3FF;
+            }
+
+            QMenu::separator {
+                height: 1px;
+                margin: 6px 8px;
+                background: #E5E7EB;
+            }
+
+            QMenu::icon {
+                padding-left: 4px;
+            }
+        """)
+
+
+        # ============================================================
+        # HELP
+        # ============================================================
+        help_icon_path = os.path.join(
+            MEDIA_PATH,
+            "img",
+            "help.png",
+        )
+
+        help_action = profile_menu.addAction(
+            QIcon(help_icon_path),
+            "Help & Documentation",
+        )
+
+        help_action.triggered.connect(
+            lambda _checked=False: self.open_help_doc()
+        )
+
+
+        # ============================================================
+        # USER MANAGEMENT
+        # ============================================================
+        if self._has_permission(Permission.USER_MANAGE):
+
+            user_icon_path = os.path.join(
+                MEDIA_PATH,
+                "img",
+                "People.png",
+            )
+
+            user_action = profile_menu.addAction(
+                QIcon(user_icon_path),
+                "User Management",
+            )
+
+            user_action.triggered.connect(
+                self.open_user_management_page
+            )
+
+
+        profile_menu.addSeparator()
+
+
+        # ============================================================
+        # SIGN OUT
+        # ============================================================
+        logout_icon_path = os.path.join(
+            MEDIA_PATH,
+            "img",
+            "Logout1.png",
+        )
+
+        signout_action = profile_menu.addAction(
+            QIcon(logout_icon_path),
+            "Sign Out",
+        )
+
+        signout_action.triggered.connect(
+            self.logout_user
+        )
+
+
+        # ============================================================
+        # EXIT APPLICATION
+        # ============================================================
+        exit_action = profile_menu.addAction(
+            QIcon(logout_icon_path),
+            "Exit Application",
+        )
+
+        exit_action.triggered.connect(
+            self.stop_server
+        )
+
+
+        self.profile_button.setMenu(profile_menu)
+        h.addWidget(self.profile_button)
+
         parent_layout.addWidget(header_frame)
 
     def _on_content_stack_changed(self, index):
@@ -1938,6 +2118,13 @@ class MainWindow(QMainWindow):
 
         if self.back_btn:
             self.back_btn.setVisible(False)
+
+        try:
+            live_button = self.sidebar_buttons.get(Permission.INSPECTION_RUN.value)
+            if live_button is not None:
+                self._set_active_sidebar_button(live_button)
+        except Exception:
+            pass
     
     def _has_permission(self, permission: Permission | str) -> bool:
         value = permission.value if isinstance(permission, Permission) else str(permission)
@@ -2061,85 +2248,113 @@ class MainWindow(QMainWindow):
 
     def setup_ui(self):
         central_widget = QWidget()
+        central_widget.setObjectName("ApplicationShell")
+        central_widget.setStyleSheet("""
+            QWidget#ApplicationShell {
+                background: #F3F5F9;
+            }
+        """)
         self.setCentralWidget(central_widget)
+
         root_layout = QHBoxLayout(central_widget)
-        root_layout.setContentsMargins(10, 10, 10, 10)
-        root_layout.setSpacing(15)
+        root_layout.setContentsMargins(self.s(10), self.s(10), self.s(10), self.s(10))
+        root_layout.setSpacing(self.s(12))
+
         self.setup_sidebar(root_layout)
+
         right_widget = QWidget()
+        right_widget.setStyleSheet("background: transparent;")
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(10)
+        right_layout.setSpacing(self.s(10))
+
         self.setup_header_bar(right_layout)
         self.setup_main_content(right_layout)
         root_layout.addWidget(right_widget, 1)
-    
+
     def setup_sidebar(self, main_layout):
         sidebar = QFrame()
-        sidebar.setFixedWidth(self.s(210))
+        sidebar.setObjectName("NavigationRail")
+        sidebar.setFixedWidth(max(self.s(205), 195))
         sidebar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        sidebar.setStyleSheet("QFrame { background-color: #571c86; border-radius: 30px; }")
+        sidebar.setStyleSheet("""
+            QFrame#NavigationRail {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2F1757,
+                    stop:0.55 #4A1F78,
+                    stop:1 #5B2189
+                );
+                border: 1px solid #4B1E78;
+                border-radius: 22px;
+            }
+            QPushButton#NavigationButton {
+                min-height: 32px;
+                padding: 0 12px;
+                color: #F8F7FC;
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 9px;
+                text-align: left;
+                font: 600 12px 'Segoe UI';
+            }
+            QPushButton#NavigationButton:hover {
+                background: rgba(255, 255, 255, 22);
+                border-color: rgba(255, 255, 255, 32);
+            }
+            QPushButton#NavigationButton[active="true"] {
+                color: #FFFFFF;
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #6D35C3,
+                    stop:1 #7C3AED
+                );
+                border: 1px solid rgba(255, 255, 255, 55);
+                font-weight: 700;
+            }
+            QPushButton#NavigationButton:pressed {
+                background: #5B21B6;
+            }
+        """)
+
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(8, 8, 8, 8)
-        sidebar_layout.setSpacing(8)
-        
+        sidebar_layout.setContentsMargins(self.s(10), self.s(10), self.s(10), self.s(10))
+        sidebar_layout.setSpacing(self.s(4))
+
         logo_label = QLabel()
-        logo_pixmap = QPixmap(os.path.join(MEDIA_PATH, "img/Apollo_white-removebg-preview.png"))
-        scaled_logo = logo_pixmap.scaled(200, 55, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        logo_label.setPixmap(scaled_logo)
+        logo_pixmap = QPixmap(
+            os.path.join(MEDIA_PATH, "img", "Apollo_white-removebg-preview.png")
+        )
+        if not logo_pixmap.isNull():
+            logo_label.setPixmap(
+                logo_pixmap.scaled(
+                    self.s(174), self.s(54),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
         logo_label.setAlignment(Qt.AlignCenter)
+        logo_label.setMinimumHeight(self.s(56))
         sidebar_layout.addWidget(logo_label)
-        
-        button_style = """
-            QPushButton {
-                font: bold 13px 'Segoe UI';
-                color: #ffffff;
-                background-color: rgba(255, 255, 255, 25);
-                background-image: qlineargradient(
-                    x1:0, y1:0, x2:0, y2:1,
-                    stop:0   rgba(255, 255, 255, 120),
-                    stop:0.45 rgba(255, 255, 255, 40),
-                    stop:1   rgba(255, 255, 255, 10)
-                );
-                border-radius: 18px;
-                border: 1px solid rgba(255, 255, 255, 140);
-                padding: 3px 6px;
-                min-height: 28px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 255, 255, 60);
-                background-image: qlineargradient(
-                    x1:0, y1:0, x2:0, y2:1,
-                    stop:0   rgba(255, 255, 255, 200),
-                    stop:0.4 rgba(255, 255, 255, 80),
-                    stop:1   rgba(255, 255, 255, 30)
-                );
-                border: 1px solid rgba(255, 255, 255, 230);
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 40);
-                padding-top: 5px;
-                padding-bottom: 3px;
-            }
-        """
-        
+        sidebar_layout.addSpacing(self.s(4))
+
         buttons = [
             ("System Monitor", "test_mode.png", self.open_test_popup, Permission.ALARM_VIEW),
             ("Live", "run_smart_qc.png", self.capture_image, Permission.INSPECTION_RUN),
             ("Device", "cam.png", self.open_device_page, Permission.DEVICE_CONFIGURE),
-            ("Capture", "cam.png", self.open_capture_settings_page, Permission.CAPTURE_CONFIGURE),
+            ("Capture", "Capture.png", self.open_capture_settings_page, Permission.CAPTURE_CONFIGURE),
             ("Axis Status", "motor.png", self.open_axis_status_page, Permission.AXIS_VIEW),
             ("Run New SKU", "run_new_sku.png", self.run_new_sku, Permission.SKU_MANAGE),
             ("Recipe Management", "recipe.png", self.open_recipe_management_page, Permission.RECIPE_MANAGE),
             ("Repeatability", "repeatability.png", self.open_repeatability_page, Permission.REPEATABILITY_RUN),
             ("OSC Page", "action_code_plan.png", self.open_action_code_plan, Permission.OSC_MANAGE),
             ("Dashboard", "dashboard.png", self.open_dashboard, Permission.DASHBOARD_VIEW),
-            ("Inspection History", "dashboard.png", self.open_inspection_history_page, Permission.INSPECTION_HISTORY_VIEW),
+            ("Inspection History", "history.png", self.open_inspection_history_page, Permission.INSPECTION_HISTORY_VIEW),
             ("Annotation Tool", "annotation_tool.png", self.open_annotation_tool, Permission.ANNOTATION_USE),
             ("ROI Measure", "cam.png", self.open_roi_measurement_tool, Permission.ROI_MEASURE),
             ("User Management", "User.png", self.open_user_management_page, Permission.USER_MANAGE),
         ]
-        
+
         def load_square_icon(icon_path: str, size: int = 18) -> QIcon:
             pm = QPixmap(icon_path)
             if pm.isNull():
@@ -2147,101 +2362,147 @@ class MainWindow(QMainWindow):
             pm = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             canvas = QPixmap(size, size)
             canvas.fill(Qt.transparent)
-            p = QPainter(canvas)
-            x = (size - pm.width()) // 2
-            y = (size - pm.height()) // 2
-            p.drawPixmap(x, y, pm)
-            p.end()
+            painter = QPainter(canvas)
+            painter.drawPixmap((size - pm.width()) // 2, (size - pm.height()) // 2, pm)
+            painter.end()
             return QIcon(canvas)
-        
+
         self.sidebar_buttons = {}
+        live_button = None
+
         for text, icon_name, slot, permission in buttons:
             if not self._has_permission(permission):
                 continue
+
             btn = QPushButton(text)
-            btn.setLayoutDirection(Qt.LeftToRight)
+            btn.setObjectName("NavigationButton")
+            btn.setProperty("active", False)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedHeight(self.s(30))
+            btn.setFixedHeight(max(self.s(35), 33))
+
             icon_path = os.path.join(MEDIA_PATH, "img", icon_name)
             if os.path.exists(icon_path):
-                btn.setIcon(load_square_icon(icon_path, 18))
-                btn.setIconSize(QSize(18, 18))
-            btn.setStyleSheet(button_style + """
-                QPushButton {
-                    text-align: left;
-                    padding-left: 14px;
-                    padding-right: 10px;
-                }
-            """)
-            btn.clicked.connect(lambda _checked=False, callback=slot: callback())
+                btn.setIcon(load_square_icon(icon_path, self.s(17)))
+                btn.setIconSize(QSize(self.s(17), self.s(17)))
+
+            def invoke(_checked=False, button=btn, callback=slot):
+                self._set_active_sidebar_button(button)
+                callback()
+
+            btn.clicked.connect(invoke)
             self.sidebar_buttons[permission.value] = btn
             sidebar_layout.addWidget(btn)
-        
-        tyre_label = QLabel("TYRE INSPECTED")
-        tyre_label.setStyleSheet("font: bold 12px 'Segoe UI'; color: #FFFFFF;")
-        tyre_label.setAlignment(Qt.AlignCenter)
-        sidebar_layout.addWidget(tyre_label)
-        
-        date_label = QLabel(datetime.today().strftime("%d/%m/%Y"))
-        date_label.setStyleSheet("font: 11px 'Segoe UI'; color: #E8E0FF;")
-        date_label.setAlignment(Qt.AlignCenter)
-        sidebar_layout.addWidget(date_label)
-        
-        self.label_count = QLabel("0")
-        self.label_count.setStyleSheet("""
+
+            if text == "Live":
+                live_button = btn
+
+        sidebar_layout.addSpacing(self.s(18))
+
+        tyre_caption = QLabel("TYRES INSPECTED")
+        tyre_caption.setAlignment(Qt.AlignCenter)
+        tyre_caption.setStyleSheet("""
             QLabel {
-                font: bold 34px 'Segoe UI';
-                color: #FFFFFF;
-                background-color: #3A2FA3;
-                border-radius: 16px;
-                padding: 8px;
+                color: #E9DDF7;
+                font: 700 10px 'Segoe UI';
+                letter-spacing: 0.5px;
             }
         """)
+        sidebar_layout.addWidget(tyre_caption)
+
+        date_label = QLabel(datetime.today().strftime("%d %b %Y"))
+        date_label.setAlignment(Qt.AlignCenter)
+        date_label.setStyleSheet("color: #CFC0E3; font: 500 10px 'Segoe UI';")
+        sidebar_layout.addWidget(date_label)
+
+        self.label_count = QLabel("0")
         self.label_count.setAlignment(Qt.AlignCenter)
-        self.label_count.setFixedHeight(self.s(70))
+        self.label_count.setFixedHeight(self.s(64))
+        self.label_count.setStyleSheet("""
+            QLabel {
+                color: #FFFFFF;
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #4338CA,
+                    stop:1 #5B21B6
+                );
+                border: 1px solid rgba(255, 255, 255, 35);
+                border-radius: 13px;
+                font: 800 30px 'Segoe UI';
+            }
+        """)
         sidebar_layout.addWidget(self.label_count)
-        
-        sidebar_layout.addStretch()
-        
+        sidebar_layout.addStretch(1)
+
         bottom_logo = QLabel()
-        bottom_pixmap = QPixmap(os.path.join(MEDIA_PATH, "img/Radome-removebg-preview.png"))
-        scaled_bottom = bottom_pixmap.scaled(150, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        bottom_logo.setPixmap(scaled_bottom)
+        bottom_pixmap = QPixmap(
+            os.path.join(MEDIA_PATH, "img", "Radome-removebg-preview.png")
+        )
+        if not bottom_pixmap.isNull():
+            bottom_logo.setPixmap(
+                bottom_pixmap.scaled(
+                    self.s(178), self.s(68),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
         bottom_logo.setAlignment(Qt.AlignCenter)
+        bottom_logo.setMinimumHeight(self.s(68))
         sidebar_layout.addWidget(bottom_logo)
-        
+
         main_layout.addWidget(sidebar)
-    
+
+        if live_button is not None:
+            self._set_active_sidebar_button(live_button)
+
+    def _set_active_sidebar_button(self, active_button):
+        """Refresh the selected navigation item without rebuilding the sidebar."""
+        for button in getattr(self, "sidebar_buttons", {}).values():
+            is_active = button is active_button
+            if bool(button.property("active")) == is_active:
+                continue
+            button.setProperty("active", is_active)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
+
     def setup_main_content(self, main_layout):
         self.content_stack = QStackedWidget()
         self.content_stack.currentChanged.connect(self._on_content_stack_changed)
         dashboard_widget = QWidget()
-        dashboard_widget.setStyleSheet("background-color: #f5f5f5;")
+        dashboard_widget.setStyleSheet("background-color: #F3F5F9;")
         content_layout = QHBoxLayout(dashboard_widget)
-        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(self.s(10))
         
         image_frame = QFrame()
-        image_frame.setStyleSheet("background-color: #f5f5f5;")
+        image_frame.setStyleSheet("background: transparent;")
         image_layout = QVBoxLayout(image_frame)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        image_layout.setSpacing(self.s(7))
         
         center_frame = QFrame()
-        center_frame.setStyleSheet("background-color: #f5f5f5;")
+        center_frame.setStyleSheet("background: transparent;")
         center_layout = QVBoxLayout(center_frame)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(self.s(7))
         
         info_frame = QFrame()
-        info_frame.setStyleSheet("background-color: #f5f5f5;")
+        info_frame.setStyleSheet("background: transparent;")
         info_layout = QHBoxLayout(info_frame)
-        info_layout.setSpacing(self.s(10))
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(self.s(8))
         
         def _make_info_card(title):
             card = QFrame()
-            card.setMinimumHeight(self.s(88))
+            card.setObjectName("InfoCard")
+            card.setMinimumHeight(self.s(68))
             card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            card.setStyleSheet("QFrame { background-color: white; border-radius: 10px; }")
+            card.setStyleSheet("QFrame#InfoCard { background:#FFFFFF; border:1px solid #E4E8EF; border-radius:10px; }")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setContentsMargins(self.s(10), self.s(6), self.s(10), self.s(6))
+            card_layout.setSpacing(self.s(4))
             title_label = QLabel(title)
-            title_label.setStyleSheet("font: bold 13px 'Arial';")
+            title_label.setStyleSheet("font: 700 11px 'Segoe UI'; color: #364152; border: none;")
             title_label.setAlignment(Qt.AlignLeft)
             card_layout.addWidget(title_label)
             return card, card_layout
@@ -2250,15 +2511,15 @@ class MainWindow(QMainWindow):
         self.selected_sku_value_label = QLabel("--")
         self.selected_sku_value_label.setStyleSheet("""
             QLabel {
-                font: bold 13px 'Arial';
-                color: #0056D2;
-                background-color: white;
-                border: 1px solid #d0d0d0;
+                font: 700 12px 'Segoe UI';
+                color: #5B21B6;
+                background: #FBFCFE;
+                border: 1px solid #DDE3EC;
                 border-radius: 8px;
                 padding: 8px 10px;
             }
         """)
-        self.selected_sku_value_label.setMinimumHeight(self.s(38))
+        self.selected_sku_value_label.setFixedHeight(max(self.s(32), 30))
         self.selected_sku_value_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         sku_layout.addWidget(self.selected_sku_value_label)
         info_layout.addWidget(sku_card)
@@ -2267,15 +2528,15 @@ class MainWindow(QMainWindow):
         self.selected_tyre_value_label = QLabel("--")
         self.selected_tyre_value_label.setStyleSheet("""
             QLabel {
-                font: bold 13px 'Arial';
-                color: #0056D2;
-                background-color: white;
-                border: 1px solid #d0d0d0;
+                font: 700 12px 'Segoe UI';
+                color: #5B21B6;
+                background: #FBFCFE;
+                border: 1px solid #DDE3EC;
                 border-radius: 8px;
                 padding: 8px 10px;
             }
         """)
-        self.selected_tyre_value_label.setMinimumHeight(self.s(38))
+        self.selected_tyre_value_label.setFixedHeight(max(self.s(32), 30))
         self.selected_tyre_value_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         tyre_layout.addWidget(self.selected_tyre_value_label)
         info_layout.addWidget(tyre_card)
@@ -2286,13 +2547,12 @@ class MainWindow(QMainWindow):
         img_label = QLabel()
         img_label.setAlignment(Qt.AlignCenter)
         img_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        img_label.setMinimumHeight(self.s(42))
-        img_label.setMaximumHeight(self.s(42))
+        img_label.setFixedHeight(max(self.s(32), 30))
         img_label.setStyleSheet("background-color: white; border: none;")
         
         if barcode_img:
             pixmap = QPixmap(barcode_img)
-            scaled_pixmap = pixmap.scaled(self.s(220), self.s(42), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            scaled_pixmap = pixmap.scaled(self.s(210), self.s(30), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             img_label.setPixmap(scaled_pixmap)
         else:
             img_label.setText("No Barcode")
@@ -2303,8 +2563,10 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(info_frame)
         
         self.images_row = QFrame()
-        self.images_row.setStyleSheet("background-color: #f5f5f5;")
+        self.images_row.setStyleSheet("background: transparent;")
         self.images_layout = QHBoxLayout(self.images_row)
+        self.images_layout.setContentsMargins(0, 0, 0, 0)
+        self.images_layout.setSpacing(self.s(8))
         
         self.startup_image_paths = {
             "sidewall1": STARTUP_IMAGE_PATHS[0],
@@ -2318,24 +2580,25 @@ class MainWindow(QMainWindow):
         
         for index, (side_key, title_text) in enumerate(self.side_order):
             card = QFrame()
+            card.setObjectName("ImageCard")
             card.setMinimumWidth(self.s(150))
             card.setMinimumHeight(self.s(400))
             card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            card.setStyleSheet("QFrame { background-color: white; border-radius: 10px; }")
+            card.setStyleSheet("QFrame#ImageCard { background:#FFFFFF; border:1px solid #E4E8EF; border-radius:10px; }")
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(5, 5, 5, 5)
             card_layout.setSpacing(6)
             
             title_label = QLabel(title_text)
-            title_label.setStyleSheet("font: bold 11px 'Arial'; color: #400080;")
+            title_label.setStyleSheet("font: 700 11px 'Segoe UI'; color: #5B21B6; border: none;")
             title_label.setAlignment(Qt.AlignCenter)
             card_layout.addWidget(title_label)
             
             img_label = QLabel()
             img_label.setAlignment(Qt.AlignCenter)
             img_label.setMinimumHeight(self.s(360))
-            img_label.setStyleSheet("QLabel { background-color: white; border-radius: 8px; }")
-            img_label.setText("🖼️")
+            img_label.setStyleSheet("QLabel { background: #FBFCFE; color: #94A3B8; border: 1px solid #EEF1F5; border-radius: 9px; font: 600 12px 'Segoe UI'; }")
+            img_label.setText("No image")
             img_label.setCursor(Qt.PointingHandCursor)
             card_layout.addWidget(img_label, 1)
             
@@ -2354,48 +2617,93 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(image_frame, 4)
         
         # ------------------------------------------------------------------
-        # RIGHT PANEL: Component Health + Defect Info
+        # RIGHT RAIL: Component Health + Result Summary + Defect Info
         # ------------------------------------------------------------------
         right_panel = QFrame()
-        right_panel.setFixedWidth(300)
-        right_panel.setStyleSheet("QFrame { background-color: white; border-radius: 20px; }")
+        right_panel.setObjectName("RightRail")
+        right_panel.setFixedWidth(max(self.s(300), 292))
+        right_panel.setStyleSheet("QFrame#RightRail { background: transparent; border: none; }")
+
         right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(10, 10, 10, 10)
-        right_layout.setSpacing(10)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(self.s(9))
+
+        def make_section_card(title, icon_name=None):
+            card = QFrame()
+            card.setObjectName("SectionCard")
+            card.setStyleSheet("""
+                QFrame#SectionCard {
+                    background: #FFFFFF;
+                    border: 1px solid #E4E8EF;
+                    border-radius: 12px;
+                }
+            """)
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(self.s(12), self.s(11), self.s(12), self.s(11))
+            layout.setSpacing(self.s(7))
+
+            heading_row = QWidget()
+            heading_row.setStyleSheet("background: transparent; border: none;")
+            heading_layout = QHBoxLayout(heading_row)
+            heading_layout.setContentsMargins(0, 0, 0, 0)
+            heading_layout.setSpacing(self.s(7))
+
+            if icon_name:
+                icon_label = QLabel()
+                icon_label.setStyleSheet("background: transparent; border: none;")
+                icon_label.setFixedSize(self.s(18), self.s(18))
+                icon_path = os.path.join(MEDIA_PATH, "img", icon_name)
+                pixmap = QPixmap(icon_path)
+                if not pixmap.isNull():
+                    icon_label.setPixmap(pixmap.scaled(
+                        self.s(17), self.s(17), Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    ))
+                heading_layout.addWidget(icon_label)
+
+            heading = QLabel(title)
+            heading.setStyleSheet("""
+                QLabel {
+                    color: #182230;
+                    background: transparent;
+                    border: none;
+                    font: 700 13px 'Segoe UI';
+                }
+            """)
+            heading.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            heading_layout.addWidget(heading)
+            heading_layout.addStretch(1)
+            layout.addWidget(heading_row)
+            return card, layout
 
         # ---------------- Component Health ----------------
-        health_title = QLabel("Component Health")
-        health_title.setStyleSheet("font: bold 15px 'Arial';")
-        health_title.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(health_title)
-
+        health_card, health_card_layout = make_section_card("Component Health", "wave.png")
         self.health_labels = {}
 
         def make_health_row(key, title):
             row = QFrame()
-            row.setStyleSheet("""
-                QFrame {
-                    background-color: #F8F8F8;
-                    border-radius: 8px;
-                }
-            """)
+            row.setObjectName("HealthRow")
+            row.setStyleSheet("QFrame#HealthRow { background:transparent; border:none; }")
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(8, 5, 8, 5)
-            row_layout.setSpacing(6)
+            row_layout.setContentsMargins(self.s(8), self.s(5), self.s(8), self.s(5))
+            row_layout.setSpacing(self.s(6))
 
             name_lbl = QLabel(title)
-            name_lbl.setStyleSheet("font: bold 11px 'Segoe UI'; color:#222;")
+            name_lbl.setStyleSheet("color:#344054; background:transparent; border:none; font:600 10px 'Segoe UI';")
             row_layout.addWidget(name_lbl)
-
-            row_layout.addStretch()
+            row_layout.addStretch(1)
 
             status_lbl = QLabel("● Not checked")
             status_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            status_lbl.setStyleSheet("font: bold 10px 'Segoe UI'; color:#666;")
+            status_lbl.setStyleSheet("color:#667085; background:transparent; border:none; font:600 9px 'Segoe UI';")
             row_layout.addWidget(status_lbl)
 
             self.health_labels[key] = status_lbl
-            right_layout.addWidget(row)
+            health_card_layout.addWidget(row)
+            separator = QFrame()
+            separator.setFixedHeight(1)
+            separator.setStyleSheet("background:#EEF2F6; border:none;")
+            health_card_layout.addWidget(separator)
 
         make_health_row("plc", "PLC")
         make_health_row("cameras", "Cameras")
@@ -2403,66 +2711,107 @@ class MainWindow(QMainWindow):
         make_health_row("gpu", "GPU")
         make_health_row("storage", "Storage")
         make_health_row("app_ok", "App OK")
+        right_layout.addWidget(health_card)
 
-        # separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background-color:#e6e6e6;")
-        right_layout.addWidget(sep)
+        # ---------------- Tyre Result Summary ----------------
+        result_card = QFrame()
+        result_card.setObjectName("ResultCard")
+        result_card.setStyleSheet("""
+            QFrame#ResultCard {
+                background: #FFFFFF;
+                border: 1px solid #E4E8EF;
+                border-radius: 12px;
+            }
+        """)
+        result_card_layout = QVBoxLayout(result_card)
+        result_card_layout.setContentsMargins(
+            self.s(12), self.s(10), self.s(12), self.s(10)
+        )
+        result_card_layout.setSpacing(self.s(7))
 
-        # ---------------- Tyre Result Summary / F-025 ----------------
+        result_heading_row = QWidget()
+        result_heading_row.setStyleSheet("background: transparent; border: none;")
+        result_heading_layout = QHBoxLayout(result_heading_row)
+        result_heading_layout.setContentsMargins(0, 0, 0, 0)
+        result_heading_layout.setSpacing(self.s(7))
+
+        result_icon = QLabel()
+        result_icon.setStyleSheet("background: transparent; border: none;")
+        result_icon.setFixedSize(self.s(18), self.s(18))
+        result_icon_pixmap = QPixmap(os.path.join(MEDIA_PATH, "img", "wheels.png"))
+        if not result_icon_pixmap.isNull():
+            result_icon.setPixmap(result_icon_pixmap.scaled(
+                self.s(17), self.s(17), Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            ))
+        result_heading_layout.addWidget(result_icon)
+
+        result_heading = QLabel("Tyre Result Summary")
+        result_heading.setStyleSheet(
+            "color:#182230; background:transparent; border:none; "
+            "font:700 13px 'Segoe UI';"
+        )
+        result_heading_layout.addWidget(result_heading)
+        result_heading_layout.addStretch(1)
+        result_card_layout.addWidget(result_heading_row)
+
         self.tyre_result_summary_widget = create_tyre_result_summary_widget(self)
-        right_layout.addWidget(self.tyre_result_summary_widget)
+        self.tyre_result_summary_widget.setStyleSheet("background: transparent; border: none;")
 
-        # separator
-        sep_result = QFrame()
-        sep_result.setFrameShape(QFrame.HLine)
-        sep_result.setStyleSheet("background-color:#e6e6e6;")
-        right_layout.addWidget(sep_result)
+        # Hide the widget's old duplicate title and remove title background marks.
+        for child_label in self.tyre_result_summary_widget.findChildren(QLabel):
+            if child_label.text().strip().lower() == "tyre result summary":
+                child_label.hide()
+            else:
+                child_label.setAttribute(Qt.WA_StyledBackground, False)
+
+        result_card_layout.addWidget(self.tyre_result_summary_widget)
+        right_layout.addWidget(result_card)
 
         # ---------------- Defect Info ----------------
-        defect_title = QLabel("Defect Info")
-        defect_title.setStyleSheet("font: bold 15px 'Arial';")
-        defect_title.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(defect_title)
+        defect_card, defect_card_layout = make_section_card("Defect Info", "info.png")
 
         self.defect_info_container = QWidget()
+        self.defect_info_container.setStyleSheet("background: transparent;")
         self.defect_info_layout = QVBoxLayout(self.defect_info_container)
         self.defect_info_layout.setContentsMargins(0, 0, 0, 0)
-        self.defect_info_layout.setSpacing(8)
+        self.defect_info_layout.setSpacing(self.s(7))
 
-        # Initial/default defect cards
         defects = [
             {"name": "Tread blister", "area": "1mm", "code": "-", "category": "OE"},
-            {"name": "Tread lightness", "area": "3mm", "code": "-", "category": "Replacement"}
+            {"name": "Tread lightness", "area": "3mm", "code": "-", "category": "Replacement"},
         ]
 
         for defect in defects:
             dcard = QFrame()
-            dcard.setStyleSheet("QFrame { background-color: #F8F8F8; border-radius: 10px; }")
+            dcard.setObjectName("DefectCard")
+            dcard.setStyleSheet("""
+                QFrame#DefectCard {
+                    background:#F8FAFC; border:none; border-radius:8px;
+                }
+            """)
             dcard_layout = QVBoxLayout(dcard)
-            dcard_layout.setContentsMargins(10, 6, 10, 6)
+            dcard_layout.setContentsMargins(self.s(10), self.s(7), self.s(10), self.s(7))
+            dcard_layout.setSpacing(self.s(2))
 
             name_label = QLabel(defect["name"])
-            name_label.setStyleSheet("font: bold 13px 'Arial';")
+            name_label.setStyleSheet("color: #182230; border: none; font: 700 11px 'Segoe UI';")
             dcard_layout.addWidget(name_label)
 
-            area_label = QLabel(f"Defect Area: {defect['area']}")
-            area_label.setStyleSheet("font: 11px 'Arial';")
-            dcard_layout.addWidget(area_label)
-
-            code_label = QLabel(f"Action Code: {defect['code']}")
-            code_label.setStyleSheet("font: 11px 'Arial';")
-            dcard_layout.addWidget(code_label)
-
-            category_label = QLabel(f"Category: {defect['category']}")
-            category_label.setStyleSheet("font: 11px 'Arial';")
-            dcard_layout.addWidget(category_label)
+            for line in (
+                f"Defect Area: {defect['area']}",
+                f"Action Code: {defect['code']}",
+                f"Category: {defect['category']}",
+            ):
+                line_label = QLabel(line)
+                line_label.setStyleSheet("color: #475467; border: none; font: 500 9px 'Segoe UI';")
+                dcard_layout.addWidget(line_label)
 
             self.defect_info_layout.addWidget(dcard)
 
-        right_layout.addWidget(self.defect_info_container)
-        right_layout.addStretch()
+        defect_card_layout.addWidget(self.defect_info_container)
+        right_layout.addWidget(defect_card)
+        right_layout.addStretch(1)
 
         content_layout.addWidget(right_panel, 1)
         
@@ -2501,12 +2850,9 @@ class MainWindow(QMainWindow):
         self.time_label.setText(now.strftime("%I:%M %p"))
     
     def update_marquee_text(self):
-        base_len = len(self.copy_full_text)
-        view = self.copy_padded_text[self.copy_index:self.copy_index + base_len]
-        self.copyright_label.setText(view)
-        self.copy_index += 1
-        if self.copy_index + base_len >= len(self.copy_padded_text):
-            self.copy_index = 0
+        """Keep the footer text available for compatibility with older calls."""
+        if getattr(self, "copyright_label", None) is not None:
+            self.copyright_label.setText(self.copy_full_text)
     
     def load_startup_images(self):
         for side_key, _title in self.side_order:
@@ -2522,8 +2868,8 @@ class MainWindow(QMainWindow):
                     self.current_panel_image_paths[side_key] = img_path
                     img_label.mousePressEvent = self._make_open_image_handler(side_key)
             else:
-                img_label.setText("🖼️")
-                img_label.setStyleSheet("font: 48px; color: grey; background-color: white;")
+                img_label.setText("No image")
+                img_label.setStyleSheet("font: 600 12px 'Segoe UI'; color: #94A3B8; background: #FBFCFE;")
     
     def _make_open_image_handler(self, side_key):
         def handler(event):
@@ -2533,7 +2879,7 @@ class MainWindow(QMainWindow):
         return handler
     
     def open_full_image(self, image_path):
-        viewer = ImageViewer(image_path)
+        viewer = ImageViewer(image_path, parent=self)
         viewer.exec_()
     
     @permission_required(Permission.INSPECTION_RUN)

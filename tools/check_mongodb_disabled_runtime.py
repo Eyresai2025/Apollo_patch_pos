@@ -44,7 +44,7 @@ def main() -> int:
         checks["LEGACY_ACCESS_BLOCKED"] = True
 
     print("=" * 72)
-    print("Apollo VIT - MongoDB Disabled Runtime Check")
+    print("Apollo Tyre Inspection - MongoDB Disabled Runtime Check")
     print("=" * 72)
     for name, ok in checks.items():
         print(f"{name:<42}: {'OK' if ok else 'FAILED'}")

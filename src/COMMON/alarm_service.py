@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Alarm lifecycle service for Apollo VIT V5.
+"""Alarm lifecycle service for Apollo Tyre Inspection V5.
 
 The service converts lightweight component-health snapshots into deduplicated
 PostgreSQL alarms. It deliberately does no camera/PLC reconnection and performs no

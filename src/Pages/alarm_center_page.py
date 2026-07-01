@@ -655,7 +655,7 @@ class AlarmCenterPage(QWidget):
             )
         document = QTextDocument()
         document.setHtml(
-            "<h2>Apollo VIT Alarm & Event Report</h2>"
+            "<h2>Apollo Tyre Inspection Alarm & Event Report</h2>"
             f"<p>Generated: {html.escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</p>"
             "<table border='1' cellspacing='0' cellpadding='5' width='100%'>"
             "<tr><th>Opened</th><th>Severity</th><th>State</th><th>Component</th><th>Code</th><th>Message</th></tr>"

@@ -1,4 +1,4 @@
-"""PostgreSQL services used by the Apollo VIT application."""
+"""PostgreSQL services used by the Apollo Tyre Inspection application."""
 
 # Import the connection/settings foundation first. Repository modules import
 # these names from ``src.COMMON.postgres``; exposing them before importing the

@@ -55,10 +55,10 @@ pytz==2026.1.post1
 pywin32==311
 PyYAML==6.0.3
 requests==2.33.1
+rembg
 rich==15.0.0
 safetensors==0.7.0
 sahi==0.11.36
-scikit-learn==1.8.0
 scipy==1.16.3
 setuptools==65.5.0
 shapely==2.1.2
@@ -68,7 +68,6 @@ sympy==1.14.0
 termcolor==3.3.0
 terminaltables==3.1.10
 threadpoolctl==3.6.0
-timm==1.0.24
 torch==2.9.1+cu128
 torchaudio==2.9.1+cu128
 torchvision==0.24.1+cu128

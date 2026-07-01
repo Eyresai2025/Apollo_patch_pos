@@ -14,7 +14,6 @@ from src.COMMON.cycle_engine import (
     DEVICE,
     CAMERA_CAPTURE_ENABLED,
     R_ALIGN_GPU_CONCURRENCY,
-    VIT_GPU_CONCURRENCY,
     YOLO_GPU_CONCURRENCY,
     _normalize_device,
     _resolve_sides,
@@ -25,6 +24,7 @@ from src.COMMON.cycle_engine import (
     build_cycle_capture_dir,
     capture_and_save_images,
     build_image_map_from_capture_dir,
+    build_local_image_map,
     build_all_runtimes,
     _apply_tyre_name_to_runtimes,
     _maybe_warmup_runtimes,
@@ -53,7 +53,7 @@ class ContinuousCycleWorker(QObject):
     """
     Worker that runs in a QThread.
     Monitors PLC tag (software mode) or waits for hardware trigger.
-    Orchestrates camera capture + AI pipeline.
+    Orchestrates camera capture and the configured inspection pipeline.
     """
    
     # Signals for GUI communication
@@ -77,7 +77,6 @@ class ContinuousCycleWorker(QObject):
         device: str,
         seg_model_a_path: str,
         seg_model_b_path: str,
-        vit_checkpoint_path: str,
         r_detector_path: str,
         multi_camera_manager,
         min_capture_interval: float = 2.0,
@@ -93,7 +92,6 @@ class ContinuousCycleWorker(QObject):
         self.device = _normalize_device(device)
         self.seg_model_a_path = seg_model_a_path
         self.seg_model_b_path = seg_model_b_path
-        self.vit_checkpoint_path = vit_checkpoint_path
         self.r_detector_path = r_detector_path
         self.multi_camera_manager = multi_camera_manager
         self.min_capture_interval = min_capture_interval
@@ -138,9 +136,17 @@ class ContinuousCycleWorker(QObject):
         self.status_update.emit(f"   Sides: {', '.join(self.sides_to_run)}")
         self.status_update.emit("=" * 50)
        
-        # Preload AI runtimes
+        # Load the selected SKU PatchCore model before camera streaming starts.
         if self.auto_preload and not self._runtimes_preloaded:
-            self._preload_runtimes()
+            try:
+                self._preload_runtimes()
+            except Exception as error:
+                message = f"PatchCore preload failed: {error}"
+                self.status_update.emit(message)
+                self.error.emit(message)
+                self._is_running = False
+                self.finished.emit()
+                return
        
         # Configure + start camera streams in Live
         if not hasattr(self.multi_camera_manager, "start_all_streams"):
@@ -173,9 +179,10 @@ class ContinuousCycleWorker(QObject):
             self.status_update.emit(" Camera streams started - waiting for PLC triggers")
        
         ready_msg = (
-            f"All AI files loaded and camera configuration completed.\n\n"
+            f"Camera configuration completed and PatchCore runtime loaded.\n\n"
             f"SKU: {self.sku_name}\n"
-            f"Tyre: {self.tyre_name}\n\n"
+            f"Tyre: {self.tyre_name}\n"
+            f"Active views: {', '.join(self.sides_to_run)}\n\n"
             f"Click OK to start waiting for trigger."
         )
  
@@ -238,16 +245,15 @@ class ContinuousCycleWorker(QObject):
  
    
     def _preload_runtimes(self):
-        """Preload AI runtimes"""
+        """Prepare inspection runtime state"""
         try:
-            self.status_update.emit(" Preloading AI models...")
+            self.status_update.emit(" Preparing inspection runtime state...")
            
             self._runtimes = build_all_runtimes(
                 sku_name=self.sku_name,
                 media_root=self.media_root,
                 seg_model_a_path=self.seg_model_a_path,
                 seg_model_b_path=self.seg_model_b_path,
-                vit_checkpoint_path=self.vit_checkpoint_path,
                 r_detector_path=self.r_detector_path,
                 device=self.device,
                 capture_root=self.media_root,
@@ -265,7 +271,6 @@ class ContinuousCycleWorker(QObject):
                 capture_root=self.media_root,
                 seg_model_a_path=self.seg_model_a_path,
                 seg_model_b_path=self.seg_model_b_path,
-                vit_checkpoint_path=self.vit_checkpoint_path,
                 r_detector_path=self.r_detector_path,
                 tyre_name=self.tyre_name,
                 media_root=self.media_root,
@@ -273,11 +278,13 @@ class ContinuousCycleWorker(QObject):
             )
            
             self._runtimes_preloaded = True
-            self.status_update.emit(" AI models preloaded successfully")
+            self.status_update.emit(" Inspection runtime state prepared")
            
         except Exception as e:
             self._runtimes_preloaded = False
+            self._runtimes = None
             self.status_update.emit(f"  Runtime preload failed: {e}")
+            raise
    
     def _get_or_load_runtimes(self):
         """Get cached runtimes or load them"""
@@ -447,31 +454,31 @@ class ContinuousCycleWorker(QObject):
                 active_zone="All Zones",
                 images_captured=len(image_map),
                 total_images=len(self.sides_to_run),
-                message=f"Saved {len(image_map)}/{len(self.sides_to_run)} AI side images",
+                message=f"Saved {len(image_map)}/{len(self.sides_to_run)} inspection images",
             )
  
             self.status_update.emit(f"   Saved {len(image_map)} sides: {', '.join(image_map.keys())}")
            
             self.processing_started.emit(cycle_id)
-            self.status_update.emit(f" Starting AI pipeline for {cycle_id}...")
+            self.status_update.emit(f" Starting inspection stage for {cycle_id}...")
            
             set_live_progress(
                 phase="INFERENCE",
                 active_zone="All Zones",
                 images_captured=len(image_map),
                 total_images=len(self.sides_to_run),
-                message=f"AI inference started for {cycle_id}",
+                message=f"Inspection stage started for {cycle_id}",
             )
             if self._stop_event.is_set():
-                self.status_update.emit(" AI pipeline skipped because stop was requested.")
+                self.status_update.emit(" Inspection stage skipped because stop was requested.")
                 return False
-            ai_t0 = time.perf_counter()
+            pipeline_t0 = time.perf_counter()
             result = self._run_ai_pipeline(image_map, cycle_id, cycle_capture_dir)
-            ai_sec = time.perf_counter() - ai_t0
+            pipeline_sec = time.perf_counter() - pipeline_t0
 
             self._timing_log(
-                f"AI_PIPELINE_DONE | cycle_id={cycle_id} | "
-                f"time={ai_sec:.3f}s"
+                f"INSPECTION_PIPELINE_DONE | cycle_id={cycle_id} | "
+                f"time={pipeline_sec:.3f}s"
             )
            
             if result:
@@ -479,14 +486,14 @@ class ContinuousCycleWorker(QObject):
 
                 result["timing_capture_call_sec"] = round(capture_sec, 3)
                 result["timing_image_save_sec"] = round(save_sec, 3)
-                result["timing_ai_pipeline_sec"] = round(ai_sec, 3)
+                result["timing_inspection_pipeline_sec"] = round(pipeline_sec, 3)
                 result["timing_total_from_capture_call_sec"] = round(total_cycle_sec, 3)
 
                 self._timing_log(
                     f"CYCLE_TOTAL | cycle_id={cycle_id} | "
                     f"capture_call={capture_sec:.3f}s | "
                     f"save={save_sec:.3f}s | "
-                    f"ai={ai_sec:.3f}s | "
+                    f"pipeline={pipeline_sec:.3f}s | "
                     f"total={total_cycle_sec:.3f}s"
                 )
                 set_live_progress(
@@ -523,7 +530,7 @@ class ContinuousCycleWorker(QObject):
                 self.status_update.emit("─" * 40)
                 self.status_update.emit(" Waiting for next trigger...")
             else:
-                self.processing_error.emit("AI pipeline returned no result")
+                self.processing_error.emit("Inspection stage returned no result")
                 return False
            
             return True
@@ -634,10 +641,10 @@ class ContinuousCycleWorker(QObject):
         return image_map
    
     def _run_ai_pipeline(self, image_map: Dict[str, str], cycle_id: str, cycle_capture_dir: str) -> Optional[Dict[str, Any]]:
-        """Run the AI pipeline on captured images"""
+        """Run the configured inspection stage on captured images"""
         try:
             self.status_update.emit("─" * 40)
-            self.status_update.emit(f"[AI PIPELINE] Starting for {cycle_id}")
+            self.status_update.emit(f"[INSPECTION PIPELINE] Starting for {cycle_id}")
            
             missing_sides = [s for s in self.sides_to_run if s not in image_map]
             if missing_sides:
@@ -650,7 +657,7 @@ class ContinuousCycleWorker(QObject):
             runtime_sec = time.perf_counter() - runtime_t0
 
             self._timing_log(
-                f"AI_RUNTIME_READY | cycle_id={cycle_id} | "
+                f"INSPECTION_RUNTIME_READY | cycle_id={cycle_id} | "
                 f"time={runtime_sec:.3f}s | preloaded={self._runtimes_preloaded}"
             )
             if runtimes is None:
@@ -658,7 +665,6 @@ class ContinuousCycleWorker(QObject):
                 return None
            
             r_gpu_sem = threading.Semaphore(R_ALIGN_GPU_CONCURRENCY)
-            vit_gpu_sem = threading.Semaphore(VIT_GPU_CONCURRENCY)
             yolo_gpu_sem = threading.Semaphore(YOLO_GPU_CONCURRENCY)
            
             date_str = datetime.now().strftime("%d-%m-%Y")
@@ -672,7 +678,7 @@ class ContinuousCycleWorker(QObject):
  
             os.makedirs(output_root, exist_ok=True)
            
-            self.status_update.emit("🚀 Running AI inference on all sides...")
+            self.status_update.emit(" Running configured inspection stage...")
             run_cycle_t0 = time.perf_counter()
             result = run_cycle(
                 image_map=image_map,
@@ -681,7 +687,6 @@ class ContinuousCycleWorker(QObject):
                 cycle_id=cycle_id,
                 sides_to_run=self.sides_to_run,
                 r_gpu_sem=r_gpu_sem,
-                vit_gpu_sem=vit_gpu_sem,
                 yolo_gpu_sem=yolo_gpu_sem,
                 sku_name=self.sku_name,
                 tyre_name=self.tyre_name,
@@ -703,13 +708,13 @@ class ContinuousCycleWorker(QObject):
             try:
                 save_cycle_metadata(
                     result,
-                    lifecycle_status="AI_COMPLETED",
+                    lifecycle_status="CAPTURE_COMPLETED",
                 )
             except Exception:
                 logger.exception(
-                    "AI-stage inspection metadata save failed",
+                    "Inspection metadata save failed",
                     extra={
-                        "event_code": "INSPECTION_AI_STAGE_SAVE_FAILED",
+                        "event_code": "INSPECTION_STAGE_SAVE_FAILED",
                         "error_code": "DB-INSPECTION-003",
                         "cycle_id": cycle_id,
                         "tyre_id": self.tyre_name,
@@ -726,10 +731,10 @@ class ContinuousCycleWorker(QObject):
             return result
            
         except Exception as e:
-            error_msg = f"AI pipeline error: {e}"
+            error_msg = f"Inspection pipeline error: {e}"
             self.processing_error.emit(error_msg)
             logger.exception(
-                "AI pipeline failed",
+                "Inspection pipeline failed",
                 extra={
                     "event_code": "AI_PIPELINE_FAILED",
                     "error_code": "AI-002",
@@ -818,7 +823,6 @@ def start_continuous_cycle(
     min_capture_interval: float = 2.0,
     seg_model_a_path: Optional[str] = None,
     seg_model_b_path: Optional[str] = None,
-    vit_checkpoint_path: Optional[str] = None,
     r_detector_path: Optional[str] = None,
     device: str = DEVICE,
     sides_to_run: Optional[List[str]] = None,
@@ -847,7 +851,6 @@ def start_continuous_cycle(
         device=device,
         seg_model_a_path=seg_model_a_path,
         seg_model_b_path=seg_model_b_path,
-        vit_checkpoint_path=vit_checkpoint_path,
         r_detector_path=r_detector_path,
         multi_camera_manager=multi_camera_manager,
         min_capture_interval=min_capture_interval,
@@ -893,7 +896,11 @@ def resolve_cycle_capture_dir(
         return cycle_capture_dir, cycle_id
  
     if demo_capture_root:
+        # Local mode accepts either one direct image file or a folder of
+        # side-named images. Do not copy or alter the source image.
         cycle_capture_dir = os.path.abspath(demo_capture_root)
+        if not os.path.exists(cycle_capture_dir):
+            raise FileNotFoundError(f"Local inspection input not found: {cycle_capture_dir}")
         if cycle_id is None:
             cycle_id = f"Cycle_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         return cycle_capture_dir, cycle_id
@@ -928,8 +935,8 @@ def build_cycle_image_map(
             cycle_capture_dir=cycle_capture_dir,
             sides_to_run=sides_to_run,
         )
-    return build_image_map_from_capture_dir(
-        cycle_capture_dir=cycle_capture_dir,
+    return build_local_image_map(
+        local_input=cycle_capture_dir,
         sides_to_run=sides_to_run,
     )
  
@@ -937,13 +944,13 @@ def build_cycle_image_map(
 def prepare_runtimes_for_cycle(
     sku_name: str, media_root: str, cycle_capture_dir: str,
     device: str, seg_model_a_path: str, seg_model_b_path: str,
-    vit_checkpoint_path: str, r_detector_path: str, tyre_name: str,
+    r_detector_path: str, tyre_name: str,
     side_configs: Optional[Dict[str, Dict[str, Any]]], sides_to_run: List[str],
 ):
     runtimes = build_all_runtimes(
         sku_name=sku_name, media_root=media_root,
         seg_model_a_path=seg_model_a_path, seg_model_b_path=seg_model_b_path,
-        vit_checkpoint_path=vit_checkpoint_path, r_detector_path=r_detector_path,
+        r_detector_path=r_detector_path,
         device=device, capture_root=cycle_capture_dir,
         tyre_name=tyre_name, side_configs=side_configs, sides_to_run=sides_to_run,
     )
@@ -951,7 +958,7 @@ def prepare_runtimes_for_cycle(
     _maybe_warmup_runtimes(
         runtimes=runtimes, sku_name=sku_name, device=device,
         capture_root=cycle_capture_dir, seg_model_a_path=seg_model_a_path,
-        seg_model_b_path=seg_model_b_path, vit_checkpoint_path=vit_checkpoint_path,
+        seg_model_b_path=seg_model_b_path,
         r_detector_path=r_detector_path, tyre_name=tyre_name,
         media_root=media_root, sides_to_run=sides_to_run,
     )
@@ -960,9 +967,8 @@ def prepare_runtimes_for_cycle(
  
 def build_gpu_semaphores():
     r_gpu_sem = threading.Semaphore(R_ALIGN_GPU_CONCURRENCY)
-    vit_gpu_sem = threading.Semaphore(VIT_GPU_CONCURRENCY)
     yolo_gpu_sem = threading.Semaphore(YOLO_GPU_CONCURRENCY)
-    return r_gpu_sem, vit_gpu_sem, yolo_gpu_sem
+    return r_gpu_sem, yolo_gpu_sem
  
  
 def print_cycle_inputs(sku_name, tyre_name, sku_calibration_dir, shared_artifacts_dir,
@@ -982,7 +988,7 @@ def run_capture_folder_cycle(
     media_root: str, sku_name: str = "SKU_001",
     cycle_id: Optional[str] = None, device: str = DEVICE,
     seg_model_a_path: Optional[str] = None, seg_model_b_path: Optional[str] = None,
-    vit_checkpoint_path: Optional[str] = None, r_detector_path: Optional[str] = None,
+    r_detector_path: Optional[str] = None,
     tyre_name: str = "195_65_R15",
     side_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     sides_to_run: Optional[List[str]] = None,
@@ -993,13 +999,10 @@ def run_capture_folder_cycle(
     device = _normalize_device(device)
     os.makedirs(media_root, exist_ok=True)
  
-    seg_model_a_path = _required_file(seg_model_a_path, "seg_model_a_path")
-    seg_model_b_path = _required_file(seg_model_b_path, "seg_model_b_path")
-    vit_checkpoint_path = _required_file(vit_checkpoint_path, "vit_checkpoint_path")
-    r_detector_path = _required_file(r_detector_path, "r_detector_path")
- 
-    sku_calibration_dir = _get_sku_calibration_dir(media_root, sku_name)
-    shared_artifacts_dir = _get_sku_artifacts_dir(media_root, sku_name)
+    # Legacy model arguments are intentionally accepted but no longer
+    # validated. PatchCore artifacts are resolved dynamically per SKU/view.
+    sku_calibration_dir = os.path.join(media_root, "feature_threshold", sku_name)
+    shared_artifacts_dir = sku_calibration_dir
  
     cycle_capture_dir, cycle_id = resolve_cycle_capture_dir(
         media_root=media_root,
@@ -1026,11 +1029,11 @@ def run_capture_folder_cycle(
     runtimes = prepare_runtimes_for_cycle(
         sku_name=sku_name, media_root=media_root, cycle_capture_dir=cycle_capture_dir,
         device=device, seg_model_a_path=seg_model_a_path, seg_model_b_path=seg_model_b_path,
-        vit_checkpoint_path=vit_checkpoint_path, r_detector_path=r_detector_path,
+        r_detector_path=r_detector_path,
         tyre_name=tyre_name, side_configs=side_configs, sides_to_run=sides_to_run,
     )
  
-    r_gpu_sem, vit_gpu_sem, yolo_gpu_sem = build_gpu_semaphores()
+    r_gpu_sem, yolo_gpu_sem = build_gpu_semaphores()
  
     date_str = datetime.now().strftime("%d-%m-%Y")
  
@@ -1052,7 +1055,7 @@ def run_capture_folder_cycle(
     result = run_cycle(
         image_map=image_map, runtimes=runtimes, output_root=output_root,
         cycle_id=cycle_id, sides_to_run=sides_to_run,
-        r_gpu_sem=r_gpu_sem, vit_gpu_sem=vit_gpu_sem, yolo_gpu_sem=yolo_gpu_sem,
+        r_gpu_sem=r_gpu_sem, yolo_gpu_sem=yolo_gpu_sem,
         sku_name=sku_name, tyre_name=tyre_name,
     )
  
@@ -1066,13 +1069,13 @@ def run_capture_folder_cycle(
         )
         save_cycle_metadata(
             result,
-            lifecycle_status="AI_COMPLETED",
+            lifecycle_status="CAPTURE_COMPLETED",
         )
     except Exception as e:
         logger.exception(
-            "Capture-folder AI-stage inspection metadata save failed",
+            "Capture-folder Inspection metadata save failed",
             extra={
-                "event_code": "INSPECTION_AI_STAGE_SAVE_FAILED",
+                "event_code": "INSPECTION_STAGE_SAVE_FAILED",
                 "error_code": "DB-INSPECTION-003",
                 "cycle_id": result.get("cycle_id") if isinstance(result, dict) else cycle_id,
                 "tyre_id": tyre_name,

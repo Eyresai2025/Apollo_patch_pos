@@ -26,9 +26,9 @@ def main() -> int:
             "tread": "validation/tread.png",
         },
         "side_results": {
-            "sidewall1": {"final_label": "OK", "vit_time": 0.1},
-            "sidewall2": {"final_label": "DEFECT", "vit_time": 0.2},
-            "tread": {"final_label": "OK", "vit_time": 0.15},
+            "sidewall1": {"final_label": "OK", "pipeline_time": 0.1},
+            "sidewall2": {"final_label": "DEFECT", "pipeline_time": 0.2},
+            "tread": {"final_label": "OK", "pipeline_time": 0.15},
         },
     }
     doc = build_inspection_document(
@@ -66,7 +66,7 @@ def main() -> int:
         index_message = str(exc)
 
     print("=" * 78)
-    print("APOLLO VIT MONGODB INSPECTION SCHEMA V1 VALIDATION")
+    print("APOLLO TYRE INSPECTION MONGODB INSPECTION SCHEMA V1 VALIDATION")
     print("=" * 78)
     print(f"Collection       : {cfg.inspection.collection_name}")
     print(f"Schema version   : {cfg.inspection.schema_version}")

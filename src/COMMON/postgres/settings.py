@@ -80,7 +80,7 @@ class PostgreSQLSettings:
                 _value(raw, "POSTGRES_STATEMENT_TIMEOUT_MS", "30000"), 30000
             ),
             application_name=_value(
-                raw, "POSTGRES_APPLICATION_NAME", "Apollo_VIT_Edge"
+                raw, "POSTGRES_APPLICATION_NAME", "Apollo_Tyre_Inspection_Edge"
             ),
         )
         settings.validate()

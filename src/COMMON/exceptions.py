@@ -1,5 +1,5 @@
 """
-Production-grade custom exceptions for Apollo VIT application.
+Production-grade custom exceptions for Apollo Tyre Inspection application.
 Provides structured error handling with error codes and context.
 """
 

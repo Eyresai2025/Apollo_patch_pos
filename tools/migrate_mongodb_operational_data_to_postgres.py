@@ -180,7 +180,7 @@ def main() -> int:
     rows = {key: _collection_rows(mongo_db, name) for key, name in COLLECTIONS.items()}
 
     print("=" * 72)
-    print("Apollo VIT - Remaining MongoDB Operational Data Migration")
+    print("Apollo Tyre Inspection - Remaining MongoDB Operational Data Migration")
     print("=" * 72)
     print(f"Mode                : {'EXECUTE' if args.execute else 'DRY-RUN'}")
     print("MongoDB             : READ ONLY")

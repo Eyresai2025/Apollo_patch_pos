@@ -132,7 +132,7 @@ def main() -> int:
     }
 
     print("=" * 72)
-    print("Apollo VIT - MongoDB Action Catalog Migration")
+    print("Apollo Tyre Inspection - MongoDB Action Catalog Migration")
     print("=" * 72)
     print(f"Mode       : {'EXECUTE' if args.execute else 'DRY-RUN'}")
     print("MongoDB    : READ ONLY")

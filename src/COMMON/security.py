@@ -1,4 +1,4 @@
-"""Local role-based access control for Apollo VIT.
+"""Local role-based access control for Apollo Tyre Inspection.
 
 The security database is intentionally local and independent of MongoDB so an
 operator can still authenticate when the plant network or central database is

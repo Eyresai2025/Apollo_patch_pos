@@ -1,6 +1,6 @@
 """Create one complete demo inspection record for Apollo V4 History page.
 
-Run from the Apollo_Vit_App project root:
+Run from the Apollo_Tyre_Inspection_App project root:
     python tools/create_demo_inspection_history_record.py
 
 This script:
@@ -66,7 +66,7 @@ def _draw_demo_image(
     cv2.rectangle(canvas, (0, 0), (width, 90), (65, 29, 102), -1)
     cv2.putText(
         canvas,
-        "APOLLO VIT - DEMO INSPECTION",
+        "APOLLO TYRE INSPECTION - DEMO INSPECTION",
         (35, 58),
         cv2.FONT_HERSHEY_SIMPLEX,
         1.25,

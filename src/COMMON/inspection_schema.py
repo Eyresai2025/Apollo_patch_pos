@@ -182,7 +182,7 @@ def _duration_ms(side_data: Mapping[str, Any]) -> Optional[float]:
             pass
 
     parts = []
-    for key in ("align_time", "vit_time", "yolo_time"):
+    for key in ("align_time", "patch_generation_time", "patchcore_time", "yolo_time"):
         try:
             parts.append(float(side_data.get(key, 0) or 0))
         except Exception:
@@ -378,7 +378,6 @@ def _configured_models() -> Dict[str, Any]:
         "segmentation": item(config.models.segmentation_weight),
         "r_detector": item(config.models.r_detector_onnx),
         "classification": item(config.models.classification_weight),
-        "vit": item(config.models.vit_checkpoint),
     }
 
 

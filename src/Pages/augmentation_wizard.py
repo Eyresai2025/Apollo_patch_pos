@@ -1181,52 +1181,56 @@ class AugmentationWizard(QMainWindow):
         QMessageBox.critical(self, "Error", f"Augmentation failed:\n{error_message}")
 
 # -----------------------
-# Integration Function with Threading
+# Safe integration function
 # -----------------------
+# Keep references to integrated windows so Python does not garbage-collect them
+# while they are still open.
+_OPEN_AUGMENTATION_WINDOWS = []
+
+
 def launch_augmentation_tool(input_dir=None, output_dir=None):
     """
-    Call this function from your main annotation tool when the augmentation button is clicked
-    Launches augmentation tool in a separate thread
+    Open the augmentation tool from the already-running Apollo QApplication.
+
+    Important:
+    - Does not change the QApplication palette or global stylesheet.
+    - Does not create Qt widgets in a Python worker thread.
+    - Does not start a second Qt event loop when Apollo is already running.
     """
-    def run_tool():
-        app = QApplication.instance()
-        if app is None:
-            app = QApplication([])
-        
-        # Set dark theme
-        app.setStyle('Fusion')
-        palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(30, 30, 30))
-        palette.setColor(QPalette.WindowText, QColor(255, 255, 255))
-        palette.setColor(QPalette.Base, QColor(25, 25, 25))
-        palette.setColor(QPalette.AlternateBase, QColor(35, 35, 35))
-        palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))
-        palette.setColor(QPalette.ToolTipText, QColor(255, 255, 255))
-        palette.setColor(QPalette.Text, QColor(255, 255, 255))
-        palette.setColor(QPalette.Button, QColor(50, 50, 50))
-        palette.setColor(QPalette.ButtonText, QColor(255, 255, 255))
-        palette.setColor(QPalette.BrightText, Qt.red)
-        palette.setColor(QPalette.Link, QColor(42, 130, 218))
-        palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-        palette.setColor(QPalette.HighlightedText, Qt.black)
-        app.setPalette(palette)
-        
-        window = AugmentationWizard()
-        
-        # Pre-fill directories if provided
-        if input_dir and hasattr(window.dataset_page, 'input_dir_edit'):
-            window.dataset_page.input_dir_edit.setText(input_dir)
-        if output_dir and hasattr(window.dataset_page, 'output_dir_edit'):
-            window.dataset_page.output_dir_edit.setText(output_dir)
-        
-        window.show()
+    app = QApplication.instance()
+    owns_application = app is None
+
+    if owns_application:
+        app = QApplication([])
+
+    window = AugmentationWizard()
+
+    # Pre-fill directories if provided.
+    if input_dir and hasattr(window.dataset_page, "input_dir_edit"):
+        window.dataset_page.input_dir_edit.setText(str(input_dir))
+
+    if output_dir and hasattr(window.dataset_page, "output_dir_edit"):
+        window.dataset_page.output_dir_edit.setText(str(output_dir))
+
+    # Keep the window alive until it is closed.
+    _OPEN_AUGMENTATION_WINDOWS.append(window)
+
+    def _release_window(*_args):
+        try:
+            _OPEN_AUGMENTATION_WINDOWS.remove(window)
+        except ValueError:
+            pass
+
+    window.destroyed.connect(_release_window)
+    window.show()
+    window.raise_()
+    window.activateWindow()
+
+    # Only start an event loop when this function created its own QApplication.
+    if owns_application:
         app.exec_()
-    
-    # Launch in separate thread
-    thread = threading.Thread(target=run_tool, daemon=True)
-    thread.start()
-    
-    return thread
+
+    return window
 
 # -----------------------
 # Standalone Usage

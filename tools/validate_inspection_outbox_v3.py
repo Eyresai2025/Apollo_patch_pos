@@ -87,7 +87,7 @@ def main() -> int:
         )
 
     print("=" * 78)
-    print("APOLLO VIT INSPECTION OFFLINE OUTBOX V3 VALIDATION")
+    print("APOLLO TYRE INSPECTION INSPECTION OFFLINE OUTBOX V3 VALIDATION")
     print("=" * 78)
     print(f"Configured outbox path : {cfg.outbox_path}")
     print(f"Sync interval          : {cfg.sync_interval_sec} sec")

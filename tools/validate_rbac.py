@@ -71,7 +71,7 @@ def main() -> int:
     user_count = configured_service.user_count()
 
     print("=" * 78)
-    print("APOLLO VIT ROLE-BASED ACCESS VALIDATION")
+    print("APOLLO TYRE INSPECTION ROLE-BASED ACCESS VALIDATION")
     print("=" * 78)
     print(f"Enabled          : {config.security.enabled}")
     print(f"Security DB      : {config.security.database_path}")

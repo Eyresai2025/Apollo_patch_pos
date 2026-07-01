@@ -36,6 +36,12 @@ class ComponentHealthService:
         self.plc_mode_byte = self._env_int("PLC_MODE_BYTE", 2)
         self.plc_mode_size = self._env_int("PLC_MODE_SIZE", 2)
         self.require_laser = self._env_bool("REQUIRE_LASER", False)
+        # When enabled, required components that have not yet been checked are
+        # treated as startup alarms. This lets alarms reopen on a fresh
+        # application session after a previous manual clear.
+        self.alarm_on_startup_unchecked = self._env_bool(
+            "ALARM_ON_STARTUP_UNCHECKED", True
+        )
         self._storage_cache = None
         self._storage_cache_time = 0
         self._storage_cache_interval_sec = 30
@@ -227,8 +233,8 @@ class ComponentHealthService:
             "ok": False,
             "title": "PLC",
             "text": "Not checked",
-            "detail": {},
-            "alarm_eligible": False,
+            "detail": {"startup_unchecked": True},
+            "alarm_eligible": self.alarm_on_startup_unchecked,
         }
 
         last_result = state.get("last_result") or {}
@@ -247,7 +253,7 @@ class ComponentHealthService:
             result["text"] = "No PLC client"
             # Before the first hardware check, no PLC client is an
             # uninitialized state rather than a confirmed PLC failure.
-            result["alarm_eligible"] = bool(last_result)
+            result["alarm_eligible"] = bool(last_result) or self.alarm_on_startup_unchecked
             return result
 
         try:
@@ -270,8 +276,8 @@ class ComponentHealthService:
             "ok": False,
             "title": "App OK",
             "text": "Not verified",
-            "detail": {},
-            "alarm_eligible": False,
+            "detail": {"startup_unchecked": True},
+            "alarm_eligible": self.alarm_on_startup_unchecked,
         }
 
         last_result = state.get("last_result") or {}
@@ -286,12 +292,12 @@ class ComponentHealthService:
             verified = app_detail.get("verified", app_detail.get("sent", False))
             result["ok"] = bool(verified)
             result["text"] = "Demo verified" if result["ok"] else "Demo not verified"
-            result["alarm_eligible"] = bool(last_result)
+            result["alarm_eligible"] = bool(last_result) or self.alarm_on_startup_unchecked
             return result
 
         if client is None:
             result["text"] = "No PLC client"
-            result["alarm_eligible"] = bool(last_result)
+            result["alarm_eligible"] = bool(last_result) or self.alarm_on_startup_unchecked
             return result
 
         try:
@@ -364,8 +370,8 @@ class ComponentHealthService:
             "ok": False,
             "title": "Cameras",
             "text": "Not checked",
-            "detail": {},
-            "alarm_eligible": False,
+            "detail": {"startup_unchecked": True},
+            "alarm_eligible": self.alarm_on_startup_unchecked,
         }
 
         last_result = state.get("last_result") or {}
@@ -423,8 +429,10 @@ class ComponentHealthService:
             "ok": False,
             "title": "Laser",
             "text": "Not checked",
-            "detail": {},
-            "alarm_eligible": False,
+            "detail": {"startup_unchecked": True},
+            "alarm_eligible": (
+                self.alarm_on_startup_unchecked and self.require_laser
+            ),
         }
 
         last_result = state.get("last_result") or {}

@@ -1,4 +1,4 @@
--- Apollo VIT PostgreSQL Phase 4B
+-- Apollo Tyre Inspection PostgreSQL Phase 4B
 -- Action/OSC catalog metadata + images and AI model registry + binaries.
 -- Existing MongoDB collections and GridFS files remain untouched as rollback/fallback sources.
 -- Do not edit this migration after it has been applied.
@@ -203,7 +203,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.ai_models (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_name          VARCHAR(220) NOT NULL,
     model_version       VARCHAR(150) NOT NULL,
-    model_type          VARCHAR(120) NOT NULL DEFAULT 'VIT',
+    model_type          VARCHAR(120) NOT NULL DEFAULT 'UNSPECIFIED',
     framework           VARCHAR(120),
     sku_name            VARCHAR(150),
     zone                VARCHAR(80),
@@ -273,7 +273,7 @@ INSERT INTO {{schema}}.application_settings (setting_key, setting_value, descrip
 VALUES (
     'postgres_phase',
     '{"phase": "4B", "status": "catalog_and_ai_models_ready", "catalog_backend": "postgresql", "model_backend": "postgresql_chunked", "mongodb_fallback": true}'::jsonb,
-    'Tracks the active PostgreSQL migration phase for Apollo VIT.'
+    'Tracks the active PostgreSQL migration phase for Apollo Tyre Inspection.'
 )
 ON CONFLICT (setting_key) DO UPDATE SET
     setting_value = EXCLUDED.setting_value,

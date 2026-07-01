@@ -1,4 +1,4 @@
-"""Central configuration service for the Apollo VIT application.
+"""Central configuration service for the Apollo Tyre Inspection application.
 
 Configuration precedence (highest first):
     1. Operating-system environment variables
@@ -280,7 +280,7 @@ class DeviceType(str, Enum):
 
 @dataclass(frozen=True)
 class ApplicationInfoConfig:
-    name: str = "Apollo VIT"
+    name: str = "Apollo Tyre Inspection"
     version: str = "v1.0"
     build_number: str = ""
     build_date: str = ""
@@ -377,14 +377,12 @@ class ModelConfig:
     segmentation_weight: Optional[Path] = None
     r_detector_onnx: Optional[Path] = None
     classification_weight: Optional[Path] = None
-    vit_checkpoint: Optional[Path] = None
 
 
 @dataclass(frozen=True)
 class InferenceConfig:
     device: DeviceType = DeviceType.CUDA
     r_align_gpu_concurrency: int = 5
-    vit_gpu_concurrency: int = 5
     yolo_gpu_concurrency: int = 5
     enable_warmup: bool = True
     warmup_iterations: int = 2
@@ -395,7 +393,6 @@ class InferenceConfig:
     default_tyre_name: str = "195_65_R15"
     use_yolo_seg: bool = True
     seg_imgsz: int = 224
-    enable_trt_vit: bool = True
     clean_yolo_cache: bool = True
 
 
@@ -875,12 +872,10 @@ class ConfigManager:
             segmentation_weight=self._model_path("WEIGHT_FILE_Apollo"),
             r_detector_onnx=self._model_path("WEIGHT_FILE_RE_ONNX"),
             classification_weight=self._model_path("WEIGHT_FILE_CLASS"),
-            vit_checkpoint=self._model_path("VIT_CHECKPOINT"),
         )
         inference = InferenceConfig(
             device=inference_device,
             r_align_gpu_concurrency=self.get_int("R_ALIGN_CONC", 5),
-            vit_gpu_concurrency=self.get_int("VIT_CONC", 5),
             yolo_gpu_concurrency=self.get_int("YOLO_CONC", 5),
             enable_warmup=self.get_bool("ENABLE_WARMUP", True),
             warmup_iterations=self.get_int("WARMUP_ITER", 2),
@@ -891,7 +886,6 @@ class ConfigManager:
             default_tyre_name=self.get_str("DEFAULT_TYRE_NAME", "195_65_R15"),
             use_yolo_seg=self.get_bool("USE_YOLO_SEG", True),
             seg_imgsz=self.get_int("SEG_IMGSZ", 224),
-            enable_trt_vit=self.get_bool("ENABLE_TRT_VIT", True),
             clean_yolo_cache=self.get_bool("CLEAN_YOLO_CACHE", True),
         )
         plc = PlcConfig(
@@ -1244,7 +1238,6 @@ class ConfigManager:
             )
         for key, value in {
             "R_ALIGN_CONC": cfg.inference.r_align_gpu_concurrency,
-            "VIT_CONC": cfg.inference.vit_gpu_concurrency,
             "YOLO_CONC": cfg.inference.yolo_gpu_concurrency,
         }.items():
             if value < 1:
@@ -1261,7 +1254,6 @@ class ConfigManager:
             "WEIGHT_FILE_Apollo": cfg.models.segmentation_weight,
             "WEIGHT_FILE_RE_ONNX": cfg.models.r_detector_onnx,
             "WEIGHT_FILE_CLASS": cfg.models.classification_weight,
-            "VIT_CHECKPOINT": cfg.models.vit_checkpoint,
         }.items():
             if path is None:
                 report.add(

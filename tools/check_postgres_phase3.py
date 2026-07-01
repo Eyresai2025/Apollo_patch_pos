@@ -24,7 +24,7 @@ def main() -> int:
     try:
         manager.open(wait=True)
         print("=" * 72)
-        print("Apollo VIT - PostgreSQL Phase 3 Check")
+        print("Apollo Tyre Inspection - PostgreSQL Phase 3 Check")
         print("=" * 72)
         ping = manager.ping()
         print(f"Database : {ping.get('database_name')}")

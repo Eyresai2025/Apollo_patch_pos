@@ -31,7 +31,7 @@ def main() -> int:
     service = SecurityService(config.security)
 
     print("=" * 78)
-    print("APOLLO VIT FIRST ADMINISTRATOR SETUP")
+    print("APOLLO TYRE INSPECTION FIRST ADMINISTRATOR SETUP")
     print("=" * 78)
     print(f"Security database: {service.database_path}")
 

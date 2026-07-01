@@ -1,4 +1,4 @@
-"""Runtime storage-backend selection for the Apollo VIT edge application.
+"""Runtime storage-backend selection for the Apollo Tyre Inspection edge application.
 
 Phase 5 makes PostgreSQL the only production runtime database. MongoDB access
 is available only when an explicit fallback or migration switch is enabled.

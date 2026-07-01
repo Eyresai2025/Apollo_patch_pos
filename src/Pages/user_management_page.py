@@ -1,4 +1,4 @@
-"""Production User & Role Management page for Apollo VIT RBAC.
+"""Production User & Role Management page for Apollo Tyre Inspection RBAC.
 
 This page is intentionally UI-only. All authoritative permission checks,
 password rules, account-state changes and audit writes remain inside

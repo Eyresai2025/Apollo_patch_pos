@@ -8,14 +8,17 @@ from PyQt5.QtCore import QObject, QEvent, QThread, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QImageReader, QPixmap
 from PyQt5.QtWidgets import (
     QDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
 )
 
 from src.Main_cam import run_capture_folder_cycle, preload_live_runtimes
+from src.models.patchcore_runtime import list_patchcore_skus
 
 
 logger = logging.getLogger(__name__)
@@ -26,76 +29,8 @@ logger = logging.getLogger(__name__)
 # =========================================================
 
 def get_available_sku_names(media_root):
-    calibration_root = os.path.join(media_root, "AI_Calibration_Files")
-
-    if not os.path.isdir(calibration_root):
-        return []
-
-    required_files_by_side = {
-        "calibration_sidewall1": [
-            "alignment_reference_polarized.png",
-            "crop_anchor_reference.json",
-            "embedding_bank.pt",
-            "embedding_bank_meta.pt",
-            "thresholds_by_rc.pt",
-            "mahalanobis_stats.pt",
-            "pca_artifact.pt",
-            "reference_r.pt",
-        ],
-        "calibration_sidewall2": [
-            "alignment_reference_polarized.png",
-            "crop_anchor_reference.json",
-            "embedding_bank.pt",
-            "embedding_bank_meta.pt",
-            "thresholds_by_rc.pt",
-            "mahalanobis_stats.pt",
-            "pca_artifact.pt",
-            "reference_r.pt",
-        ],
-        "calibration_tread": [
-            "embedding_bank.pt",
-            "embedding_bank_meta.pt",
-            "thresholds_by_rc.pt",
-            "mahalanobis_stats.pt",
-            "pca_artifact.pt",
-            "tread_x_reference_crop.png",
-            "tread_x_reference_signature.npy",
-            "tread_x_reference_signature_meta.json",
-        ],
-    }
-
-    sku_names = []
-
-    for name in sorted(os.listdir(calibration_root)):
-        sku_dir = os.path.join(calibration_root, name)
-
-        if not os.path.isdir(sku_dir):
-            continue
-
-        if not name.upper().startswith("SKU"):
-            continue
-
-        ok = True
-
-        for side_dir_name, required_files in required_files_by_side.items():
-            artifacts_dir = os.path.join(sku_dir, side_dir_name, "artifacts")
-
-            if not os.path.isdir(artifacts_dir):
-                ok = False
-                break
-
-            for file_name in required_files:
-                if not os.path.isfile(os.path.join(artifacts_dir, file_name)):
-                    ok = False
-                    break
-
-            if not ok:
-                break
-
-        if ok:
-            sku_names.append(name)
-
-    return sku_names
+    """Return SKUs discovered from PatchCore threshold/template folders."""
+    return list_patchcore_skus(media_root)
 
 
 # =========================================================
@@ -220,7 +155,6 @@ class RuntimePreloadWorker(QObject):
         device,
         seg_model_a_path,
         seg_model_b_path,
-        vit_checkpoint_path,
         r_detector_path,
     ):
         super().__init__()
@@ -229,7 +163,6 @@ class RuntimePreloadWorker(QObject):
         self.device = device
         self.seg_model_a_path = seg_model_a_path
         self.seg_model_b_path = seg_model_b_path
-        self.vit_checkpoint_path = vit_checkpoint_path
         self.r_detector_path = r_detector_path
         self._stop_event = Event()
 
@@ -246,12 +179,11 @@ class RuntimePreloadWorker(QObject):
                 device=self.device,
                 seg_model_a_path=self.seg_model_a_path,
                 seg_model_b_path=self.seg_model_b_path,
-                vit_checkpoint_path=self.vit_checkpoint_path,
                 r_detector_path=self.r_detector_path,
                 sides_to_run=["all"],
             )
 
-            self.finished.emit(f"Runtime preload completed | SKU={self.sku_name}")
+            self.finished.emit(f"PatchCore preload completed | SKU={self.sku_name}")
 
         except Exception as e:
             self.error.emit(str(e))
@@ -272,7 +204,6 @@ class LiveInspectionWorker(QObject):
         device="cuda",
         seg_model_a_path=None,
         seg_model_b_path=None,
-        vit_checkpoint_path=None,
         r_detector_path=None,
         multi_camera_manager=None,
         demo_capture_root=None,
@@ -284,7 +215,6 @@ class LiveInspectionWorker(QObject):
         self.device = device
         self.seg_model_a_path = seg_model_a_path
         self.seg_model_b_path = seg_model_b_path
-        self.vit_checkpoint_path = vit_checkpoint_path
         self.r_detector_path = r_detector_path
         self.multi_camera_manager = multi_camera_manager
         self.demo_capture_root = demo_capture_root
@@ -303,7 +233,6 @@ class LiveInspectionWorker(QObject):
                 device=self.device,
                 seg_model_a_path=self.seg_model_a_path,
                 seg_model_b_path=self.seg_model_b_path,
-                vit_checkpoint_path=self.vit_checkpoint_path,
                 r_detector_path=self.r_detector_path,
                 multi_camera_manager=self.multi_camera_manager,
                 demo_capture_root=self.demo_capture_root,
@@ -528,44 +457,58 @@ class LatestCycleImagesWorker(QObject):
 # =========================================================
 
 class ImageViewer(QDialog):
-    def __init__(self, image_path: str, title: str = "Image Viewer", parent=None):
-        super().__init__(parent)
+    """Stable modal image viewer with a dedicated toolbar and image area."""
 
+    def __init__(self, image_path: str, title: str = "Inspection Image", parent=None):
+        super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(1200, 800)
+        self.setModal(True)
+        self.setMinimumSize(900, 620)
+        self.resize(1120, 760)
+        self.setStyleSheet("QDialog { background:#F3F5F9; }")
 
         self.scale_factor = 1.0
         self._pixmap = QPixmap(image_path)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root.setSpacing(10)
 
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
+        toolbar_frame = QFrame()
+        toolbar_frame.setObjectName("ViewerToolbar")
+        toolbar_frame.setFixedHeight(52)
+        toolbar_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        toolbar_frame.setStyleSheet("""
+            QFrame#ViewerToolbar {
+                background:#FFFFFF;
+                border:1px solid #E4E8EF;
+                border-radius:10px;
+            }
+        """)
+        toolbar = QHBoxLayout(toolbar_frame)
+        toolbar.setContentsMargins(10, 8, 10, 8)
+        toolbar.setSpacing(7)
 
-        def mkbtn(text):
+        def make_button(text):
             button = QPushButton(text)
-            button.setFixedHeight(32)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFixedHeight(34)
+            button.setMinimumWidth(94)
             button.setStyleSheet("""
                 QPushButton {
-                    background:#571c86;
-                    color:white;
-                    border:none;
-                    border-radius:16px;
-                    font: 700 11px 'Segoe UI';
-                    padding: 0 16px;
+                    padding:0 12px; color:#344054; background:#FFFFFF;
+                    border:1px solid #D8DEE8; border-radius:7px;
+                    font:700 10px 'Segoe UI';
                 }
-                QPushButton:hover {
-                    background:#6b2aa3;
-                }
+                QPushButton:hover { background:#F8FAFC; border-color:#C7D0DD; }
+                QPushButton:pressed { background:#F1F5F9; }
             """)
             return button
 
-        zoom_in_btn = mkbtn("Zoom In")
-        zoom_out_btn = mkbtn("Zoom Out")
-        reset_btn = mkbtn("Reset")
-        fit_btn = mkbtn("Fit Width")
+        zoom_in_btn = make_button("+  Zoom In")
+        zoom_out_btn = make_button("−  Zoom Out")
+        reset_btn = make_button("↺  Reset")
+        fit_btn = make_button("Fit Width")
 
         zoom_in_btn.clicked.connect(self.zoom_in)
         zoom_out_btn.clicked.connect(self.zoom_out)
@@ -576,61 +519,99 @@ class ImageViewer(QDialog):
         toolbar.addWidget(zoom_out_btn)
         toolbar.addWidget(reset_btn)
         toolbar.addWidget(fit_btn)
-        toolbar.addStretch()
+        toolbar.addStretch(1)
 
         self.zoom_lbl = QLabel("100%")
-        self.zoom_lbl.setStyleSheet("font: 700 11px 'Segoe UI'; color:#333;")
+        self.zoom_lbl.setAlignment(Qt.AlignCenter)
+        self.zoom_lbl.setFixedSize(70, 34)
+        self.zoom_lbl.setStyleSheet("""
+            QLabel {
+                color:#5B21B6; background:#F5F3FF;
+                border:1px solid #DDD6FE; border-radius:7px;
+                font:700 10px 'Segoe UI';
+            }
+        """)
         toolbar.addWidget(self.zoom_lbl)
-
-        root.addLayout(toolbar)
+        root.addWidget(toolbar_frame, 0)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setAlignment(Qt.AlignCenter)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setStyleSheet("""
             QScrollArea {
-                background: #111;
-                border-radius: 12px;
-                border: 1px solid #ddd;
+                background:#0B0F17; border:1px solid #1E293B;
+                border-radius:10px;
+            }
+            QScrollBar:vertical {
+                width:11px; background:#111827; margin:2px; border:none;
+            }
+            QScrollBar::handle:vertical {
+                min-height:30px; background:#475569; border-radius:5px;
+            }
+            QScrollBar:horizontal {
+                height:11px; background:#111827; margin:2px; border:none;
+            }
+            QScrollBar::handle:horizontal {
+                min-width:30px; background:#475569; border-radius:5px;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width:0px; height:0px; background:transparent;
             }
         """)
 
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background:#111;")
-
+        self.image_label.setStyleSheet("background:#0B0F17; color:#CBD5E1;")
         self.scroll_area.setWidget(self.image_label)
-
         self.scroll_area.viewport().installEventFilter(self)
         self.image_label.installEventFilter(self)
-
         root.addWidget(self.scroll_area, 1)
 
+        # Fit once after layout calculation, so the initial image never covers
+        # or overlaps the toolbar.
         self.update_image()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_initial_fit_done", False):
+            self._initial_fit_done = True
+            self.fit_to_view()
 
     def update_image(self):
         if self._pixmap.isNull():
+            self.image_label.setText("Image could not be loaded")
+            self.image_label.resize(max(1, self.scroll_area.viewport().width()), 120)
             return
 
         width = max(1, int(self._pixmap.width() * self.scale_factor))
         height = max(1, int(self._pixmap.height() * self.scale_factor))
-
         scaled = self._pixmap.scaled(
-            width,
-            height,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
-
         self.image_label.setPixmap(scaled)
         self.image_label.resize(scaled.size())
         self.zoom_lbl.setText(f"{int(self.scale_factor * 100)}%")
 
+    def fit_to_view(self):
+        if self._pixmap.isNull():
+            return
+        viewport = self.scroll_area.viewport().size()
+        available_w = max(1, viewport.width() - 20)
+        available_h = max(1, viewport.height() - 20)
+        self.scale_factor = min(
+            available_w / self._pixmap.width(),
+            available_h / self._pixmap.height(),
+            1.0,
+        )
+        self.update_image()
+
     def zoom_in(self):
-        self.scale_factor = min(self.scale_factor * 1.1, 8.0)
+        self.scale_factor = min(self.scale_factor * 1.15, 8.0)
         self.update_image()
 
     def zoom_out(self):
-        self.scale_factor = max(self.scale_factor * 0.9, 0.1)
+        self.scale_factor = max(self.scale_factor / 1.15, 0.05)
         self.update_image()
 
     def reset_zoom(self):
@@ -640,7 +621,6 @@ class ImageViewer(QDialog):
     def fit_width(self):
         if self._pixmap.isNull():
             return
-
         viewport_w = max(1, self.scroll_area.viewport().width() - 20)
         self.scale_factor = viewport_w / self._pixmap.width()
         self.update_image()
@@ -648,11 +628,8 @@ class ImageViewer(QDialog):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
             if event.angleDelta().y() > 0:
-                self.scale_factor = min(self.scale_factor * 1.1, 8.0)
+                self.zoom_in()
             else:
-                self.scale_factor = max(self.scale_factor * 0.9, 0.1)
-
-            self.update_image()
+                self.zoom_out()
             return True
-
         return super().eventFilter(obj, event)

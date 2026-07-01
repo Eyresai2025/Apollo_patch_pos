@@ -76,7 +76,7 @@ class InspectionGridFSV2Tests(unittest.TestCase):
                 "sidewall1": r"C:\\Apollo\\Capture_Input\\SKU_001\\23-06-2026\\Cycle_10\\sidewall1.png"
             },
             "side_results": {
-                "sidewall1": {"final_label": "DEFECT", "vit_time": 0.1},
+                "sidewall1": {"final_label": "DEFECT", "pipeline_time": 0.1},
             },
         }
 

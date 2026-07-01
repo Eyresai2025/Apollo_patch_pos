@@ -734,7 +734,7 @@ class InspectionHistoryPage(QWidget):
         )
         report_html = f"""
         <html><body style='font-family:Segoe UI;color:#172033'>
-        <h1>Apollo VIT Inspection Report</h1>
+        <h1>Apollo Tyre Inspection Inspection Report</h1>
         <table cellspacing='0' cellpadding='6' border='1' style='border-collapse:collapse;width:100%'>
           <tr><td><b>Cycle ID</b></td><td>{html.escape(row['cycle_id'])}</td><td><b>Cycle UID</b></td><td>{html.escape(row['cycle_uid'])}</td></tr>
           <tr><td><b>Tyre</b></td><td>{html.escape(row['tyre_name'])}</td><td><b>SKU</b></td><td>{html.escape(row['sku_name'])}</td></tr>

@@ -309,7 +309,6 @@ class RecipeRepository:
                 "recipe_number": recipe.get("recipe_number"),
                 "plc_recipe_number": recipe.get("plc_recipe_number"),
                 "status": recipe.get("status", ""),
-                "vit_model_path": recipe.get("vit_model_path", ""),
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
         )

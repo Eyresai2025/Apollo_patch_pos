@@ -86,7 +86,7 @@ def main() -> int:
     checks["GRIDFS_OUTPUT_CONFIG"] = bool(config.inspection.output_gridfs_bucket)
 
     print("=" * 78)
-    print("APOLLO VIT INSPECTION HISTORY & TRACEABILITY V4 VALIDATION")
+    print("APOLLO TYRE INSPECTION INSPECTION HISTORY & TRACEABILITY V4 VALIDATION")
     print("=" * 78)
     print(f"Database              : {config.database.name}")
     print(f"Inspection collection : {config.inspection.collection_name}")

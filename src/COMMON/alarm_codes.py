@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Central alarm definitions for Apollo VIT V5.
+"""Central alarm definitions for Apollo Tyre Inspection V5.
 
 The definitions are deliberately data-only so the monitoring service, UI and
 unit tests all use the same alarm code, severity and recommended action.

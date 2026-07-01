@@ -1,4 +1,4 @@
-# Apollo VIT Structured Logging V1
+# Apollo Tyre Inspection Structured Logging V1
 
 ## Purpose
 

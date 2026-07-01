@@ -80,7 +80,7 @@ def main() -> int:
             rows = rows[: args.limit]
 
         print("=" * 72)
-        print("Apollo VIT - GridFS Inspection Image Migration")
+        print("Apollo Tyre Inspection - GridFS Inspection Image Migration")
         print("=" * 72)
         print(f"Mode       : {mode}")
         print(f"Cycles     : {len(rows)}")

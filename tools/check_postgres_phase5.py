@@ -23,7 +23,7 @@ def main() -> int:
         manager.open(wait=True)
         backend = get_runtime_backend_settings()
         print("=" * 72)
-        print("Apollo VIT - PostgreSQL Phase 5 Check")
+        print("Apollo Tyre Inspection - PostgreSQL Phase 5 Check")
         print("=" * 72)
         ping = manager.ping()
         print(f"Database : {ping.get('database_name')}")

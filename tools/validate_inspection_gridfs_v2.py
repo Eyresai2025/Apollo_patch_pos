@@ -38,7 +38,7 @@ def main() -> int:
     output_ids = []
 
     print("=" * 78)
-    print("APOLLO VIT INSPECTION GRIDFS V2 VALIDATION")
+    print("APOLLO TYRE INSPECTION INSPECTION GRIDFS V2 VALIDATION")
     print("=" * 78)
     print(f"Database                  : {cfg.database.name}")
     print(f"Inspection collection     : {cfg.inspection.collection_name}")
