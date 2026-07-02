@@ -13,6 +13,8 @@
 #   - Same physical camera can have multiple roles
 #       Example: serial 250500042 -> innerwall(main) + bead(bead)
 #   - One CameraActor per physical camera, so duplicate serial is never opened twice
+#   - SKU camera settings are applied through apply_camera_profile() before streams start
+#   - Software FFC is applied after stitching and before images are returned to the app
 # =========================================================
 
 from arena_api.system import system
@@ -204,6 +206,37 @@ FAST_FLUSH_TIMEOUT_MS = _env_int("CAM_FAST_FLUSH_TIMEOUT_MS", 2)
 MAX_ALLOWED_BEAD_TRIGGER_DELAY_MS = _env_float("CAM_MAX_ALLOWED_BEAD_TRIGGER_DELAY_MS", 75.0)
 VERBOSE_CONFIG_LOGS = _env_bool("CAM_VERBOSE_CONFIG_LOGS", False)
 
+# =========================================================
+# SOFTWARE FFC CONFIG
+#
+# This is software-side FFC. Camera-side FlatFieldCorrection nodes are not
+# enabled here, so the camera is captured normally and correction is applied
+# to the stitched NumPy image before it is returned to the application.
+#
+# Per-side overrides are also supported, for example:
+#   CAM_SIDEWALL1_SOFTWARE_FFC_ENABLED=True
+#   CAM_SIDEWALL1_FFC_TARGET_MODE=PERCENTILE_95
+#   CAM_SIDEWALL1_FFC_GAIN_MIN=1.0
+#   CAM_SIDEWALL1_FFC_GAIN_MAX=15.99
+#   CAM_SIDEWALL1_FFC_ROW_BLOCK=512
+# =========================================================
+
+SOFTWARE_FFC_ENABLED = _env_bool("CAM_SOFTWARE_FFC_ENABLED", True)
+FFC_TARGET_MODE = _env_str("CAM_FFC_TARGET_MODE", "PERCENTILE_95").strip().upper()
+FFC_GAIN_RANGE_MIN = _env_float("CAM_FFC_GAIN_MIN", 1.0)
+FFC_GAIN_RANGE_MAX = _env_float("CAM_FFC_GAIN_MAX", 15.99)
+FFC_ROW_BLOCK = max(1, _env_int("CAM_FFC_ROW_BLOCK", 512))
+
+# In-place correction prevents a second full-size 4096 x 42000 uint16 image
+# from being allocated. The application receives the corrected image.
+FFC_WORKERS = max(1, _env_int("CAM_FFC_WORKERS", 1))
+
+# "raise" = fail the capture cycle if FFC fails.
+# "raw"   = log the error and return the uncorrected raw image.
+FFC_FAIL_POLICY = _env_str("CAM_FFC_FAIL_POLICY", "raise").strip().lower()
+if FFC_FAIL_POLICY not in ("raise", "raw"):
+    FFC_FAIL_POLICY = "raise"
+
 
 # =========================================================
 # LOGGING
@@ -213,6 +246,274 @@ def log(msg: str) -> None:
     from datetime import datetime
     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(f"{ts} | {msg}", flush=True)
+
+
+# =========================================================
+# SOFTWARE FFC HELPERS
+# =========================================================
+
+@dataclass(frozen=True)
+class SoftwareFFCConfig:
+    enabled: bool
+    target_mode: str
+    gain_min: float
+    gain_max: float
+    row_block: int
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None or str(value).strip() == "":
+        return bool(default)
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def _normalise_side_name(value: Any) -> str:
+    """Normalize profile/UI aliases to the live runtime role names."""
+    name = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "sidewall_1": "sidewall1",
+        "side_wall_1": "sidewall1",
+        "sidewall_2": "sidewall2",
+        "side_wall_2": "sidewall2",
+        "inner": "innerwall",
+        "inner_wall": "innerwall",
+    }
+    return aliases.get(name, name)
+
+
+def _normalise_ffc_target_mode(value: Any) -> str:
+    mode = str(value or "PERCENTILE_95").strip().upper()
+    allowed = {"MAX", "MEAN", "PERCENTILE_95"}
+    if mode not in allowed:
+        raise ValueError(
+            f"Invalid FFC target mode {mode!r}. Expected one of {sorted(allowed)}"
+        )
+    return mode
+
+
+def build_software_ffc_config(
+    side_name: str,
+    mapping: Optional[Dict[str, Any]] = None,
+    fallback: Optional[SoftwareFFCConfig] = None,
+) -> SoftwareFFCConfig:
+    """
+    Build one role/side FFC configuration.
+
+    Priority:
+      1. SKU profile fields in mapping
+      2. Existing fallback configuration
+      3. Per-side .env values
+      4. Global .env values
+    """
+    side_name = _normalise_side_name(side_name)
+    mapping = mapping or {}
+
+    if fallback is None:
+        fallback = SoftwareFFCConfig(
+            enabled=_side_or_global_bool(
+                side_name,
+                "SOFTWARE_FFC_ENABLED",
+                "CAM_SOFTWARE_FFC_ENABLED",
+                SOFTWARE_FFC_ENABLED,
+            ),
+            target_mode=_side_or_global_str(
+                side_name,
+                "FFC_TARGET_MODE",
+                "CAM_FFC_TARGET_MODE",
+                FFC_TARGET_MODE,
+            ),
+            gain_min=_side_or_global_float(
+                side_name,
+                "FFC_GAIN_MIN",
+                "CAM_FFC_GAIN_MIN",
+                FFC_GAIN_RANGE_MIN,
+            ),
+            gain_max=_side_or_global_float(
+                side_name,
+                "FFC_GAIN_MAX",
+                "CAM_FFC_GAIN_MAX",
+                FFC_GAIN_RANGE_MAX,
+            ),
+            row_block=_side_or_global_int(
+                side_name,
+                "FFC_ROW_BLOCK",
+                "CAM_FFC_ROW_BLOCK",
+                FFC_ROW_BLOCK,
+            ),
+        )
+
+    enabled_value = mapping.get(
+        "software_ffc_enabled",
+        mapping.get("enable_software_ffc", fallback.enabled),
+    )
+    target_mode_value = mapping.get(
+        "ffc_target_mode",
+        mapping.get("gain_target_mode", fallback.target_mode),
+    )
+    gain_min_value = mapping.get(
+        "ffc_gain_min",
+        mapping.get("gain_range_min", fallback.gain_min),
+    )
+    gain_max_value = mapping.get(
+        "ffc_gain_max",
+        mapping.get("gain_range_max", fallback.gain_max),
+    )
+    row_block_value = mapping.get(
+        "ffc_row_block",
+        fallback.row_block,
+    )
+
+    enabled = _coerce_bool(enabled_value, fallback.enabled)
+    target_mode = _normalise_ffc_target_mode(target_mode_value)
+    gain_min = float(gain_min_value)
+    gain_max = float(gain_max_value)
+    row_block = max(1, int(float(row_block_value)))
+
+    if gain_min <= 0:
+        raise ValueError(f"FFC gain_min must be > 0 for side={side_name}")
+    if gain_max < gain_min:
+        raise ValueError(
+            f"FFC gain_max must be >= gain_min for side={side_name}: "
+            f"{gain_max} < {gain_min}"
+        )
+
+    return SoftwareFFCConfig(
+        enabled=enabled,
+        target_mode=target_mode,
+        gain_min=gain_min,
+        gain_max=gain_max,
+        row_block=row_block,
+    )
+
+
+def _get_ffc_target_pixel(
+    column_profile: np.ndarray,
+    target_mode: str,
+) -> float:
+    mode = _normalise_ffc_target_mode(target_mode)
+
+    if mode == "MAX":
+        return float(np.max(column_profile))
+    if mode == "MEAN":
+        return float(np.mean(column_profile))
+    return float(np.percentile(column_profile, 95))
+
+
+def compute_ffc_gain_from_image(
+    image: np.ndarray,
+    config: SoftwareFFCConfig,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Compute one software-FFC gain value per image column.
+
+    This follows the supplied standalone FFC logic:
+      column mean -> selected target -> target / column_mean -> gain clipping.
+    """
+    if image is None:
+        raise ValueError("FFC image is None")
+    if image.ndim != 2:
+        raise RuntimeError(f"FFC expects a 2D mono image, got shape={image.shape}")
+    if image.shape[1] <= 0:
+        raise RuntimeError("FFC image has zero width")
+    if not np.issubdtype(image.dtype, np.integer):
+        raise RuntimeError(f"FFC expects an integer image, got dtype={image.dtype}")
+
+    column_profile = np.mean(image, axis=0, dtype=np.float64)
+    target = _get_ffc_target_pixel(column_profile, config.target_mode)
+
+    epsilon = 1e-6
+    gain_values = np.ones_like(column_profile, dtype=np.float64)
+    valid = column_profile > epsilon
+    gain_values[valid] = target / column_profile[valid]
+
+    gain_values = np.clip(
+        gain_values,
+        config.gain_min,
+        config.gain_max,
+    ).astype(np.float32)
+
+    stats: Dict[str, Any] = {
+        "target_mode": config.target_mode,
+        "target": target,
+        "profile_min": float(np.min(column_profile)),
+        "profile_max": float(np.max(column_profile)),
+        "profile_mean": float(np.mean(column_profile)),
+        "gain_min": float(np.min(gain_values)),
+        "gain_max": float(np.max(gain_values)),
+        "gain_mean": float(np.mean(gain_values)),
+        "gain_count_at_max": int(np.sum(gain_values >= config.gain_max)),
+    }
+    return gain_values, stats
+
+
+def apply_software_ffc_inplace(
+    image: np.ndarray,
+    gain_values: np.ndarray,
+    row_block: int,
+) -> int:
+    """
+    Apply software FFC in-place using small row blocks.
+
+    In-place processing is intentional because a 4096 x 42000 Mono16 image is
+    about 344 MB. Allocating a second complete corrected image for every camera
+    would create unnecessary RAM pressure.
+    """
+    if image.ndim != 2:
+        raise RuntimeError(f"FFC expects a 2D image, got shape={image.shape}")
+
+    height, width = image.shape
+    if int(gain_values.size) != int(width):
+        raise RuntimeError(
+            f"FFC gain width mismatch: gains={gain_values.size}, image_width={width}"
+        )
+
+    maximum_value = float(np.iinfo(image.dtype).max)
+    gains_2d = gain_values.reshape(1, -1).astype(np.float32, copy=False)
+    saturated_count = 0
+    block_rows = max(1, int(row_block))
+
+    for row0 in range(0, height, block_rows):
+        row1 = min(row0 + block_rows, height)
+
+        block = image[row0:row1, :].astype(np.float32)
+        block *= gains_2d
+        saturated_count += int(np.count_nonzero(block >= maximum_value))
+        np.clip(block, 0.0, maximum_value, out=block)
+        image[row0:row1, :] = block.astype(image.dtype)
+
+    return saturated_count
+
+
+def correct_image_with_software_ffc(
+    image: np.ndarray,
+    config: SoftwareFFCConfig,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Correct and return the same NumPy array object.
+
+    When config.enabled is False, the raw image is returned unchanged.
+    """
+    if not config.enabled:
+        return image, {"enabled": False}
+
+    started = time.perf_counter()
+    gain_values, stats = compute_ffc_gain_from_image(image, config)
+    saturated_count = apply_software_ffc_inplace(
+        image=image,
+        gain_values=gain_values,
+        row_block=config.row_block,
+    )
+
+    stats.update(
+        {
+            "enabled": True,
+            "saturated_pixels": int(saturated_count),
+            "elapsed_sec": float(time.perf_counter() - started),
+        }
+    )
+    return image, stats
 
 
 # =========================================================
@@ -267,6 +568,38 @@ def get_camera_role_config() -> List[Dict[str, Any]]:
             "acquisition_line_rate_enable": _side_or_global_bool(side_name, "ACQUISITION_LINE_RATE_ENABLE", "CAM_ACQUISITION_LINE_RATE_ENABLE", True),
             "acquisition_line_rate": _side_or_global_float(side_name, "ACQUISITION_LINE_RATE", "CAM_ACQUISITION_LINE_RATE", 8169.0),
             "acquisition_mode": _side_or_global_str(side_name, "ACQUISITION_MODE", "CAM_ACQUISITION_MODE", "Continuous"),
+
+            # Software FFC defaults. SKU profile values can override these later.
+            "software_ffc_enabled": _side_or_global_bool(
+                side_name,
+                "SOFTWARE_FFC_ENABLED",
+                "CAM_SOFTWARE_FFC_ENABLED",
+                SOFTWARE_FFC_ENABLED,
+            ),
+            "ffc_target_mode": _side_or_global_str(
+                side_name,
+                "FFC_TARGET_MODE",
+                "CAM_FFC_TARGET_MODE",
+                FFC_TARGET_MODE,
+            ),
+            "ffc_gain_min": _side_or_global_float(
+                side_name,
+                "FFC_GAIN_MIN",
+                "CAM_FFC_GAIN_MIN",
+                FFC_GAIN_RANGE_MIN,
+            ),
+            "ffc_gain_max": _side_or_global_float(
+                side_name,
+                "FFC_GAIN_MAX",
+                "CAM_FFC_GAIN_MAX",
+                FFC_GAIN_RANGE_MAX,
+            ),
+            "ffc_row_block": _side_or_global_int(
+                side_name,
+                "FFC_ROW_BLOCK",
+                "CAM_FFC_ROW_BLOCK",
+                FFC_ROW_BLOCK,
+            ),
         }
 
         configs.append(cfg)
@@ -1122,13 +1455,7 @@ class CameraActor:
                 pass
 
 def _profile_bool(value, default=False) -> bool:
-    if isinstance(value, bool):
-        return value
-
-    if value is None or str(value).strip() == "":
-        return bool(default)
-
-    return str(value).strip().lower() in ("1", "true", "yes", "on", "y")
+    return _coerce_bool(value, default)
 # =========================================================
 # MULTI-CAMERA MANAGER
 # =========================================================
@@ -1140,10 +1467,11 @@ class MultiCameraManager:
         manager.set_plc_interface(plc_client_or_wrapper)
 
     Live Mode:
+        manager.apply_camera_profile(selected_sku_camera_profile)
         manager.start_all_streams()
         manager.capture_all()
 
-    Returns images by side/role name:
+    Returns SOFTWARE-FFC-corrected images by side/role name when enabled:
         {
           "sidewall1": img,
           "sidewall2": img,
@@ -1165,6 +1493,18 @@ class MultiCameraManager:
         self.camera_to_side = get_camera_to_side_map()
         self.side_to_camera = get_side_to_camera_map()
         self.camera_roles_by_serial = get_camera_roles_by_serial()
+
+        # One FFC configuration per logical role. This is role-based rather
+        # than physical-camera-based, so shared innerwall/bead can use
+        # different software FFC settings if required.
+        self.ffc_config_by_side: Dict[str, SoftwareFFCConfig] = {
+            str(item["side"]).strip().lower(): build_software_ffc_config(
+                str(item["side"]).strip().lower(),
+                mapping=item,
+            )
+            for item in self.role_config
+        }
+        self.last_ffc_stats: Dict[str, Dict[str, Any]] = {}
 
         if not self.role_config:
             raise RuntimeError(
@@ -1210,8 +1550,12 @@ class MultiCameraManager:
         if not isinstance(profile, dict):
             raise ValueError("camera profile must be a dict")
 
-        sku_name = profile.get("sku_name", "-")
-        cameras_cfg = profile.get("cameras", {}) or {}
+        sku_name = profile.get("sku_name", profile.get("sku", "-"))
+        cameras_cfg_raw = profile.get("cameras", {}) or {}
+        cameras_cfg = {
+            _normalise_side_name(side_name): cfg
+            for side_name, cfg in cameras_cfg_raw.items()
+        }
 
         if not cameras_cfg:
             raise ValueError(f"No cameras found in camera profile for SKU={sku_name}")
@@ -1226,11 +1570,28 @@ class MultiCameraManager:
                 continue
 
             serial = str(cfg.get("serial", "")).strip()
-            side_name = str(side_name).strip().lower()
+            side_name = _normalise_side_name(side_name)
 
             if serial:
                 self.side_to_camera[side_name] = serial
                 self.camera_to_side.setdefault(serial, side_name)
+
+            current_ffc = self.ffc_config_by_side.get(
+                side_name,
+                build_software_ffc_config(side_name),
+            )
+            self.ffc_config_by_side[side_name] = build_software_ffc_config(
+                side_name,
+                mapping=cfg,
+                fallback=current_ffc,
+            )
+
+            ffc_cfg = self.ffc_config_by_side[side_name]
+            log(
+                f"[FFC PROFILE] side={side_name} | enabled={ffc_cfg.enabled} | "
+                f"target={ffc_cfg.target_mode} | gain={ffc_cfg.gain_min}-{ffc_cfg.gain_max} | "
+                f"row_block={ffc_cfg.row_block}"
+            )
 
         for cam in self.cameras:
             selected_cfg = None
@@ -1404,6 +1765,127 @@ class MultiCameraManager:
 
         self._streams_started = False
         log("All camera streams stopped")
+
+    def _apply_ffc_one(
+        self,
+        side_name: str,
+        image: np.ndarray,
+        cycle: int,
+    ) -> Tuple[str, np.ndarray, Dict[str, Any]]:
+        side_name = _normalise_side_name(side_name)
+        config = self.ffc_config_by_side.get(
+            side_name,
+            build_software_ffc_config(side_name),
+        )
+
+        if not config.enabled:
+            log(f"[FFC] SKIP side={side_name} cycle={cycle} enabled=False")
+            return side_name, image, {"enabled": False}
+
+        log(
+            f"[FFC] START side={side_name} cycle={cycle} "
+            f"shape={image.shape} dtype={image.dtype} "
+            f"target={config.target_mode} gain={config.gain_min}-{config.gain_max}"
+        )
+
+        corrected, stats = correct_image_with_software_ffc(
+            image=image,
+            config=config,
+        )
+
+        log(
+            f"[FFC] DONE side={side_name} cycle={cycle} "
+            f"time={stats.get('elapsed_sec', 0.0):.3f}s "
+            f"target={stats.get('target', 0.0):.2f} "
+            f"gain_min={stats.get('gain_min', 0.0):.4f} "
+            f"gain_max={stats.get('gain_max', 0.0):.4f} "
+            f"gain_at_max={stats.get('gain_count_at_max', 0)} "
+            f"saturated_pixels={stats.get('saturated_pixels', 0)}"
+        )
+        return side_name, corrected, stats
+
+    def _apply_ffc_to_results(
+        self,
+        results: Dict[str, Optional[np.ndarray]],
+        cycle: int,
+    ) -> Dict[str, Optional[np.ndarray]]:
+        """
+        Apply software FFC after all requested images are captured.
+
+        The function preserves the public return type:
+            {side_name: corrected_numpy_image}
+
+        Therefore the existing application save logic and PatchCore pipeline
+        automatically receive the corrected image without any caller changes.
+        """
+        jobs = [
+            (str(side_name).strip().lower(), image)
+            for side_name, image in results.items()
+            if image is not None
+        ]
+
+        if not jobs:
+            self.last_ffc_stats = {}
+            return results
+
+        started = time.perf_counter()
+        stats_by_side: Dict[str, Dict[str, Any]] = {}
+
+        def handle_failure(side_name: str, error: Exception) -> None:
+            log(
+                f"[FFC][ERROR] side={side_name} cycle={cycle} "
+                f"{type(error).__name__}: {error}"
+            )
+            if FFC_FAIL_POLICY == "raise":
+                raise RuntimeError(
+                    f"Software FFC failed for side={side_name}: {error}"
+                ) from error
+
+        workers = min(max(1, FFC_WORKERS), len(jobs))
+
+        if workers == 1:
+            for side_name, image in jobs:
+                try:
+                    name, corrected, stats = self._apply_ffc_one(
+                        side_name,
+                        image,
+                        cycle,
+                    )
+                    results[name] = corrected
+                    stats_by_side[name] = stats
+                except Exception as error:
+                    handle_failure(side_name, error)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="software-ffc",
+            ) as pool:
+                future_map = {
+                    pool.submit(
+                        self._apply_ffc_one,
+                        side_name,
+                        image,
+                        cycle,
+                    ): side_name
+                    for side_name, image in jobs
+                }
+
+                for future in concurrent.futures.as_completed(future_map):
+                    side_name = future_map[future]
+                    try:
+                        name, corrected, stats = future.result()
+                        results[name] = corrected
+                        stats_by_side[name] = stats
+                    except Exception as error:
+                        handle_failure(side_name, error)
+
+        self.last_ffc_stats = stats_by_side
+        log(
+            f"[FFC] CYCLE_DONE cycle={cycle} "
+            f"sides={list(stats_by_side.keys())} "
+            f"time={time.perf_counter() - started:.3f}s"
+        )
+        return results
 
     def _build_role_targets(
         self,
@@ -1641,6 +2123,8 @@ class MultiCameraManager:
                     except Exception:
                         traceback.print_exc()
 
+            results = self._apply_ffc_to_results(results, cycle)
+
             log(
                 f"[CAPTURE] PLC_SOFTWARE cycle={cycle} completed | "
                 f"keys={list(results.keys())}"
@@ -1656,6 +2140,8 @@ class MultiCameraManager:
                     sides_to_capture=sides_to_capture,
                 )
             )
+
+            results = self._apply_ffc_to_results(results, cycle)
 
             log(
                 f"[CAPTURE] {TRIGGER_MODE.upper()} cycle={cycle} completed | "
@@ -1677,6 +2163,12 @@ class MultiCameraManager:
 
 __all__ = [
     "TRIGGER_MODE",
+    "SoftwareFFCConfig",
+    "build_software_ffc_config",
+    "_normalise_side_name",
+    "compute_ffc_gain_from_image",
+    "apply_software_ffc_inplace",
+    "correct_image_with_software_ffc",
     "get_camera_role_config",
     "get_camera_to_side_map",
     "get_side_to_camera_map",

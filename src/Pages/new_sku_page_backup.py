@@ -20,7 +20,6 @@ from src.COMMON.db import save_new_sku_image
 from src.COMMON.recipe_service import RecipeService
 from src.models.template_extracter import TemplateExtractorPage
 from src.models.new_sku_training.training_page import NewSKUTrainingPage
-from src.models.new_sku_offset.offset_page import OffsetCalculationPage
 from src.models.feature_thresh.threshold_page import FeatureThresholdPage
 
 try:
@@ -34,14 +33,10 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 TAB_SKU_SETUP = 0
 TAB_AXIS_TEACHING = 1
 TAB_CAPTURE = 2
-TAB_IMAGE_PROCESSING = 3
-TAB_OFFSET_CALCULATION = 4
-TAB_TRAINING = 5
-TAB_FEATURE_THRESHOLD = 6
-TAB_SAVE_RECIPE = 7
-
-# Backward-compatible alias used by older helper names.
-TAB_TEMPLATE_EXTRACTOR = TAB_IMAGE_PROCESSING
+TAB_TRAINING = 3
+TAB_TEMPLATE_EXTRACTOR = 4
+TAB_FEATURE_THRESHOLD = 5
+TAB_SAVE_RECIPE = 6
 
 
 # =========================
@@ -375,7 +370,7 @@ class NewSKUPage(QWidget):
         self.img_labels: List[AspectImageLabel] = []
         self.status_lbl: Optional[QLabel] = None
         self.capture_btn: Optional[QPushButton] = None
-        self.image_processing_btn: Optional[QPushButton] = None
+        self.training_btn: Optional[QPushButton] = None
         self.template_btn: Optional[QPushButton] = None
         self.refresh_btn: Optional[QPushButton] = None
         self.close_btn: Optional[QPushButton] = None
@@ -391,7 +386,6 @@ class NewSKUPage(QWidget):
         self.saved_recipe_doc: Optional[Dict[str, Any]] = None
         self.saved_recipe_result: Optional[Dict[str, Any]] = None
         self.load_machine_btn: Optional[QPushButton] = None
-        self.latest_offset_assets: Dict[str, Dict[str, Any]] = {}
         self.latest_training_assets: Dict[str, Dict[str, Any]] = {}
         self.latest_template_assets: Dict[str, Dict[str, Any]] = {}
         self.latest_threshold_assets: Dict[str, Dict[str, Any]] = {}
@@ -404,9 +398,8 @@ class NewSKUPage(QWidget):
         self.wizard_page: Optional[QWidget] = None
         self.axis_teaching_page: Optional[QWidget] = None
         self.capture_page: Optional[QWidget] = None
-        self.template_extractor_page: Optional[TemplateExtractorPage] = None
-        self.offset_page: Optional[OffsetCalculationPage] = None
         self.training_page: Optional[NewSKUTrainingPage] = None
+        self.template_extractor_page: Optional[TemplateExtractorPage] = None
         self.feature_threshold_page: Optional[FeatureThresholdPage] = None
         self.recipe_page: Optional[QWidget] = None
         self.axis_entry_mode = "capture"
@@ -436,12 +429,10 @@ class NewSKUPage(QWidget):
     def _on_capture_finished(self, result: dict):
         self.latest_preview_paths = result or {}
         self._update_preview_from_latest()
-        if self.template_extractor_page is not None:
-            self.template_extractor_page.refresh_context()
-        if self.offset_page is not None:
-            self.offset_page.refresh_context()
         if self.training_page is not None:
             self.training_page.refresh_context()
+        if self.template_extractor_page is not None:
+            self.template_extractor_page.refresh_context()
 
         sku_name = _safe_name(self._get_sku_name())
 
@@ -643,12 +634,10 @@ class NewSKUPage(QWidget):
         self.sku_meta = dict(sku_meta or {})
         self.sku_meta.pop("machine_serial", None)
         self._apply_sku_meta_to_form()
-        if self.template_extractor_page is not None:
-            self.template_extractor_page.refresh_context()
-        if self.offset_page is not None:
-            self.offset_page.refresh_context()
         if self.training_page is not None:
             self.training_page.refresh_context()
+        if self.template_extractor_page is not None:
+            self.template_extractor_page.refresh_context()
 
     def _apply_sku_meta_to_form(self):
         if not self.wizard_widgets:
@@ -764,12 +753,10 @@ class NewSKUPage(QWidget):
         for i, btn in enumerate(self.tab_buttons):
             btn.setStyleSheet(self._tab_button_style(i == idx))
 
-        if idx == TAB_IMAGE_PROCESSING and self.template_extractor_page is not None:
-            self.template_extractor_page.refresh_context()
-        elif idx == TAB_OFFSET_CALCULATION and self.offset_page is not None:
-            self.offset_page.refresh_context()
-        elif idx == TAB_TRAINING and self.training_page is not None:
+        if idx == TAB_TRAINING and self.training_page is not None:
             self.training_page.refresh_context()
+        elif idx == TAB_TEMPLATE_EXTRACTOR and self.template_extractor_page is not None:
+            self.template_extractor_page.refresh_context()
         elif idx == TAB_FEATURE_THRESHOLD and self.feature_threshold_page is not None:
             self.feature_threshold_page.refresh_context()
 
@@ -793,9 +780,8 @@ class NewSKUPage(QWidget):
             "SKU Setup",
             "Axis Teaching",
             "Capture",
-            "Image Processing",
-            "Offset Calculation",
             "Training",
+            "Image Processing",
             "Feature & Threshold",
             "Save Recipe",
         ]
@@ -821,41 +807,26 @@ class NewSKUPage(QWidget):
         self.wizard_page = QWidget()
         self.axis_teaching_page = QWidget()
         self.capture_page = QWidget()
-        self.template_extractor_page = TemplateExtractorPage(
-            media_path=self.media_path,
-            sku_name_provider=self._get_sku_name,
-            camera_serials=CAMERA_SERIAL_MAP,
-            parent=self,
-        )
-        self.template_extractor_page.templateSaved.connect(self._on_template_saved)
-        self.template_extractor_page.continueRequested.connect(
-            lambda: self._switch_tab(TAB_OFFSET_CALCULATION)
-        )
-
-        self.offset_page = OffsetCalculationPage(
-            media_path=self.media_path,
-            project_root=str(PROJECT_ROOT),
-            sku_name_provider=self._get_sku_name,
-            camera_serials=CAMERA_SERIAL_MAP,
-            template_assets_provider=self._collect_template_assets,
-            parent=self,
-        )
-        self.offset_page.offsetSaved.connect(self._on_offset_saved)
-        self.offset_page.continueRequested.connect(
-            lambda: self._switch_tab(TAB_TRAINING)
-        )
-
         self.training_page = NewSKUTrainingPage(
             media_path=self.media_path,
             project_root=str(PROJECT_ROOT),
             sku_name_provider=self._get_sku_name,
             camera_serials=CAMERA_SERIAL_MAP,
             template_assets_provider=self._collect_template_assets,
-            offset_assets_provider=self._collect_offset_assets,
             parent=self,
         )
         self.training_page.trainingSaved.connect(self._on_training_saved)
         self.training_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_TEMPLATE_EXTRACTOR)
+        )
+        self.template_extractor_page = TemplateExtractorPage(
+            media_path=self.media_path,
+            sku_name_provider=self._get_sku_name,
+            sidewall_serials=SIDEWALL_SERIAL_MAP,
+            parent=self,
+        )
+        self.template_extractor_page.templateSaved.connect(self._on_template_saved)
+        self.template_extractor_page.continueRequested.connect(
             lambda: self._switch_tab(TAB_FEATURE_THRESHOLD)
         )
 
@@ -881,38 +852,13 @@ class NewSKUPage(QWidget):
         self.stack.addWidget(self.wizard_page)
         self.stack.addWidget(self.axis_teaching_page)
         self.stack.addWidget(self.capture_page)
-        self.stack.addWidget(self.template_extractor_page)
-        self.stack.addWidget(self.offset_page)
         self.stack.addWidget(self.training_page)
+        self.stack.addWidget(self.template_extractor_page)
         self.stack.addWidget(self.feature_threshold_page)
         self.stack.addWidget(self.recipe_page)
 
         root.addWidget(self.stack, 1)
         self._switch_tab(TAB_SKU_SETUP)
-
-    def _on_offset_saved(self, role: str, payload: dict):
-        self.latest_offset_assets[str(role)] = dict(payload or {})
-        self.recipe_doc["offset_assets"] = dict(self.latest_offset_assets)
-
-        if self.offset_page is not None:
-            self.offset_page.refresh_context()
-        if self.training_page is not None:
-            self.training_page.refresh_context()
-
-        if self.status_lbl is not None:
-            display_name = payload.get("display_name", role)
-            output_path = payload.get("calibration_json_path", "")
-            self.status_lbl.setText(
-                f"{display_name} offset calibration saved: {output_path}"
-            )
-
-    def _collect_offset_assets(self) -> Dict[str, Dict[str, Any]]:
-        assets = dict(self.latest_offset_assets)
-        if self.offset_page is not None:
-            assets.update(self.offset_page.get_offset_assets())
-        self.latest_offset_assets = assets
-        self.recipe_doc["offset_assets"] = dict(assets)
-        return assets
 
     def _on_training_saved(self, role: str, payload: dict):
         self.latest_training_assets[str(role)] = dict(payload or {})
@@ -934,8 +880,6 @@ class NewSKUPage(QWidget):
     def _on_template_saved(self, role: str, payload: dict):
         self.latest_template_assets[str(role)] = dict(payload or {})
         self.recipe_doc["template_assets"] = dict(self.latest_template_assets)
-        if self.offset_page is not None:
-            self.offset_page.refresh_context()
         if self.training_page is not None:
             self.training_page.refresh_context()
 
@@ -1851,17 +1795,15 @@ class NewSKUPage(QWidget):
 
         self.capture_btn = self._make_button("Start Capture", "primary")
         self.capture_btn.clicked.connect(self.confirm_and_start_capture)
-        self.image_processing_btn = self._make_button("Next: Image Processing", "secondary")
-        self.image_processing_btn.clicked.connect(
-            lambda: self._switch_tab(TAB_IMAGE_PROCESSING)
-        )
+        self.training_btn = self._make_button("Next: Training", "secondary")
+        self.training_btn.clicked.connect(lambda: self._switch_tab(TAB_TRAINING))
         self.refresh_btn = self._make_button("Refresh Preview", "secondary")
         self.refresh_btn.clicked.connect(self.refresh_preview_with_raw_load)
         self.close_btn = self._make_button("Close", "secondary")
         self.close_btn.clicked.connect(self.close_page)
 
         action_l.addWidget(self.capture_btn)
-        action_l.addWidget(self.image_processing_btn)
+        action_l.addWidget(self.training_btn)
         action_l.addWidget(self.refresh_btn)
         action_l.addStretch(1)
         action_l.addWidget(self.close_btn)
@@ -1884,7 +1826,7 @@ class NewSKUPage(QWidget):
         root.addWidget(main_card, 1)
 
     def _set_controls_enabled(self, enabled: bool):
-        for btn in [self.capture_btn, self.image_processing_btn, self.refresh_btn, self.close_btn]:
+        for btn in [self.capture_btn, self.training_btn, self.refresh_btn, self.close_btn]:
             if btn is not None:
                 btn.setEnabled(enabled)
         if self.tab_buttons:
@@ -2152,7 +2094,6 @@ class NewSKUPage(QWidget):
 
         recipe_doc["recipe_number"] = recipe_number
         recipe_doc["plc_recipe_number"] = recipe_number
-        recipe_doc["offset_assets"] = self._collect_offset_assets()
         recipe_doc["training_assets"] = self._collect_training_assets()
         recipe_doc["template_assets"] = self._collect_template_assets()
         recipe_doc["threshold_assets"] = self._collect_threshold_assets()
@@ -2183,28 +2124,6 @@ class NewSKUPage(QWidget):
             template_assets = recipe_doc.get("template_assets", {}) or {}
             sidewall1_template = (template_assets.get("sidewall1", {}) or {}).get("template_image", "Not saved")
             sidewall2_template = (template_assets.get("sidewall2", {}) or {}).get("template_image", "Not saved")
-            inner_marker_template = (template_assets.get("innerwall", {}) or {}).get("template_image", "Not saved")
-            tread_marker_template = (template_assets.get("tread", {}) or {}).get("template_image", "Not saved")
-            bead_marker_template = (template_assets.get("bead", {}) or {}).get("template_image", "Not saved")
-            offset_assets = recipe_doc.get("offset_assets", {}) or {}
-            offset_role_names = {
-                "innerwall": "Inner Side",
-                "tread": "Tread",
-                "bead": "Bead",
-            }
-            offset_summary_lines = []
-            for offset_role, offset_display in offset_role_names.items():
-                offset_item = offset_assets.get(offset_role, {}) or {}
-                offset_summary_lines.append(
-                    f"{offset_display} Offset Ratio: "
-                    f"{offset_item.get('offset_ratio', 'Not calculated')}"
-                )
-                offset_summary_lines.append(
-                    f"{offset_display} Calibration JSON: "
-                    f"{offset_item.get('calibration_json_path', 'Not saved')}"
-                )
-            offset_summary = "\n".join(offset_summary_lines)
-
             training_assets = recipe_doc.get("training_assets", {}) or {}
             training_role_names = {
                 "sidewall1": "Sidewall 1",
@@ -2515,13 +2434,6 @@ class NewSKUPage(QWidget):
     def close_page(self):
         if self.capture_in_progress:
             QMessageBox.warning(self, "New SKU", "Please wait until capture is completed.")
-            return
-        if self.offset_page is not None and self.offset_page.is_running:
-            QMessageBox.warning(
-                self,
-                "New SKU",
-                "Please wait until the current offset calculation is completed.",
-            )
             return
         if self.training_page is not None and self.training_page.is_running:
             QMessageBox.warning(

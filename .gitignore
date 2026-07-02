@@ -4,4 +4,14 @@ Output
 new_sku_images
 feature_threshold
 logs
-__pycache__
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+offset_calibration
+training
