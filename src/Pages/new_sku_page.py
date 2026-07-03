@@ -73,6 +73,18 @@ SIDEWALL_SERIAL_MAP = {
     if role in ("sidewall1", "sidewall2")
 }
 
+# New SKU capture is intentionally fixed to two images for each logical side.
+# Streams start once, both capture sets run, and streams stop once at the end.
+CAPTURE_ROLE_ORDER = [
+    "sidewall1",
+    "sidewall2",
+    "innerwall",
+    "tread",
+    "bead",
+]
+CAPTURE_IMAGES_PER_SIDE = 2
+CAPTURE_EXPECTED_TOTAL = len(CAPTURE_ROLE_ORDER) * CAPTURE_IMAGES_PER_SIDE
+
 
 def _ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
@@ -305,7 +317,7 @@ class CaptureWorker(QThread):
         sku_name: str,
         media_path: str,
         images_per_camera: int,
-        train_good_count: int = 10,
+        train_good_count: int = 0,
         multi_camera_manager=None,
         sku_meta=None,
         meta_collection: str = "New SKU",
@@ -419,6 +431,7 @@ class NewSKUPage(QWidget):
 
 
         self.camera_serial_order = list(CAMERA_SERIAL_ORDER)
+        self.camera_role_order = list(CAPTURE_ROLE_ORDER)
 
         self._build_ui()
 
@@ -448,13 +461,19 @@ class NewSKUPage(QWidget):
 
         if self.status_lbl is not None:
             self.status_lbl.setText(
-                f"Capture completed. Saved in media/new_sku_images/{sku_name}/<camera_serial>/"
+                f"Capture completed: {CAPTURE_EXPECTED_TOTAL} FFC-corrected images saved in "
+                f"media/new_sku_images/{sku_name}/<side>/"
             )
 
         QMessageBox.information(
             self,
             "Capture Complete",
-            f"Images saved in:\nmedia/new_sku_images/{sku_name}/<camera_serial>/",
+            (
+                f"PLC capture completed successfully.\n\n"
+                f"Saved {CAPTURE_IMAGES_PER_SIDE} FFC-corrected images for each of 5 sides "
+                f"({CAPTURE_EXPECTED_TOTAL} images total).\n\n"
+                f"Save root:\nmedia/new_sku_images/{sku_name}/<side>/"
+            ),
         )
 
         self.capture_in_progress = False
@@ -766,15 +785,25 @@ class NewSKUPage(QWidget):
                 refresh()
 
     def _preview_serial_order(self):
+        """Return logical side keys first, with old serial/index keys as fallback."""
+        if any(role in self.latest_preview_paths for role in self.camera_role_order):
+            return self.camera_role_order
         if any(serial in self.latest_preview_paths for serial in self.camera_serial_order):
             return self.camera_serial_order
         return [str(i + 1) for i in range(len(self.labels))]
 
     def _ordered_preview_paths(self):
+        """Keep the five UI cards in sidewall1/2/innerwall/tread/bead order."""
         paths = []
-        for idx, serial in enumerate(self.camera_serial_order):
+        for idx, role_name in enumerate(self.camera_role_order):
+            serial = self.camera_serial_order[idx] if idx < len(self.camera_serial_order) else ""
             raw_key = str(idx + 1)
-            path = self.latest_preview_paths.get(serial) or self.latest_preview_paths.get(raw_key) or ""
+            path = (
+                self.latest_preview_paths.get(role_name)
+                or (self.latest_preview_paths.get(serial) if serial else "")
+                or self.latest_preview_paths.get(raw_key)
+                or ""
+            )
             paths.append(path)
         while len(paths) < len(self.labels):
             paths.append("")
@@ -1871,7 +1900,7 @@ class NewSKUPage(QWidget):
         title_lbl = QLabel("New SKU Image Capture")
         title_lbl.setObjectName("PageTitle")
         header_left.addWidget(title_lbl)
-        subtitle_lbl = QLabel("Capture and verify all tyre views before saving the SKU recipe.")
+        subtitle_lbl = QLabel("Capture two FFC-corrected images for each tyre side before saving the SKU recipe.")
         subtitle_lbl.setObjectName("PageSubTitle")
         header_left.addWidget(subtitle_lbl)
         header_row.addLayout(header_left)
@@ -2026,18 +2055,8 @@ class NewSKUPage(QWidget):
                 self.img_labels[i].set_image_path(preview_paths[i])
 
     def _get_capture_plan(self):
-        total = _to_int(self.sku_meta.get("image_count_per_zone", env_vars.get("NEW_SKU_DEFAULT_IMAGE_COUNT_PER_ZONE", 20)), 20)
-        good_count = _to_int(self.sku_meta.get("train_good_count", env_vars.get("NEW_SKU_DEFAULT_TRAIN_GOOD_COUNT", 10)), 10)
-        expected = _to_int(self.sku_meta.get("inspection_zones", env_vars.get("NEW_SKU_DEFAULT_ZONE_COUNT", len(CAMERA_SERIAL_ORDER) or 5)), len(CAMERA_SERIAL_ORDER) or 5)
-        if total < 2:
-            total = 20
-        if good_count < 1:
-            good_count = 10
-        if good_count >= total:
-            good_count = max(1, total // 2)
-        if expected < 1:
-            expected = len(CAMERA_SERIAL_ORDER) or 5
-        return total, good_count, expected
+        """Fixed New SKU capture plan: two images for each of five sides."""
+        return CAPTURE_IMAGES_PER_SIDE, 0, len(CAPTURE_ROLE_ORDER)
 
     def confirm_and_start_capture(self):
         if self.capture_in_progress:
@@ -2047,11 +2066,19 @@ class NewSKUPage(QWidget):
         sku_name = self._get_sku_name()
 
         msg = (
-            f"Capture {total} images per camera for SKU: {sku_name}\n\n"
+            f"Capture {CAPTURE_IMAGES_PER_SIDE} images for each tyre side "
+            f"({CAPTURE_EXPECTED_TOTAL} images total) for SKU: {sku_name}\n\n"
+            "Sides: Sidewall 1, Sidewall 2, Innerwall, Tread and Bead\n\n"
             f"Save path:\n"
-            f"media/new_sku_images/{_safe_name(sku_name)}/<camera_serial>/\n\n"
-            "After placing the tyre, click OK.\n"
-            "Then software trigger will capture images from connected cameras."
+            f"media/new_sku_images/{_safe_name(sku_name)}/<side>/\n\n"
+            "After clicking OK, the camera streams will start once and the "
+            "system will wait for the PLC trigger.\n\n"
+            "Capture set 1:\n"
+            "  MAIN DB74.DBX0.3 -> Sidewall1, Sidewall2, Innerwall and Tread\n"
+            "  BEAD DB74.DBX86.0 -> Bead\n\n"
+            "The same two PLC rising edges are required again for capture set 2.\n\n"
+            "After both sets are captured, software FFC will be applied, the "
+            "10 corrected images will be saved, and all streams will stop once."
         )
 
         reply = QMessageBox.question(
@@ -2103,8 +2130,8 @@ class NewSKUPage(QWidget):
 
         if self.status_lbl is not None:
             self.status_lbl.setText(
-                f"Starting software capture | SKU={sku_name} | "
-                f"Images/camera={images_per_camera} | Train good={good_folder_count}"
+                f"Arming PLC capture | SKU={sku_name} | "
+                f"2 images/side | Waiting for MAIN and BEAD trigger sets"
             )
 
         self.capture_worker = CaptureWorker(
