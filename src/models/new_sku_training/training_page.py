@@ -10,6 +10,7 @@ Training routes
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -202,27 +203,13 @@ class NewSKUTrainingPage(QWidget):
         self.offset_assets_provider = offset_assets_provider
 
         self.active_role = "sidewall1"
+        self._context_sku = ""
         self.worker: Optional[LocalTrainingWorker] = None
         self.running_role: Optional[str] = None
         self._loading_widgets = False
 
         self.states: Dict[str, Dict[str, Any]] = {
-            role: {
-                "pipeline": "sidewall" if role in self.SIDEWALL_ROLES else "multiview",
-                "raw_train_folder": "",
-                "anchor_role": "sidewall1",
-                "sidewall_input": "",
-                "target_input": "",
-                "r_template_path": "",
-                "calibration_json_path": "",
-                "out_path": "",
-                "coreset_percentage": 0.10,
-                "batch_size": 32,
-                "num_workers": min(4, os.cpu_count() or 1),
-                "keep_generated_patches": False,
-                "result": {},
-            }
-            for role in self.ROLE_INFO
+            role: self._empty_state(role) for role in self.ROLE_INFO
         }
 
         self.role_rows: Dict[str, RoleTrainingRow] = {}
@@ -598,26 +585,92 @@ class NewSKUTrainingPage(QWidget):
             / f"{sku}_{role}_patchcore_model.pth"
         ).resolve()
 
-    def refresh_context(self) -> None:
-        sku = self._current_sku_name()
+    def _empty_state(self, role: str) -> Dict[str, Any]:
+        return {
+            "pipeline": "sidewall" if role in self.SIDEWALL_ROLES else "multiview",
+            "raw_train_folder": "",
+            "anchor_role": "sidewall1",
+            "sidewall_input": "",
+            "target_input": "",
+            "r_template_path": "",
+            "calibration_json_path": "",
+            "out_path": "",
+            "coreset_percentage": 0.10,
+            "batch_size": 32,
+            "num_workers": min(4, os.cpu_count() or 1),
+            "keep_generated_patches": False,
+            "result": {},
+        }
+
+    def _restore_existing_result(self, role: str, state: Dict[str, Any]) -> None:
+        model_path = Path(str(state.get("out_path") or ""))
+        if not model_path.is_file():
+            return
+        summary_name = (
+            "raw_to_patchcore_training_summary.json"
+            if role in self.SIDEWALL_ROLES
+            else "tread_raw_to_patchcore_training_summary.json"
+        )
+        summary_path = model_path.parent / summary_name
+        summary: Dict[str, Any] = {}
+        if summary_path.is_file():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except Exception:
+                summary = {}
+        training = dict(summary.get("training") or {})
+        preprocessing = dict(summary.get("preprocessing") or {})
+        state["result"] = {
+            "sku_name": self._context_sku,
+            "pipeline": state.get("pipeline"),
+            "role": role,
+            "display_name": self.ROLE_INFO[role],
+            "model_path": str(model_path.resolve()),
+            "summary_path": str(summary_path.resolve()) if summary_path.is_file() else "",
+            "timing_csv": str((model_path.parent / "training_timings.csv").resolve()),
+            "preprocess_report_json": str((model_path.parent / "preprocess_report.json").resolve()),
+            "generated_training_patch_count": int(
+                preprocessing.get("generated_training_patch_count", 0) or 0
+            ),
+            "successful_input_count": int(
+                preprocessing.get("successful_raw_image_count",
+                    preprocessing.get("successful_pair_count", 0)) or 0
+            ),
+            "failed_input_count": int(
+                preprocessing.get("failed_raw_image_count",
+                    preprocessing.get("failed_pair_count", 0)) or 0
+            ),
+            "memory_bank_shape": list(training.get("memory_bank_shape") or []),
+            "total_pipeline_time": float(summary.get("total_pipeline_time", 0.0) or 0.0),
+        }
+
+    def _refresh_role_states(self) -> None:
+        for role, row in self.role_rows.items():
+            completed = bool(
+                (self.states[role].get("result") or {}).get("model_path")
+            )
+            row.set_state("done", "Completed") if completed else row.set_state(
+                "waiting", "Not trained"
+            )
+            row.set_active(role == self.active_role)
+
+    def _apply_context_defaults(self, restore_existing: bool = True) -> None:
         for role, state in self.states.items():
             if role in self.SIDEWALL_ROLES:
                 if not state.get("raw_train_folder"):
                     state["raw_train_folder"] = str(self._capture_folder(role))
-                if not state.get("r_template_path"):
-                    state["r_template_path"] = self._default_template(role)
+                template = self._default_template(role)
+                if template:
+                    state["r_template_path"] = template
             else:
                 anchor = str(state.get("anchor_role") or "sidewall1")
                 if not state.get("sidewall_input"):
                     state["sidewall_input"] = str(self._capture_folder(anchor))
                 if not state.get("target_input"):
                     state["target_input"] = str(self._capture_folder(role))
-                if not state.get("r_template_path"):
-                    state["r_template_path"] = self._default_template(anchor)
-
-                # OffsetCalculationPage emits offsetSaved, NewSKUPage refreshes
-                # this page, and the fresh SKU calibration is forced into the
-                # correct Inner/Tread/Bead training state automatically.
+                template = self._default_template(anchor)
+                if template:
+                    state["r_template_path"] = template
                 provided_calibration = self._provided_calibration(role)
                 if provided_calibration:
                     state["calibration_json_path"] = provided_calibration
@@ -626,11 +679,36 @@ class NewSKUTrainingPage(QWidget):
                     or not Path(str(state.get("calibration_json_path"))).is_file()
                 ):
                     state["calibration_json_path"] = self._default_calibration(role)
-            expected_output = self._default_output_model(role)
-            old_output = str(state.get("out_path") or "")
-            if not old_output or "unknown_sku" in old_output:
-                state["out_path"] = str(expected_output)
 
+            if not state.get("out_path"):
+                state["out_path"] = str(self._default_output_model(role))
+            if restore_existing and not state.get("result"):
+                self._restore_existing_result(role, state)
+
+    def reset_for_sku(self, sku_name: Optional[str] = None) -> None:
+        if self.is_running:
+            return
+        sku = _safe_name(sku_name or self._current_sku_name())
+        self._context_sku = sku
+        self.states = {
+            role: self._empty_state(role) for role in self.ROLE_INFO
+        }
+        self.active_role = "sidewall1"
+        self._apply_context_defaults(restore_existing=True)
+        self._refresh_role_states()
+        self._load_active_state()
+        self.status_title.setText("Ready")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.log_box.clear()
+
+    def refresh_context(self) -> None:
+        sku = self._current_sku_name()
+        if sku != self._context_sku:
+            self.reset_for_sku(sku)
+            return
+        self._apply_context_defaults(restore_existing=True)
+        self._refresh_role_states()
         if sku != "unknown_sku":
             self._load_active_state()
 
@@ -881,7 +959,11 @@ class NewSKUTrainingPage(QWidget):
         self.status_title.setText(text[:110])
 
     def _on_training_finished(self, role: str, result: Dict[str, Any]) -> None:
-        self.states[role]["result"] = dict(result or {})
+        result = dict(result or {})
+        result.setdefault("sku_name", self._current_sku_name())
+        result.setdefault("role", role)
+        result.setdefault("display_name", self.ROLE_INFO[role])
+        self.states[role]["result"] = result
         self.role_rows[role].set_state("done", "Completed")
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
@@ -893,7 +975,7 @@ class NewSKUTrainingPage(QWidget):
         self.status_title.setText(f"{self.ROLE_INFO[role]} training completed")
         self._show_result(result)
         self._set_controls_enabled(True)
-        self.trainingSaved.emit(role, dict(result or {}))
+        self.trainingSaved.emit(role, dict(result))
 
         if self.worker is not None:
             self.worker.deleteLater()

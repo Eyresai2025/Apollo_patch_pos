@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -293,17 +294,11 @@ class FeatureThresholdPage(QWidget):
         self.camera_serials = dict(camera_serials or sidewall_serials or {})
         self.template_assets_provider = template_assets_provider
         self.active_role = "sidewall1"
+        self._context_sku = ""
         self.worker: Optional[ThresholdWorker] = None
 
         self.states: Dict[str, Dict[str, Any]] = {
-            role: {
-                "image_path": "",
-                "model_path": "",
-                "template_path": "",
-                "percentile": float(DEFAULT_PERCENTILE),
-                "result": {},
-            }
-            for role in ALL_ROLES
+            role: self._empty_state() for role in ALL_ROLES
         }
 
         self.role_buttons: Dict[str, QPushButton] = {}
@@ -627,10 +622,70 @@ class FeatureThresholdPage(QWidget):
                 return candidate
         return self.media_path
 
-    def refresh_context(self) -> None:
+    @staticmethod
+    def _empty_state() -> Dict[str, Any]:
+        return {
+            "image_path": "",
+            "model_path": "",
+            "template_path": "",
+            "percentile": float(DEFAULT_PERCENTILE),
+            "result": {},
+        }
+
+    def _default_threshold_json(self, role: str) -> Path:
+        return (
+            self.media_path
+            / "feature_threshold"
+            / self._current_sku_name()
+            / role
+            / "threshold.json"
+        ).resolve()
+
+    def _restore_existing_result(self, role: str, state: Dict[str, Any]) -> None:
+        threshold_path = self._default_threshold_json(role)
+        if not threshold_path.is_file():
+            return
+        try:
+            result = json.loads(threshold_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        result = dict(result or {})
+        result["sku_name"] = self._context_sku
+        result["role"] = role
+        result["display_name"] = self.ROLE_INFO[role]
+        result["threshold_json_path"] = str(threshold_path.resolve())
+        state["result"] = result
+        if result.get("model_path") and Path(str(result["model_path"])).is_file():
+            state["model_path"] = str(Path(str(result["model_path"])).resolve())
+        restored_image = str(
+            result.get("good_raw_image")
+            or result.get("raw_image")
+            or result.get("raw_image_path")
+            or ""
+        )
+        if restored_image and Path(restored_image).is_file():
+            state["image_path"] = str(Path(restored_image).resolve())
+        if result.get("percentile") is not None:
+            state["percentile"] = float(result["percentile"])
+
+    def reset_for_sku(self, sku_name: Optional[str] = None) -> None:
+        if self.is_running:
+            return
+        sku = _safe_name(sku_name or self._current_sku_name())
+        self._context_sku = sku
+        self.states = {role: self._empty_state() for role in ALL_ROLES}
+        self.active_role = "sidewall1"
+        self._apply_context_defaults(restore_existing=True)
+        if self.role_buttons:
+            self.role_buttons[self.active_role].setChecked(True)
+        self._refresh_role_styles()
+        self._refresh_active_view()
+        self._reset_progress("Ready")
+
+    def _apply_context_defaults(self, restore_existing: bool = True) -> None:
         for role in self.ROLE_INFO:
             state = self.states[role]
-            if role in SIDEWALL_ROLES and not state.get("template_path"):
+            if role in SIDEWALL_ROLES:
                 default_template = self._default_template_path(role)
                 if default_template:
                     state["template_path"] = default_template
@@ -638,7 +693,15 @@ class FeatureThresholdPage(QWidget):
                 auto_model = self._discover_model(role)
                 if auto_model:
                     state["model_path"] = str(auto_model)
+            if restore_existing and not state.get("result"):
+                self._restore_existing_result(role, state)
 
+    def refresh_context(self) -> None:
+        current_sku = self._current_sku_name()
+        if current_sku != self._context_sku:
+            self.reset_for_sku(current_sku)
+            return
+        self._apply_context_defaults(restore_existing=True)
         self._refresh_active_view()
         self._refresh_role_styles()
 
@@ -715,6 +778,8 @@ class FeatureThresholdPage(QWidget):
         sku = self._current_sku_name()
         serial = str(self.camera_serials.get(role, "") or "").lower()
         roots = [
+            self.media_path / "training" / sku / role,
+            self.media_path / "training" / sku,
             self.media_path / "models" / sku,
             self.media_path / "models",
             self.project_root / "src" / "models",

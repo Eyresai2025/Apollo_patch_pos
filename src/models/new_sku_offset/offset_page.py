@@ -7,6 +7,7 @@ logic from the supplied tread setup pipeline; only the target input changes.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -203,29 +204,13 @@ class OffsetCalculationPage(QWidget):
         self.template_assets_provider = template_assets_provider
 
         self.active_role = "innerwall"
+        self._context_sku = ""
         self.running_role: Optional[str] = None
         self.worker: Optional[OffsetCalculationWorker] = None
         self._loading = False
 
         self.states: Dict[str, Dict[str, Any]] = {
-            role: {
-                "anchor_role": "sidewall1",
-                "sidewall_input": "",
-                "target_input": "",
-                "sidewall_template": "",
-                "target_template": "",
-                "output_json": "",
-                "resize_width": 4032,
-                "resize_height": 23296,
-                "patch_width": 448,
-                "patch_height": 448,
-                "patch_stride_x": 448,
-                "patch_stride_y": 448,
-                "cover_complete": True,
-                "percentile": 99.0,
-                "result": {},
-            }
-            for role in self.ROLE_INFO
+            role: self._empty_state(role) for role in self.ROLE_INFO
         }
 
         self.role_rows: Dict[str, OffsetRoleRow] = {}
@@ -800,7 +785,55 @@ class OffsetCalculationPage(QWidget):
             / f"{sku}_{role}_calibration.json"
         ).resolve()
 
-    def refresh_context(self) -> None:
+    def _empty_state(self, role: str) -> Dict[str, Any]:
+        return {
+            "anchor_role": "sidewall1",
+            "sidewall_input": "",
+            "target_input": "",
+            "sidewall_template": "",
+            "target_template": "",
+            "output_json": "",
+            "resize_width": 4032,
+            "resize_height": 23296,
+            "patch_width": 448,
+            "patch_height": 448,
+            "patch_stride_x": 448,
+            "patch_stride_y": 448,
+            "cover_complete": True,
+            "percentile": 99.0,
+            "result": {},
+        }
+
+    def _restore_existing_result(self, role: str, state: Dict[str, Any]) -> None:
+        output_path = Path(str(state.get("output_json") or ""))
+        if not output_path.is_file():
+            return
+        try:
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        result = dict(payload or {})
+        result.update({
+            "sku_name": self._context_sku,
+            "role": role,
+            "display_name": self.ROLE_INFO[role],
+            "calibration_json_path": str(output_path.resolve()),
+        })
+        state["result"] = result
+
+    def _refresh_role_states(self) -> None:
+        for role, row in self.role_rows.items():
+            completed = bool(
+                (self.states[role].get("result") or {}).get(
+                    "calibration_json_path"
+                )
+            )
+            row.set_state("done", "Completed") if completed else row.set_state(
+                "waiting", "Not calculated"
+            )
+            row.set_active(role == self.active_role)
+
+    def _apply_context_defaults(self, restore_existing: bool = True) -> None:
         for role, state in self.states.items():
             anchor = str(state.get("anchor_role") or "sidewall1")
             if not state.get("sidewall_input"):
@@ -815,17 +848,44 @@ class OffsetCalculationPage(QWidget):
             ):
                 state["sidewall_template"] = sidewall_template
 
-            # A newly saved Inner/Tread/Bead marker must immediately replace an
-            # empty, stale or manually selected old marker path.
             provided_target = self._provided_template_path(role)
             if provided_target:
                 state["target_template"] = provided_target
-            elif not state.get("target_template") or not Path(str(state.get("target_template"))).is_file():
+            elif (
+                not state.get("target_template")
+                or not Path(str(state.get("target_template"))).is_file()
+            ):
                 state["target_template"] = self._default_target_template(role)
 
-            output = str(state.get("output_json") or "")
-            if not output or "unknown_sku" in output:
+            if not state.get("output_json"):
                 state["output_json"] = str(self._default_output_json(role))
+            if restore_existing and not state.get("result"):
+                self._restore_existing_result(role, state)
+
+    def reset_for_sku(self, sku_name: Optional[str] = None) -> None:
+        if self.is_running:
+            return
+        sku = _safe_name(sku_name or self._current_sku_name())
+        self._context_sku = sku
+        self.states = {
+            role: self._empty_state(role) for role in self.ROLE_INFO
+        }
+        self.active_role = "innerwall"
+        self._apply_context_defaults(restore_existing=True)
+        self._refresh_role_states()
+        self._load_active_state()
+        self.status_title.setText("Ready")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.log_box.clear()
+
+    def refresh_context(self) -> None:
+        current_sku = self._current_sku_name()
+        if current_sku != self._context_sku:
+            self.reset_for_sku(current_sku)
+            return
+        self._apply_context_defaults(restore_existing=True)
+        self._refresh_role_states()
         self._load_active_state()
 
     def set_active_role(self, role: str) -> None:

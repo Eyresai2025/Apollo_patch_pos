@@ -395,6 +395,7 @@ class NewSKUPage(QWidget):
         self.latest_training_assets: Dict[str, Dict[str, Any]] = {}
         self.latest_template_assets: Dict[str, Dict[str, Any]] = {}
         self.latest_threshold_assets: Dict[str, Dict[str, Any]] = {}
+        self._workflow_sku = ""
 
 
         self.tab_buttons: List[QPushButton] = []
@@ -643,12 +644,8 @@ class NewSKUPage(QWidget):
         self.sku_meta = dict(sku_meta or {})
         self.sku_meta.pop("machine_serial", None)
         self._apply_sku_meta_to_form()
-        if self.template_extractor_page is not None:
-            self.template_extractor_page.refresh_context()
-        if self.offset_page is not None:
-            self.offset_page.refresh_context()
-        if self.training_page is not None:
-            self.training_page.refresh_context()
+        self._sync_workflow_sku()
+        self.recipe_doc["sku_meta"] = dict(self.sku_meta)
 
     def _apply_sku_meta_to_form(self):
         if not self.wizard_widgets:
@@ -683,12 +680,90 @@ class NewSKUPage(QWidget):
             if value:
                 return str(value).strip()
 
-        base_dir = os.path.join(self.media_path, "new_sku_images")
-        if os.path.isdir(base_dir):
-            folders = [name for name in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, name))]
-            if len(folders) == 1:
-                return folders[0]
+        # During New SKU creation, use only the name entered by the operator.
+        # Never infer the active SKU from an existing media folder, because a
+        # single old folder such as SKU_001 could otherwise be loaded into a
+        # fresh SKU_002 workflow before SKU Setup is saved.
+        sku_widget = self.wizard_widgets.get("sku_name") if self.wizard_widgets else None
+        if sku_widget is not None:
+            value = str(sku_widget.text() or "").strip()
+            if value:
+                return value
+
         return "unknown_sku"
+
+    def _payload_matches_current_sku(self, payload: Dict[str, Any]) -> bool:
+        payload_sku = str((payload or {}).get("sku_name", "") or "").strip()
+        if not payload_sku:
+            return True
+        return _safe_name(payload_sku) == _safe_name(self._workflow_sku)
+
+    def _filter_assets_for_current_sku(
+        self, assets: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        return {
+            str(role): dict(payload or {})
+            for role, payload in (assets or {}).items()
+            if self._payload_matches_current_sku(dict(payload or {}))
+        }
+
+    def _sync_workflow_sku(self, force: bool = False) -> None:
+        """Switch every New-SKU subpage to one isolated SKU context.
+
+        A new SKU must never inherit templates, calibration outputs, models,
+        thresholds, axis targets or UI completion states from the previous SKU.
+        Existing files are restored only from the new SKU's own folders.
+        """
+        sku = _safe_name(self._get_sku_name())
+        changed = force or sku != self._workflow_sku
+
+        if changed:
+            self._workflow_sku = sku
+            self.latest_template_assets.clear()
+            self.latest_offset_assets.clear()
+            self.latest_training_assets.clear()
+            self.latest_threshold_assets.clear()
+            self.latest_preview_paths.clear()
+
+            current_meta = dict(self.sku_meta or {})
+            current_meta.pop("machine_serial", None)
+            self.recipe_doc = {"sku_meta": current_meta} if current_meta else {}
+            self.saved_recipe_doc = None
+            self.saved_recipe_result = None
+            if self.load_machine_btn is not None:
+                self.load_machine_btn.setEnabled(False)
+
+            for page in (
+                self.template_extractor_page,
+                self.offset_page,
+                self.training_page,
+                self.feature_threshold_page,
+            ):
+                if page is None:
+                    continue
+                reset = getattr(page, "reset_for_sku", None)
+                if callable(reset):
+                    reset(sku)
+                else:
+                    refresh = getattr(page, "refresh_context", None)
+                    if callable(refresh):
+                        refresh()
+
+            if self.axis_table is not None:
+                self.axis_table.clearContents()
+                self.axis_table.setRowCount(0)
+            self._update_preview_from_latest()
+            return
+
+        for page in (
+            self.template_extractor_page,
+            self.offset_page,
+            self.training_page,
+            self.feature_threshold_page,
+        ):
+            refresh = getattr(page, "refresh_context", None)
+            if callable(refresh):
+                refresh()
 
     def _preview_serial_order(self):
         if any(serial in self.latest_preview_paths for serial in self.camera_serial_order):
@@ -760,6 +835,7 @@ class NewSKUPage(QWidget):
     def _switch_tab(self, idx: int):
         if self.stack is None:
             return
+        self._sync_workflow_sku()
         self.stack.setCurrentIndex(idx)
         for i, btn in enumerate(self.tab_buttons):
             btn.setStyleSheet(self._tab_button_style(i == idx))
@@ -824,7 +900,7 @@ class NewSKUPage(QWidget):
         self.template_extractor_page = TemplateExtractorPage(
             media_path=self.media_path,
             sku_name_provider=self._get_sku_name,
-            camera_serials=CAMERA_SERIAL_MAP,
+            sidewall_serials=SIDEWALL_SERIAL_MAP,
             parent=self,
         )
         self.template_extractor_page.templateSaved.connect(self._on_template_saved)
@@ -888,9 +964,12 @@ class NewSKUPage(QWidget):
         self.stack.addWidget(self.recipe_page)
 
         root.addWidget(self.stack, 1)
+        self._sync_workflow_sku(force=True)
         self._switch_tab(TAB_SKU_SETUP)
 
     def _on_offset_saved(self, role: str, payload: dict):
+        if not self._payload_matches_current_sku(payload):
+            return
         self.latest_offset_assets[str(role)] = dict(payload or {})
         self.recipe_doc["offset_assets"] = dict(self.latest_offset_assets)
 
@@ -907,14 +986,20 @@ class NewSKUPage(QWidget):
             )
 
     def _collect_offset_assets(self) -> Dict[str, Dict[str, Any]]:
-        assets = dict(self.latest_offset_assets)
+        assets = self._filter_assets_for_current_sku(self.latest_offset_assets)
         if self.offset_page is not None:
-            assets.update(self.offset_page.get_offset_assets())
+            assets.update(
+                self._filter_assets_for_current_sku(
+                    self.offset_page.get_offset_assets()
+                )
+            )
         self.latest_offset_assets = assets
         self.recipe_doc["offset_assets"] = dict(assets)
         return assets
 
     def _on_training_saved(self, role: str, payload: dict):
+        if not self._payload_matches_current_sku(payload):
+            return
         self.latest_training_assets[str(role)] = dict(payload or {})
         self.recipe_doc["training_assets"] = dict(self.latest_training_assets)
 
@@ -924,14 +1009,20 @@ class NewSKUPage(QWidget):
             self.status_lbl.setText(f"{display_name} model trained: {model_path}")
 
     def _collect_training_assets(self) -> Dict[str, Dict[str, Any]]:
-        assets = dict(self.latest_training_assets)
+        assets = self._filter_assets_for_current_sku(self.latest_training_assets)
         if self.training_page is not None:
-            assets.update(self.training_page.get_training_assets())
+            assets.update(
+                self._filter_assets_for_current_sku(
+                    self.training_page.get_training_assets()
+                )
+            )
         self.latest_training_assets = assets
         self.recipe_doc["training_assets"] = dict(assets)
         return assets
 
     def _on_template_saved(self, role: str, payload: dict):
+        if not self._payload_matches_current_sku(payload):
+            return
         self.latest_template_assets[str(role)] = dict(payload or {})
         self.recipe_doc["template_assets"] = dict(self.latest_template_assets)
         if self.offset_page is not None:
@@ -945,14 +1036,20 @@ class NewSKUPage(QWidget):
             self.status_lbl.setText(f"{display_name} template saved: {output_path}")
 
     def _collect_template_assets(self) -> Dict[str, Dict[str, Any]]:
-        assets = dict(self.latest_template_assets)
+        assets = self._filter_assets_for_current_sku(self.latest_template_assets)
         if self.template_extractor_page is not None:
-            assets.update(self.template_extractor_page.get_template_assets())
+            assets.update(
+                self._filter_assets_for_current_sku(
+                    self.template_extractor_page.get_template_assets()
+                )
+            )
         self.latest_template_assets = assets
         self.recipe_doc["template_assets"] = dict(assets)
         return assets
 
     def _on_threshold_saved(self, role: str, payload: dict):
+        if not self._payload_matches_current_sku(payload):
+            return
         self.latest_threshold_assets[str(role)] = dict(payload or {})
         self.recipe_doc["threshold_assets"] = dict(self.latest_threshold_assets)
 
@@ -964,9 +1061,13 @@ class NewSKUPage(QWidget):
             )
 
     def _collect_threshold_assets(self) -> Dict[str, Dict[str, Any]]:
-        assets = dict(self.latest_threshold_assets)
+        assets = self._filter_assets_for_current_sku(self.latest_threshold_assets)
         if self.feature_threshold_page is not None:
-            assets.update(self.feature_threshold_page.get_threshold_assets())
+            assets.update(
+                self._filter_assets_for_current_sku(
+                    self.feature_threshold_page.get_threshold_assets()
+                )
+            )
         self.latest_threshold_assets = assets
         self.recipe_doc["threshold_assets"] = dict(assets)
         return assets
@@ -1173,6 +1274,7 @@ class NewSKUPage(QWidget):
             "train_good_count": train_good_count,
         })
         self.sku_meta.pop("machine_serial", None)
+        self._sync_workflow_sku()
         self.recipe_doc["sku_meta"] = dict(self.sku_meta)
 
         try:
@@ -2183,9 +2285,6 @@ class NewSKUPage(QWidget):
             template_assets = recipe_doc.get("template_assets", {}) or {}
             sidewall1_template = (template_assets.get("sidewall1", {}) or {}).get("template_image", "Not saved")
             sidewall2_template = (template_assets.get("sidewall2", {}) or {}).get("template_image", "Not saved")
-            inner_marker_template = (template_assets.get("innerwall", {}) or {}).get("template_image", "Not saved")
-            tread_marker_template = (template_assets.get("tread", {}) or {}).get("template_image", "Not saved")
-            bead_marker_template = (template_assets.get("bead", {}) or {}).get("template_image", "Not saved")
             offset_assets = recipe_doc.get("offset_assets", {}) or {}
             offset_role_names = {
                 "innerwall": "Inner Side",

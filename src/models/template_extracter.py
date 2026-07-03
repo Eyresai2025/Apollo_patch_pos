@@ -290,16 +290,10 @@ class TemplateExtractorPage(QWidget):
         self.camera_serials = dict(camera_serials or sidewall_serials or {})
         self.sidewall_serials = self.camera_serials
         self.active_role = "sidewall1"
+        self._context_sku = ""
 
         self.states: Dict[str, Dict[str, Any]] = {
-            role: {
-                "image_path": "",
-                "roi": None,
-                "saved_roi": None,
-                "saved_image_path": "",
-                "saved_at": "",
-            }
-            for role in self.ROLE_INFO
+            role: self._empty_state() for role in self.ROLE_INFO
         }
 
         self.role_buttons: Dict[str, QPushButton] = {}
@@ -539,20 +533,79 @@ class TemplateExtractorPage(QWidget):
                 pass
         return "unknown_sku"
 
+    @staticmethod
+    def _empty_state() -> Dict[str, Any]:
+        return {
+            "image_path": "",
+            "roi": None,
+            "saved_roi": None,
+            "saved_image_path": "",
+            "saved_at": "",
+        }
+
+    def _expected_output_path(self, sku: str, role: str) -> Path:
+        suffix = "template" if self._is_sidewall(role) else "marker_template"
+        return (
+            self.media_path
+            / "template_extractor"
+            / sku
+            / role
+            / f"{sku}_{role}_{suffix}.png"
+        )
+
     def _output_path(self, role: str) -> Path:
         sku = self._current_sku_name()
-        role_dir = self.media_path / "template_extractor" / sku / role
-        role_dir.mkdir(parents=True, exist_ok=True)
-        suffix = "template" if self._is_sidewall(role) else "marker_template"
-        return role_dir / f"{sku}_{role}_{suffix}.png"
+        path = self._expected_output_path(sku, role)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def reset_for_sku(self, sku_name: Optional[str] = None) -> None:
+        """Clear all in-memory ROI state before loading another SKU.
+
+        Existing template PNG files are restored only from the selected SKU's
+        own folder. No state from the previous SKU is retained.
+        """
+        sku = _safe_name(sku_name or self._current_sku_name())
+        self._context_sku = sku
+        self.states = {role: self._empty_state() for role in self.ROLE_INFO}
+        self.active_role = "sidewall1"
+
+        if sku != "unknown_sku":
+            for role, state in self.states.items():
+                expected = self._expected_output_path(sku, role)
+                if expected.is_file():
+                    state["saved_image_path"] = str(expected.resolve())
+                    try:
+                        state["saved_at"] = datetime.fromtimestamp(
+                            expected.stat().st_mtime
+                        ).isoformat(timespec="seconds")
+                    except OSError:
+                        state["saved_at"] = ""
+
+        if self.role_buttons:
+            self.role_buttons[self.active_role].setChecked(True)
+        self.canvas.clear_image()
+        self._refresh_role_button_styles()
+        self._refresh_active_view()
+        self._refresh_role_statuses()
+        if self.status_lbl is not None:
+            self.status_lbl.setText(
+                f"Ready for {sku}. Select an inspection view and choose an image."
+            )
 
     def refresh_context(self) -> None:
-        # Restore existing SKU-wise templates when the page is reopened.
-        if self._current_sku_name() != "unknown_sku":
+        current_sku = self._current_sku_name()
+        if current_sku != self._context_sku:
+            self.reset_for_sku(current_sku)
+            return
+
+        # Restore files created outside this page, but only for this SKU.
+        if current_sku != "unknown_sku":
             for role, state in self.states.items():
-                expected = self._output_path(role)
+                expected = self._expected_output_path(current_sku, role)
                 if expected.is_file() and not state.get("saved_image_path"):
                     state["saved_image_path"] = str(expected.resolve())
+        self._refresh_role_button_styles()
         self._refresh_active_view()
         self._refresh_role_statuses()
 
@@ -831,6 +884,7 @@ class TemplateExtractorPage(QWidget):
                 continue
             roi = state.get("saved_roi") or state.get("roi")
             assets[role] = {
+                "sku_name": self._context_sku or self._current_sku_name(),
                 "role": role,
                 "display_name": self.ROLE_INFO[role],
                 "template_type": "r_template" if self._is_sidewall(role) else "marker_template",
