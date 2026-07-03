@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (  # type: ignore
 
 from .config import ALL_ROLES, DEFAULT_PERCENTILE, IMAGE_EXTENSIONS, SIDEWALL_ROLES
 from .threshold_service import calculate_threshold_for_image
+from src.COMMON.new_sku_capture_paths import resolve_role_folder
 
 
 def _safe_name(value: str) -> str:
@@ -607,20 +608,13 @@ class FeatureThresholdPage(QWidget):
     def _capture_folder(self, role: str) -> Path:
         sku = self._current_sku_name()
         serial = str(self.camera_serials.get(role, "") or "").strip()
-        candidates = []
-        if serial:
-            candidates.append(self.media_path / "new_sku_images" / sku / serial)
-        candidates.extend(
-            [
-                self.media_path / "new_sku_images" / sku,
-                self.media_path / "new_sku_images",
-                self.media_path,
-            ]
+        return resolve_role_folder(
+            self.media_path,
+            sku,
+            role,
+            serial=serial,
+            require_images=True,
         )
-        for candidate in candidates:
-            if candidate.is_dir():
-                return candidate
-        return self.media_path
 
     @staticmethod
     def _empty_state() -> Dict[str, Any]:
@@ -886,8 +880,6 @@ class FeatureThresholdPage(QWidget):
                 token in lower
                 for token in ("template_extractor", "feature_threshold", "processing", "patches")
             ):
-                continue
-            if serial and serial not in path.name and serial not in str(path.parent):
                 continue
             filtered.append(path.resolve())
 

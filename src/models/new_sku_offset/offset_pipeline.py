@@ -60,7 +60,9 @@ def _process_sidewall_image(
     image_path: str,
     r_template: np.ndarray,
     diagnostic_dir: Optional[Path],
+    cropped_dir: Path,
 ) -> dict:
+    """Detect R1/R2 and save the unchanged one-revolution sidewall crop."""
     image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise RuntimeError(f"Cannot read sidewall image: {image_path}")
@@ -68,17 +70,48 @@ def _process_sidewall_image(
     boxes = tu.detect_r_boxes_sidewall(r_template, image)
     anchor = tu.get_r1_r2_anchor(boxes)
 
+    crop_start_y = max(0, int(anchor["R1_top_y"]))
+    crop_end_y = min(int(image.shape[0]), int(anchor["R2_top_y"]))
+    if crop_end_y <= crop_start_y:
+        raise RuntimeError(
+            "Invalid sidewall crop range after R detection: "
+            f"{crop_start_y}:{crop_end_y}"
+        )
+
+    sidewall_crop = image[crop_start_y:crop_end_y, :].copy()
+    cropped_dir.mkdir(parents=True, exist_ok=True)
+    crop_path = (
+        cropped_dir
+        / f"{Path(image_path).stem}_R1_to_R2_crop.png"
+    )
+    if not cv2.imwrite(
+        str(crop_path),
+        sidewall_crop,
+        [cv2.IMWRITE_PNG_COMPRESSION, 0],
+    ):
+        raise OSError(f"Unable to save sidewall cropped image: {crop_path}")
+
     if diagnostic_dir is not None:
         diagnostic_dir.mkdir(parents=True, exist_ok=True)
         preview = _draw_boxes(image, boxes, ["R1", "R2"])
         output = diagnostic_dir / f"sidewall_{Path(image_path).stem}_R_detection.png"
-        cv2.imwrite(str(output), preview, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+        if not cv2.imwrite(
+            str(output),
+            preview,
+            [cv2.IMWRITE_PNG_COMPRESSION, 0],
+        ):
+            raise OSError(f"Unable to save sidewall diagnostic image: {output}")
 
     return {
         "image": str(Path(image_path).resolve()),
         "r1_top_y": int(anchor["R1_top_y"]),
         "r2_top_y": int(anchor["R2_top_y"]),
         "one_rev_sidewall": int(anchor["one_rev_height"]),
+        "crop_start_y": int(crop_start_y),
+        "crop_end_y_exclusive": int(crop_end_y),
+        "cropped_image": str(crop_path.resolve()),
+        "cropped_width": int(sidewall_crop.shape[1]),
+        "cropped_height": int(sidewall_crop.shape[0]),
     }
 
 
@@ -86,8 +119,10 @@ def _process_target_image(
     image_path: str,
     marker_template: np.ndarray,
     diagnostic_dir: Optional[Path],
+    cropped_dir: Path,
     target_display_name: str,
 ) -> dict:
+    """Detect marker 1/2 and save the unchanged one-revolution target crop."""
     image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise RuntimeError(f"Cannot read {target_display_name} image: {image_path}")
@@ -95,17 +130,50 @@ def _process_target_image(
     boxes = tu.detect_tape_bands_tread(marker_template, image)
     anchor = tu.get_tape1_tape2_anchor(boxes)
 
+    crop_start_y = max(0, int(anchor["tape1_center_y"]))
+    crop_end_y = min(int(image.shape[0]), int(anchor["tape2_center_y"]))
+    if crop_end_y <= crop_start_y:
+        raise RuntimeError(
+            f"Invalid {target_display_name} crop range after marker detection: "
+            f"{crop_start_y}:{crop_end_y}"
+        )
+
+    target_crop = image[crop_start_y:crop_end_y, :].copy()
+    cropped_dir.mkdir(parents=True, exist_ok=True)
+    crop_path = (
+        cropped_dir
+        / f"{Path(image_path).stem}_marker1_to_marker2_crop.png"
+    )
+    if not cv2.imwrite(
+        str(crop_path),
+        target_crop,
+        [cv2.IMWRITE_PNG_COMPRESSION, 0],
+    ):
+        raise OSError(
+            f"Unable to save {target_display_name} cropped image: {crop_path}"
+        )
+
     if diagnostic_dir is not None:
         diagnostic_dir.mkdir(parents=True, exist_ok=True)
         preview = _draw_boxes(image, boxes, ["MARKER1", "MARKER2"])
         output = diagnostic_dir / f"target_{Path(image_path).stem}_marker_detection.png"
-        cv2.imwrite(str(output), preview, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+        if not cv2.imwrite(
+            str(output),
+            preview,
+            [cv2.IMWRITE_PNG_COMPRESSION, 0],
+        ):
+            raise OSError(f"Unable to save target diagnostic image: {output}")
 
     return {
         "image": str(Path(image_path).resolve()),
         "marker1_center_y": int(anchor["tape1_center_y"]),
         "marker2_center_y": int(anchor["tape2_center_y"]),
         "one_rev_target": int(anchor["one_rev_tread_px"]),
+        "crop_start_y": int(crop_start_y),
+        "crop_end_y_exclusive": int(crop_end_y),
+        "cropped_image": str(crop_path.resolve()),
+        "cropped_width": int(target_crop.shape[1]),
+        "cropped_height": int(target_crop.shape[0]),
     }
 
 
@@ -215,6 +283,14 @@ def calculate_offset_calibration(
             output_json_path.parent / "diagnostics" if save_diagnostics else None
         )
 
+        # Cropped calibration images are production outputs, not diagnostics.
+        # They are therefore always retained even when diagnostic previews are disabled.
+        cropped_images_root = output_json_path.parent / "cropped_images"
+        sidewall_cropped_dir = cropped_images_root / "sidewall"
+        target_cropped_dir = cropped_images_root / str(role)
+        sidewall_cropped_dir.mkdir(parents=True, exist_ok=True)
+        target_cropped_dir.mkdir(parents=True, exist_ok=True)
+
         sidewall_success: list[dict] = []
         sidewall_failed: list[dict] = []
         total_steps = len(sidewall_files) + len(target_files)
@@ -227,7 +303,12 @@ def calculate_offset_calibration(
             )
             try:
                 sidewall_success.append(
-                    _process_sidewall_image(image_path, r_template, diagnostic_dir)
+                    _process_sidewall_image(
+                        image_path,
+                        r_template,
+                        diagnostic_dir,
+                        sidewall_cropped_dir,
+                    )
                 )
             except Exception as exc:
                 sidewall_failed.append(
@@ -263,6 +344,7 @@ def calculate_offset_calibration(
                         image_path,
                         target_template,
                         diagnostic_dir,
+                        target_cropped_dir,
                         display_name,
                     )
                 )
@@ -353,6 +435,11 @@ def calculate_offset_calibration(
             "diagnostic_folder": str(diagnostic_dir.resolve())
             if diagnostic_dir is not None
             else "",
+            "cropped_images_folder": str(cropped_images_root.resolve()),
+            "sidewall_cropped_folder": str(sidewall_cropped_dir.resolve()),
+            "target_cropped_folder": str(target_cropped_dir.resolve()),
+            "sidewall_cropped_image_count": len(sidewall_success),
+            "target_cropped_image_count": len(target_success),
         }
 
         _emit_status(status_callback, "Saving calibration JSON...")
@@ -374,6 +461,11 @@ def calculate_offset_calibration(
             "failed_sidewall_image_count": len(sidewall_failed),
             "failed_target_image_count": len(target_failed),
             "diagnostic_folder": payload["diagnostic_folder"],
+            "cropped_images_folder": payload["cropped_images_folder"],
+            "sidewall_cropped_folder": payload["sidewall_cropped_folder"],
+            "target_cropped_folder": payload["target_cropped_folder"],
+            "sidewall_cropped_image_count": payload["sidewall_cropped_image_count"],
+            "target_cropped_image_count": payload["target_cropped_image_count"],
             "resize_width": processing_settings["resize_width"],
             "resize_height": processing_settings["resize_height"],
             "patch_width": processing_settings["patch_width"],

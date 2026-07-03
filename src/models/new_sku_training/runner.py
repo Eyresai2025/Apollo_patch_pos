@@ -33,6 +33,17 @@ def _load_json(path: Path) -> Dict[str, Any]:
     return payload
 
 
+def _collect_crop_paths(root: Path, filename: str) -> list[str]:
+    """Collect retained full cropped images, excluding generated patches."""
+    if not root.is_dir():
+        return []
+    return [
+        str(path.resolve())
+        for path in sorted(root.rglob(filename))
+        if path.is_file()
+    ]
+
+
 def _apply_common(module, config: Dict[str, Any]) -> None:
     module.CORESET_PERCENTAGE = float(config.get("coreset_percentage", 0.10))
     module.IMG_BATCH_SIZE = int(config.get("batch_size", 32))
@@ -41,6 +52,17 @@ def _apply_common(module, config: Dict[str, Any]) -> None:
         config.get("keep_generated_patches", False)
     )
     module.CLEAR_PREPROCESS_OUTPUT_AT_START = True
+
+    # Cropped images are required production outputs and are always retained.
+    # The UI option controls only whether the generated 448x448 patch folders remain.
+    if hasattr(module, "SAVE_RAW_R_CROP"):
+        module.SAVE_RAW_R_CROP = True
+    if hasattr(module, "SAVE_RESIZED_R_CROP"):
+        module.SAVE_RESIZED_R_CROP = True
+    if hasattr(module, "SAVE_ORIGINAL_TREAD_CROP"):
+        module.SAVE_ORIGINAL_TREAD_CROP = True
+    if hasattr(module, "SAVE_RESIZED_TREAD_CROP"):
+        module.SAVE_RESIZED_TREAD_CROP = True
 
 
 def _run_sidewall(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -60,6 +82,14 @@ def _run_sidewall(config: Dict[str, Any]) -> Dict[str, Any]:
     summary = _load_json(summary_path) if summary_path.is_file() else {}
     training = dict(summary.get("training") or {})
     preprocessing = dict(summary.get("preprocessing") or {})
+    retained_crop_paths = _collect_crop_paths(
+        pipeline.PREPROCESS_OUTPUT_ROOT,
+        "01_RAW_R_CROP.png",
+    )
+    retained_resized_crop_paths = _collect_crop_paths(
+        pipeline.PREPROCESS_OUTPUT_ROOT,
+        "02_RESIZED_R_CROP_4036x17920.png",
+    )
 
     return {
         "pipeline": "sidewall",
@@ -70,6 +100,13 @@ def _run_sidewall(config: Dict[str, Any]) -> Dict[str, Any]:
         "timing_csv": str(pipeline.TIMING_CSV),
         "preprocess_report_json": str(pipeline.PREPROCESS_REPORT_JSON),
         "prepared_output_root": str(pipeline.PREPROCESS_OUTPUT_ROOT),
+        "crop_output_root": str(pipeline.PREPROCESS_OUTPUT_ROOT),
+        "retained_crop_paths": retained_crop_paths,
+        "retained_crop_count": len(retained_crop_paths),
+        "retained_resized_crop_paths": retained_resized_crop_paths,
+        "generated_patches_kept": bool(
+            pipeline.KEEP_GENERATED_PATCHES_AFTER_TRAINING
+        ),
         "generated_training_patch_count": int(
             preprocessing.get("generated_training_patch_count", 0) or 0
         ),
@@ -108,6 +145,14 @@ def _run_multiview(config: Dict[str, Any]) -> Dict[str, Any]:
     summary = _load_json(summary_path) if summary_path.is_file() else {}
     training = dict(summary.get("training") or {})
     preprocessing = dict(summary.get("preprocessing") or {})
+    retained_crop_paths = _collect_crop_paths(
+        pipeline.PREPROCESS_OUTPUT_ROOT,
+        "01_TREAD_CROP_ORIGINAL.png",
+    )
+    retained_resized_crop_paths = _collect_crop_paths(
+        pipeline.PREPROCESS_OUTPUT_ROOT,
+        "02_TREAD_CROP_2000x10000.png",
+    )
 
     return {
         "pipeline": "multiview",
@@ -119,6 +164,13 @@ def _run_multiview(config: Dict[str, Any]) -> Dict[str, Any]:
         "timing_csv": str(pipeline.TIMING_CSV),
         "preprocess_report_json": str(pipeline.PREPROCESS_REPORT_JSON),
         "prepared_output_root": str(pipeline.PREPROCESS_OUTPUT_ROOT),
+        "crop_output_root": str(pipeline.PREPROCESS_OUTPUT_ROOT),
+        "retained_crop_paths": retained_crop_paths,
+        "retained_crop_count": len(retained_crop_paths),
+        "retained_resized_crop_paths": retained_resized_crop_paths,
+        "generated_patches_kept": bool(
+            pipeline.KEEP_GENERATED_PATCHES_AFTER_TRAINING
+        ),
         "generated_training_patch_count": int(
             preprocessing.get("generated_training_patch_count", 0) or 0
         ),

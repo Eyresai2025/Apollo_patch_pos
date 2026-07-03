@@ -41,6 +41,10 @@ from PyQt5.QtWidgets import (  # type: ignore
 )
 
 from .training_service import LocalTrainingWorker
+from src.COMMON.new_sku_capture_paths import (
+    resolve_paired_role_folders,
+    resolve_role_folder,
+)
 
 
 def _safe_name(value: str) -> str:
@@ -383,7 +387,11 @@ class NewSKUTrainingPage(QWidget):
         self.worker_spin.setPrefix("Workers ")
         self.worker_spin.valueChanged.connect(self._store_widget_values)
 
-        self.keep_patches_check = QCheckBox("Keep prepared crops and patches")
+        self.keep_patches_check = QCheckBox("Keep generated 448 × 448 patch images")
+        self.keep_patches_check.setToolTip(
+            "Full cropped images are always saved. Enable this only when the "
+            "generated patch images must also be retained after training."
+        )
         self.keep_patches_check.stateChanged.connect(self._store_widget_values)
 
         settings_row = QHBoxLayout()
@@ -496,27 +504,30 @@ class NewSKUTrainingPage(QWidget):
     def _capture_folder(self, role: str) -> Path:
         sku = self._current_sku_name()
         serial = str(self.camera_serials.get(role, "") or "").strip()
-        roots = []
-        if serial:
-            serial_root = self.media_path / "new_sku_images" / sku / serial
-            roots.extend(
-                [
-                    serial_root / "train" / "good",
-                    serial_root / "good",
-                    serial_root,
-                ]
-            )
-        roots.extend(
-            [
-                self.media_path / "new_sku_images" / sku / role / "train" / "good",
-                self.media_path / "new_sku_images" / sku / role,
-                self.media_path / "new_sku_images" / sku,
-            ]
+        return resolve_role_folder(
+            self.media_path,
+            sku,
+            role,
+            serial=serial,
+            prefer_good=True,
+            require_images=True,
         )
-        for path in roots:
-            if path.is_dir():
-                return path.resolve()
-        return roots[0].resolve() if roots else self.media_path
+
+    def _paired_capture_folders(self, anchor_role: str, target_role: str) -> tuple[Path, Path]:
+        sku = self._current_sku_name()
+        anchor_serial = str(self.camera_serials.get(anchor_role, "") or "").strip()
+        target_serial = str(self.camera_serials.get(target_role, "") or "").strip()
+        sidewall, target, _cycle = resolve_paired_role_folders(
+            self.media_path,
+            sku,
+            anchor_role,
+            target_role,
+            anchor_serial=anchor_serial,
+            target_serial=target_serial,
+            prefer_good=True,
+            require_images=True,
+        )
+        return sidewall, target
 
     def _default_template(self, role: str) -> str:
         if role not in self.SIDEWALL_ROLES:
@@ -589,9 +600,12 @@ class NewSKUTrainingPage(QWidget):
         return {
             "pipeline": "sidewall" if role in self.SIDEWALL_ROLES else "multiview",
             "raw_train_folder": "",
+            "raw_train_folder_manual": False,
             "anchor_role": "sidewall1",
             "sidewall_input": "",
+            "sidewall_input_manual": False,
             "target_input": "",
+            "target_input_manual": False,
             "r_template_path": "",
             "calibration_json_path": "",
             "out_path": "",
@@ -620,6 +634,21 @@ class NewSKUTrainingPage(QWidget):
                 summary = {}
         training = dict(summary.get("training") or {})
         preprocessing = dict(summary.get("preprocessing") or {})
+        prepared_root = model_path.parent / "prepared_training"
+        crop_filename = (
+            "01_RAW_R_CROP.png"
+            if role in self.SIDEWALL_ROLES
+            else "01_TREAD_CROP_ORIGINAL.png"
+        )
+        retained_crop_paths = (
+            [
+                str(path.resolve())
+                for path in sorted(prepared_root.rglob(crop_filename))
+                if path.is_file()
+            ]
+            if prepared_root.is_dir()
+            else []
+        )
         state["result"] = {
             "sku_name": self._context_sku,
             "pipeline": state.get("pipeline"),
@@ -629,6 +658,10 @@ class NewSKUTrainingPage(QWidget):
             "summary_path": str(summary_path.resolve()) if summary_path.is_file() else "",
             "timing_csv": str((model_path.parent / "training_timings.csv").resolve()),
             "preprocess_report_json": str((model_path.parent / "preprocess_report.json").resolve()),
+            "prepared_output_root": str(prepared_root.resolve()),
+            "crop_output_root": str(prepared_root.resolve()),
+            "retained_crop_paths": retained_crop_paths,
+            "retained_crop_count": len(retained_crop_paths),
             "generated_training_patch_count": int(
                 preprocessing.get("generated_training_patch_count", 0) or 0
             ),
@@ -657,17 +690,18 @@ class NewSKUTrainingPage(QWidget):
     def _apply_context_defaults(self, restore_existing: bool = True) -> None:
         for role, state in self.states.items():
             if role in self.SIDEWALL_ROLES:
-                if not state.get("raw_train_folder"):
+                if not bool(state.get("raw_train_folder_manual")):
                     state["raw_train_folder"] = str(self._capture_folder(role))
                 template = self._default_template(role)
                 if template:
                     state["r_template_path"] = template
             else:
                 anchor = str(state.get("anchor_role") or "sidewall1")
-                if not state.get("sidewall_input"):
-                    state["sidewall_input"] = str(self._capture_folder(anchor))
-                if not state.get("target_input"):
-                    state["target_input"] = str(self._capture_folder(role))
+                auto_sidewall, auto_target = self._paired_capture_folders(anchor, role)
+                if not bool(state.get("sidewall_input_manual")):
+                    state["sidewall_input"] = str(auto_sidewall)
+                if not bool(state.get("target_input_manual")):
+                    state["target_input"] = str(auto_target)
                 template = self._default_template(anchor)
                 if template:
                     state["r_template_path"] = template
@@ -782,7 +816,13 @@ class NewSKUTrainingPage(QWidget):
         anchor_role = str(self.anchor_combo.currentData() or "sidewall1")
         state = self.states[self.active_role]
         state["anchor_role"] = anchor_role
-        state["sidewall_input"] = str(self._capture_folder(anchor_role))
+        sidewall_folder, target_folder = self._paired_capture_folders(
+            anchor_role, self.active_role
+        )
+        state["sidewall_input"] = str(sidewall_folder)
+        state["target_input"] = str(target_folder)
+        state["sidewall_input_manual"] = False
+        state["target_input_manual"] = False
         state["r_template_path"] = self._default_template(anchor_role)
         self._load_active_state()
 
@@ -815,6 +855,8 @@ class NewSKUTrainingPage(QWidget):
                 selected += ".pth"
         if selected:
             self.states[self.active_role][key] = str(Path(selected).expanduser().resolve())
+            if key in ("raw_train_folder", "sidewall_input", "target_input"):
+                self.states[self.active_role][f"{key}_manual"] = True
             self.states[self.active_role]["result"] = {}
             self._load_active_state()
             self.role_rows[self.active_role].set_state("waiting", "Not trained")
@@ -986,7 +1028,8 @@ class NewSKUTrainingPage(QWidget):
             self,
             "Training Completed",
             f"{self.ROLE_INFO[role]} PatchCore model trained successfully.\n\n"
-            f"Model:\n{result.get('model_path', '')}",
+            f"Model:\n{result.get('model_path', '')}\n\n"
+            f"Saved cropped images:\n{result.get('crop_output_root', '')}",
         )
 
     def _on_training_error(self, role: str, message: str) -> None:
@@ -1018,8 +1061,15 @@ class NewSKUTrainingPage(QWidget):
             return
 
         memory_shape = result.get("memory_bank_shape") or []
+        crop_count = int(result.get("retained_crop_count", 0) or 0)
+        crop_root = str(
+            result.get("crop_output_root")
+            or result.get("prepared_output_root")
+            or ""
+        )
         self.result_summary.setText(
             f"Model: {result.get('model_path', '')}\n"
+            f"Cropped images: {crop_count} saved in {crop_root}\n"
             f"Generated patches: {result.get('generated_training_patch_count', 0)}    |    "
             f"Successful inputs: {result.get('successful_input_count', 0)}    |    "
             f"Failed inputs: {result.get('failed_input_count', 0)}    |    "

@@ -16,11 +16,11 @@
 #   - Stops streams once after all five sides have two images.
 #
 # Save structure:
-#   media/new_sku_images/<SKU>/sidewall1/<files>
-#   media/new_sku_images/<SKU>/sidewall2/<files>
-#   media/new_sku_images/<SKU>/innerwall/<files>
-#   media/new_sku_images/<SKU>/tread/<files>
-#   media/new_sku_images/<SKU>/bead/<files>
+#   media/new_sku_images/<SKU>/Cycle_<N>/sidewall1/<files>
+#   media/new_sku_images/<SKU>/Cycle_<N>/sidewall2/<files>
+#   media/new_sku_images/<SKU>/Cycle_<N>/innerwall/<files>
+#   media/new_sku_images/<SKU>/Cycle_<N>/tread/<files>
+#   media/new_sku_images/<SKU>/Cycle_<N>/bead/<files>
 #
 # Expected total per capture session:
 #   5 sides x 2 images = 10 images
@@ -36,6 +36,8 @@ import cv2
 import numpy as np
 
 from src.camera import HARDWARE_TRIGGER as HT
+from src.device.sku_profile_runtime import load_sku_camera_profile
+from src.COMMON.new_sku_capture_paths import next_cycle_dir
 
 try:
     from src.COMMON.db import save_new_sku_image
@@ -165,17 +167,20 @@ def capture_new_sku_images(
     Returns the latest saved image path for every logical side::
 
         {
-            "sidewall1": ".../sidewall1/..._02.png",
-            "sidewall2": ".../sidewall2/..._02.png",
-            "innerwall": ".../innerwall/..._02.png",
-            "tread": ".../tread/..._02.png",
-            "bead": ".../bead/..._02.png",
+            "sidewall1": ".../Cycle_1/sidewall1/..._02.png",
+            "sidewall2": ".../Cycle_1/sidewall2/..._02.png",
+            "innerwall": ".../Cycle_1/innerwall/..._02.png",
+            "tread": ".../Cycle_1/tread/..._02.png",
+            "bead": ".../Cycle_1/bead/..._02.png",
         }
     """
     del images_per_camera, train_good_count  # Fixed capture plan by requirement.
 
     sku_folder = _safe_name(sku_name)
-    base_out_dir = _ensure_dir(os.path.join(media_path, "new_sku_images", sku_folder))
+    # One complete New SKU capture session is stored in one numeric cycle.
+    # Existing cycles are preserved; the next session becomes Cycle_2, Cycle_3, ...
+    base_out_dir = str(next_cycle_dir(media_path, sku_folder, create=False))
+    cycle_name = os.path.basename(base_out_dir)
 
     logger("=" * 72)
     logger("[NEW SKU CAPTURE] Fixed two-image PLC side-based capture started")
@@ -183,8 +188,9 @@ def capture_new_sku_images(
     logger(f"[NEW SKU CAPTURE] Sides             : {', '.join(CAPTURE_SIDE_ORDER)}")
     logger(f"[NEW SKU CAPTURE] Images/side       : {CAPTURE_IMAGES_PER_SIDE}")
     logger(f"[NEW SKU CAPTURE] Expected total    : {EXPECTED_TOTAL_IMAGES}")
+    logger(f"[NEW SKU CAPTURE] Capture cycle     : {cycle_name}")
     logger(f"[NEW SKU CAPTURE] Save root         : {base_out_dir}")
-    logger("[NEW SKU CAPTURE] Save layout       : <SKU>/<side>/")
+    logger("[NEW SKU CAPTURE] Save layout       : <SKU>/Cycle_<N>/<side>/")
     logger("[NEW SKU CAPTURE] Trigger mode      : PLC_SOFTWARE")
     logger("[NEW SKU CAPTURE] Returned images   : FFC-corrected by HARDWARE_TRIGGER")
     logger("=" * 72)
@@ -209,6 +215,30 @@ def capture_new_sku_images(
         if bool(getattr(manager, "_streams_started", False)):
             logger("[NEW SKU CAPTURE] Existing streams detected; resetting once before capture...")
             manager.stop_all_streams()
+
+        # Always load and apply the camera settings for the SKU selected in
+        # the New SKU workflow. This prevents settings from a previously used
+        # SKU (or only the .env defaults) from being used accidentally.
+        if not hasattr(manager, "apply_camera_profile"):
+            raise RuntimeError(
+                "Connected camera manager does not support apply_camera_profile(). "
+                "Update src/camera/HARDWARE_TRIGGER.py."
+            )
+
+        logger(f"[NEW SKU CAPTURE] Loading camera profile for SKU={sku_folder}...")
+        try:
+            camera_profile = load_sku_camera_profile(
+                media_root=media_path,
+                sku_name=sku_folder,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not load camera profile for SKU={sku_folder}: {exc}. "
+                f"Expected: {os.path.join(media_path, 'Camera_Profiles', sku_folder, 'camera_profile.json')}"
+            ) from exc
+
+        manager.apply_camera_profile(camera_profile)
+        logger(f"[NEW SKU CAPTURE] SKU camera profile applied: {sku_folder}")
 
         main_tag = (
             f"DB{HT.MAIN_TRIGGER_DB}.DBX"
@@ -266,6 +296,22 @@ def capture_new_sku_images(
             capture_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             ffc_stats_by_side = dict(getattr(manager, "last_ffc_stats", {}) or {})
 
+            # Corrected-only requirement: validate FFC for the complete set
+            # before saving even the first side. This avoids a partial set in
+            # which some raw/uncorrected files were already written.
+            ffc_missing_or_disabled = []
+            for side_name in CAPTURE_SIDE_ORDER:
+                side_stats = ffc_stats_by_side.get(side_name)
+                if not isinstance(side_stats, dict) or side_stats.get("enabled") is not True:
+                    ffc_missing_or_disabled.append(side_name)
+
+            if ffc_missing_or_disabled:
+                raise RuntimeError(
+                    "Software FFC was not confirmed for capture set "
+                    f"{shot_idx}. Images will not be saved. Sides: "
+                    f"{', '.join(ffc_missing_or_disabled)}"
+                )
+
             for side_name in CAPTURE_SIDE_ORDER:
                 img = captured[side_name]
                 if img is None:
@@ -290,7 +336,8 @@ def capture_new_sku_images(
                 latest_paths[side_name] = file_path
 
                 ffc_stats = dict(ffc_stats_by_side.get(side_name, {}) or {})
-                ffc_enabled = bool(ffc_stats.get("enabled", False))
+                # Already validated above for every side before file saving.
+                ffc_enabled = True
 
                 logger(
                     f"[SAVE OK] side={side_name} image={shot_idx}/2 "
@@ -310,7 +357,8 @@ def capture_new_sku_images(
                                 "capture_index": shot_idx,
                                 "total_images_per_side": CAPTURE_IMAGES_PER_SIDE,
                                 "expected_total_images": EXPECTED_TOTAL_IMAGES,
-                                "save_group": "side_root",
+                                "save_group": "cycle_side_root",
+                                "capture_cycle": cycle_name,
                                 "saved_dir": side_dir,
                                 "saved_file": file_name,
                                 "saved_path": file_path,

@@ -121,7 +121,7 @@ R_BLUR_KERNEL = (5, 5)
 
 # Diagnostic output.
 SAVE_R_DETECTION_PREVIEW = True
-SAVE_RAW_R_CROP = False
+SAVE_RAW_R_CROP = True
 SAVE_RESIZED_R_CROP = True
 KEEP_GENERATED_PATCHES_AFTER_TRAINING = True
 
@@ -263,6 +263,27 @@ def list_generated_patches(
 def synchronize_cuda() -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+def remove_generated_patch_folders(root: Path) -> int:
+    """Delete only generated patch folders while retaining crops and reports."""
+    if not root.is_dir():
+        return 0
+
+    removed = 0
+    patch_dirs = sorted(
+        (
+            path
+            for path in root.rglob("patches_rtor1")
+            if path.is_dir()
+        ),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for patch_dir in patch_dirs:
+        shutil.rmtree(patch_dir)
+        removed += 1
+    return removed
 
 
 # ============================================================================
@@ -1159,6 +1180,23 @@ def prepare_one_raw_image(
             if preview_path is not None
             else None
         ),
+        "outputs": {
+            "raw_R_crop": (
+                str(raw_crop_path.resolve())
+                if SAVE_RAW_R_CROP
+                else None
+            ),
+            "resized_R_crop": (
+                str(resized_crop_path.resolve())
+                if SAVE_RESIZED_R_CROP
+                else None
+            ),
+            "R_detection_preview": (
+                str(preview_path.resolve())
+                if preview_path is not None
+                else None
+            ),
+        },
         "stage_times": stage_times,
     }
 
@@ -2065,9 +2103,14 @@ def main() -> None:
         csv_log=csv_log,
     )
 
+    removed_patch_folder_count = 0
     if not KEEP_GENERATED_PATCHES_AFTER_TRAINING:
-        shutil.rmtree(
+        removed_patch_folder_count = remove_generated_patch_folders(
             PREPROCESS_OUTPUT_ROOT
+        )
+        print(
+            f"[{now_s()}] Removed {removed_patch_folder_count} generated patch "
+            "folder(s); R-cropped images and preprocessing reports were retained."
         )
 
     pipeline_end_dt = datetime.now()
@@ -2088,6 +2131,16 @@ def main() -> None:
         ),
         "preprocessing": preprocessing_report,
         "training": training_summary,
+        "retained_crop_root": str(PREPROCESS_OUTPUT_ROOT.resolve()),
+        "cleanup": {
+            "generated_patches_kept": bool(
+                KEEP_GENERATED_PATCHES_AFTER_TRAINING
+            ),
+            "removed_patch_folder_count": int(
+                removed_patch_folder_count
+            ),
+            "crops_and_reports_retained": True,
+        },
     }
 
     final_summary_path = (

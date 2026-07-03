@@ -18,8 +18,14 @@ from PyQt5.QtWidgets import (  # type: ignore
 from src.COMMON.common import load_env
 from src.COMMON.db import save_new_sku_image
 from src.COMMON.recipe_service import RecipeService
+from src.COMMON.new_sku_capture_paths import (
+    find_latest_image as find_latest_cycle_image,
+    latest_cycle_dir,
+    resolve_role_folder,
+)
 from src.models.template_extracter import TemplateExtractorPage
 from src.models.new_sku_training.training_page import NewSKUTrainingPage
+from src.models.new_sku_offset.offset_page import OffsetCalculationPage
 from src.models.feature_thresh.threshold_page import FeatureThresholdPage
 
 try:
@@ -33,10 +39,14 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 TAB_SKU_SETUP = 0
 TAB_AXIS_TEACHING = 1
 TAB_CAPTURE = 2
-TAB_TRAINING = 3
-TAB_TEMPLATE_EXTRACTOR = 4
-TAB_FEATURE_THRESHOLD = 5
-TAB_SAVE_RECIPE = 6
+TAB_IMAGE_PROCESSING = 3
+TAB_OFFSET_CALCULATION = 4
+TAB_TRAINING = 5
+TAB_FEATURE_THRESHOLD = 6
+TAB_SAVE_RECIPE = 7
+
+# Backward-compatible alias used by older helper names.
+TAB_TEMPLATE_EXTRACTOR = TAB_IMAGE_PROCESSING
 
 
 # =========================
@@ -67,6 +77,18 @@ SIDEWALL_SERIAL_MAP = {
     for role, serial in CAMERA_SERIAL_MAP.items()
     if role in ("sidewall1", "sidewall2")
 }
+
+# New SKU capture is intentionally fixed to two images for each logical side.
+# Streams start once, both capture sets run, and streams stop once at the end.
+CAPTURE_ROLE_ORDER = [
+    "sidewall1",
+    "sidewall2",
+    "innerwall",
+    "tread",
+    "bead",
+]
+CAPTURE_IMAGES_PER_SIDE = 2
+CAPTURE_EXPECTED_TOTAL = len(CAPTURE_ROLE_ORDER) * CAPTURE_IMAGES_PER_SIDE
 
 
 def _ensure_dir(path: str) -> str:
@@ -300,7 +322,7 @@ class CaptureWorker(QThread):
         sku_name: str,
         media_path: str,
         images_per_camera: int,
-        train_good_count: int = 10,
+        train_good_count: int = 0,
         multi_camera_manager=None,
         sku_meta=None,
         meta_collection: str = "New SKU",
@@ -370,7 +392,7 @@ class NewSKUPage(QWidget):
         self.img_labels: List[AspectImageLabel] = []
         self.status_lbl: Optional[QLabel] = None
         self.capture_btn: Optional[QPushButton] = None
-        self.training_btn: Optional[QPushButton] = None
+        self.image_processing_btn: Optional[QPushButton] = None
         self.template_btn: Optional[QPushButton] = None
         self.refresh_btn: Optional[QPushButton] = None
         self.close_btn: Optional[QPushButton] = None
@@ -386,9 +408,11 @@ class NewSKUPage(QWidget):
         self.saved_recipe_doc: Optional[Dict[str, Any]] = None
         self.saved_recipe_result: Optional[Dict[str, Any]] = None
         self.load_machine_btn: Optional[QPushButton] = None
+        self.latest_offset_assets: Dict[str, Dict[str, Any]] = {}
         self.latest_training_assets: Dict[str, Dict[str, Any]] = {}
         self.latest_template_assets: Dict[str, Dict[str, Any]] = {}
         self.latest_threshold_assets: Dict[str, Dict[str, Any]] = {}
+        self._workflow_sku = ""
 
 
         self.tab_buttons: List[QPushButton] = []
@@ -398,8 +422,9 @@ class NewSKUPage(QWidget):
         self.wizard_page: Optional[QWidget] = None
         self.axis_teaching_page: Optional[QWidget] = None
         self.capture_page: Optional[QWidget] = None
-        self.training_page: Optional[NewSKUTrainingPage] = None
         self.template_extractor_page: Optional[TemplateExtractorPage] = None
+        self.offset_page: Optional[OffsetCalculationPage] = None
+        self.training_page: Optional[NewSKUTrainingPage] = None
         self.feature_threshold_page: Optional[FeatureThresholdPage] = None
         self.recipe_page: Optional[QWidget] = None
         self.axis_entry_mode = "capture"
@@ -411,6 +436,7 @@ class NewSKUPage(QWidget):
 
 
         self.camera_serial_order = list(CAMERA_SERIAL_ORDER)
+        self.camera_role_order = list(CAPTURE_ROLE_ORDER)
 
         self._build_ui()
 
@@ -429,22 +455,42 @@ class NewSKUPage(QWidget):
     def _on_capture_finished(self, result: dict):
         self.latest_preview_paths = result or {}
         self._update_preview_from_latest()
-        if self.training_page is not None:
-            self.training_page.refresh_context()
         if self.template_extractor_page is not None:
             self.template_extractor_page.refresh_context()
+        if self.offset_page is not None:
+            self.offset_page.refresh_context()
+        if self.training_page is not None:
+            self.training_page.refresh_context()
 
         sku_name = _safe_name(self._get_sku_name())
+        capture_cycle = "Cycle_<N>"
+        for saved_path in (result or {}).values():
+            try:
+                candidate = Path(str(saved_path)).resolve().parent.parent.name
+                if re.match(r"^Cycle[_\- ]?\d+$", candidate, re.IGNORECASE):
+                    capture_cycle = candidate
+                    break
+            except Exception:
+                continue
+        relative_save_root = (
+            f"media/new_sku_images/{sku_name}/{capture_cycle}/<side>/"
+        )
 
         if self.status_lbl is not None:
             self.status_lbl.setText(
-                f"Capture completed. Saved in media/new_sku_images/{sku_name}/<camera_serial>/"
+                f"Capture completed: {CAPTURE_EXPECTED_TOTAL} FFC-corrected images saved in "
+                f"{relative_save_root}"
             )
 
         QMessageBox.information(
             self,
             "Capture Complete",
-            f"Images saved in:\nmedia/new_sku_images/{sku_name}/<camera_serial>/",
+            (
+                f"PLC capture completed successfully.\n\n"
+                f"Saved {CAPTURE_IMAGES_PER_SIDE} FFC-corrected images for each of 5 sides "
+                f"({CAPTURE_EXPECTED_TOTAL} images total).\n\n"
+                f"Save root:\n{relative_save_root}"
+            ),
         )
 
         self.capture_in_progress = False
@@ -634,10 +680,8 @@ class NewSKUPage(QWidget):
         self.sku_meta = dict(sku_meta or {})
         self.sku_meta.pop("machine_serial", None)
         self._apply_sku_meta_to_form()
-        if self.training_page is not None:
-            self.training_page.refresh_context()
-        if self.template_extractor_page is not None:
-            self.template_extractor_page.refresh_context()
+        self._sync_workflow_sku()
+        self.recipe_doc["sku_meta"] = dict(self.sku_meta)
 
     def _apply_sku_meta_to_form(self):
         if not self.wizard_widgets:
@@ -672,52 +716,184 @@ class NewSKUPage(QWidget):
             if value:
                 return str(value).strip()
 
-        base_dir = os.path.join(self.media_path, "new_sku_images")
-        if os.path.isdir(base_dir):
-            folders = [name for name in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, name))]
-            if len(folders) == 1:
-                return folders[0]
+        # During New SKU creation, use only the name entered by the operator.
+        # Never infer the active SKU from an existing media folder, because a
+        # single old folder such as SKU_001 could otherwise be loaded into a
+        # fresh SKU_002 workflow before SKU Setup is saved.
+        sku_widget = self.wizard_widgets.get("sku_name") if self.wizard_widgets else None
+        if sku_widget is not None:
+            value = str(sku_widget.text() or "").strip()
+            if value:
+                return value
+
         return "unknown_sku"
 
+    def _payload_matches_current_sku(self, payload: Dict[str, Any]) -> bool:
+        payload_sku = str((payload or {}).get("sku_name", "") or "").strip()
+        if not payload_sku:
+            return True
+        return _safe_name(payload_sku) == _safe_name(self._workflow_sku)
+
+    def _filter_assets_for_current_sku(
+        self, assets: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        return {
+            str(role): dict(payload or {})
+            for role, payload in (assets or {}).items()
+            if self._payload_matches_current_sku(dict(payload or {}))
+        }
+
+    def _sync_workflow_sku(self, force: bool = False) -> None:
+        """Switch every New-SKU subpage to one isolated SKU context.
+
+        A new SKU must never inherit templates, calibration outputs, models,
+        thresholds, axis targets or UI completion states from the previous SKU.
+        Existing files are restored only from the new SKU's own folders.
+        """
+        sku = _safe_name(self._get_sku_name())
+        changed = force or sku != self._workflow_sku
+
+        if changed:
+            self._workflow_sku = sku
+            self.latest_template_assets.clear()
+            self.latest_offset_assets.clear()
+            self.latest_training_assets.clear()
+            self.latest_threshold_assets.clear()
+            self.latest_preview_paths.clear()
+
+            current_meta = dict(self.sku_meta or {})
+            current_meta.pop("machine_serial", None)
+            self.recipe_doc = {"sku_meta": current_meta} if current_meta else {}
+            self.saved_recipe_doc = None
+            self.saved_recipe_result = None
+            if self.load_machine_btn is not None:
+                self.load_machine_btn.setEnabled(False)
+
+            for page in (
+                self.template_extractor_page,
+                self.offset_page,
+                self.training_page,
+                self.feature_threshold_page,
+            ):
+                if page is None:
+                    continue
+                reset = getattr(page, "reset_for_sku", None)
+                if callable(reset):
+                    reset(sku)
+                else:
+                    refresh = getattr(page, "refresh_context", None)
+                    if callable(refresh):
+                        refresh()
+
+            if self.axis_table is not None:
+                self.axis_table.clearContents()
+                self.axis_table.setRowCount(0)
+            self._update_preview_from_latest()
+            return
+
+        for page in (
+            self.template_extractor_page,
+            self.offset_page,
+            self.training_page,
+            self.feature_threshold_page,
+        ):
+            refresh = getattr(page, "refresh_context", None)
+            if callable(refresh):
+                refresh()
+
     def _preview_serial_order(self):
+        """Return logical side keys first, with old serial/index keys as fallback."""
+        if any(role in self.latest_preview_paths for role in self.camera_role_order):
+            return self.camera_role_order
         if any(serial in self.latest_preview_paths for serial in self.camera_serial_order):
             return self.camera_serial_order
         return [str(i + 1) for i in range(len(self.labels))]
 
     def _ordered_preview_paths(self):
+        """Keep the five UI cards in sidewall1/2/innerwall/tread/bead order."""
         paths = []
-        for idx, serial in enumerate(self.camera_serial_order):
+        for idx, role_name in enumerate(self.camera_role_order):
+            serial = self.camera_serial_order[idx] if idx < len(self.camera_serial_order) else ""
             raw_key = str(idx + 1)
-            path = self.latest_preview_paths.get(serial) or self.latest_preview_paths.get(raw_key) or ""
+            path = (
+                self.latest_preview_paths.get(role_name)
+                or (self.latest_preview_paths.get(serial) if serial else "")
+                or self.latest_preview_paths.get(raw_key)
+                or ""
+            )
             paths.append(path)
         while len(paths) < len(self.labels):
             paths.append("")
         return paths[:len(self.labels)]
 
     def load_raw_images_for_preview(self):
+        """Load the newest captured image for every role of the active SKU.
+
+        Preferred layout::
+
+            media/new_sku_images/<SKU>/Cycle_<N>/<role>/
+
+        The legacy ``<SKU>/<role>/`` layout remains supported. For each role,
+        the newest numeric cycle containing images is selected automatically.
+        """
         if self.capture_in_progress:
             return
+
         self.latest_preview_paths = {}
-        preview_keys = self._preview_serial_order()
-        if os.path.exists(self.raw_dir):
-            image_files = [f for f in os.listdir(self.raw_dir) if f.lower().endswith(IMAGE_EXTS)]
+        sku_name = _safe_name(self._get_sku_name())
+
+        for role_name in self.camera_role_order:
+            serial = str(CAMERA_SERIAL_MAP.get(role_name, "") or "")
+            role_dir = resolve_role_folder(
+                self.media_path,
+                sku_name,
+                role_name,
+                serial=serial,
+                require_images=True,
+            )
+            latest = find_latest_cycle_image(role_dir, recursive=False)
+            if latest is not None:
+                self.latest_preview_paths[role_name] = str(latest)
+
+        # Backward-compatible fallback for projects that still use raw_dir.
+        if not self.latest_preview_paths and os.path.exists(self.raw_dir):
+            preview_keys = self._preview_serial_order()
+            image_files = [
+                file_name
+                for file_name in os.listdir(self.raw_dir)
+                if file_name.lower().endswith(IMAGE_EXTS)
+            ]
             image_files.sort()
+
             for idx, key in enumerate(preview_keys):
-                if idx < len(image_files):
-                    image_path = os.path.join(self.raw_dir, image_files[idx])
-                    if os.path.exists(image_path):
-                        self.latest_preview_paths[key] = image_path
+                if idx >= len(image_files):
+                    break
+                image_path = os.path.join(self.raw_dir, image_files[idx])
+                if os.path.exists(image_path):
+                    self.latest_preview_paths[key] = image_path
+
             if not self.latest_preview_paths:
-                for file in image_files:
-                    name_without_ext = os.path.splitext(file)[0]
+                for file_name in image_files:
+                    name_without_ext = os.path.splitext(file_name)[0]
                     if name_without_ext in preview_keys:
-                        self.latest_preview_paths[name_without_ext] = os.path.join(self.raw_dir, file)
+                        self.latest_preview_paths[name_without_ext] = os.path.join(
+                            self.raw_dir,
+                            file_name,
+                        )
+
         self._update_preview_from_latest()
         if self.status_lbl is not None:
             if self.latest_preview_paths:
-                self.status_lbl.setText(f"Loaded {len(self.latest_preview_paths)} images from raw folder")
+                cycle = latest_cycle_dir(self.media_path, sku_name)
+                cycle_text = cycle.name if cycle is not None else "legacy direct layout"
+                self.status_lbl.setText(
+                    f"Loaded {len(self.latest_preview_paths)} latest side previews "
+                    f"for SKU={sku_name} ({cycle_text})"
+                )
             else:
-                self.status_lbl.setText("No images found in raw folder")
+                self.status_lbl.setText(
+                    f"No captured images found for SKU={sku_name}"
+                )
 
     # ======================================================================
     # MAIN PAGE UI
@@ -749,14 +925,17 @@ class NewSKUPage(QWidget):
     def _switch_tab(self, idx: int):
         if self.stack is None:
             return
+        self._sync_workflow_sku()
         self.stack.setCurrentIndex(idx)
         for i, btn in enumerate(self.tab_buttons):
             btn.setStyleSheet(self._tab_button_style(i == idx))
 
-        if idx == TAB_TRAINING and self.training_page is not None:
-            self.training_page.refresh_context()
-        elif idx == TAB_TEMPLATE_EXTRACTOR and self.template_extractor_page is not None:
+        if idx == TAB_IMAGE_PROCESSING and self.template_extractor_page is not None:
             self.template_extractor_page.refresh_context()
+        elif idx == TAB_OFFSET_CALCULATION and self.offset_page is not None:
+            self.offset_page.refresh_context()
+        elif idx == TAB_TRAINING and self.training_page is not None:
+            self.training_page.refresh_context()
         elif idx == TAB_FEATURE_THRESHOLD and self.feature_threshold_page is not None:
             self.feature_threshold_page.refresh_context()
 
@@ -780,8 +959,9 @@ class NewSKUPage(QWidget):
             "SKU Setup",
             "Axis Teaching",
             "Capture",
-            "Training",
             "Image Processing",
+            "Offset Calculation",
+            "Training",
             "Feature & Threshold",
             "Save Recipe",
         ]
@@ -807,18 +987,6 @@ class NewSKUPage(QWidget):
         self.wizard_page = QWidget()
         self.axis_teaching_page = QWidget()
         self.capture_page = QWidget()
-        self.training_page = NewSKUTrainingPage(
-            media_path=self.media_path,
-            project_root=str(PROJECT_ROOT),
-            sku_name_provider=self._get_sku_name,
-            camera_serials=CAMERA_SERIAL_MAP,
-            template_assets_provider=self._collect_template_assets,
-            parent=self,
-        )
-        self.training_page.trainingSaved.connect(self._on_training_saved)
-        self.training_page.continueRequested.connect(
-            lambda: self._switch_tab(TAB_TEMPLATE_EXTRACTOR)
-        )
         self.template_extractor_page = TemplateExtractorPage(
             media_path=self.media_path,
             sku_name_provider=self._get_sku_name,
@@ -827,6 +995,33 @@ class NewSKUPage(QWidget):
         )
         self.template_extractor_page.templateSaved.connect(self._on_template_saved)
         self.template_extractor_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_OFFSET_CALCULATION)
+        )
+
+        self.offset_page = OffsetCalculationPage(
+            media_path=self.media_path,
+            project_root=str(PROJECT_ROOT),
+            sku_name_provider=self._get_sku_name,
+            camera_serials=CAMERA_SERIAL_MAP,
+            template_assets_provider=self._collect_template_assets,
+            parent=self,
+        )
+        self.offset_page.offsetSaved.connect(self._on_offset_saved)
+        self.offset_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_TRAINING)
+        )
+
+        self.training_page = NewSKUTrainingPage(
+            media_path=self.media_path,
+            project_root=str(PROJECT_ROOT),
+            sku_name_provider=self._get_sku_name,
+            camera_serials=CAMERA_SERIAL_MAP,
+            template_assets_provider=self._collect_template_assets,
+            offset_assets_provider=self._collect_offset_assets,
+            parent=self,
+        )
+        self.training_page.trainingSaved.connect(self._on_training_saved)
+        self.training_page.continueRequested.connect(
             lambda: self._switch_tab(TAB_FEATURE_THRESHOLD)
         )
 
@@ -852,15 +1047,49 @@ class NewSKUPage(QWidget):
         self.stack.addWidget(self.wizard_page)
         self.stack.addWidget(self.axis_teaching_page)
         self.stack.addWidget(self.capture_page)
-        self.stack.addWidget(self.training_page)
         self.stack.addWidget(self.template_extractor_page)
+        self.stack.addWidget(self.offset_page)
+        self.stack.addWidget(self.training_page)
         self.stack.addWidget(self.feature_threshold_page)
         self.stack.addWidget(self.recipe_page)
 
         root.addWidget(self.stack, 1)
+        self._sync_workflow_sku(force=True)
         self._switch_tab(TAB_SKU_SETUP)
 
+    def _on_offset_saved(self, role: str, payload: dict):
+        if not self._payload_matches_current_sku(payload):
+            return
+        self.latest_offset_assets[str(role)] = dict(payload or {})
+        self.recipe_doc["offset_assets"] = dict(self.latest_offset_assets)
+
+        if self.offset_page is not None:
+            self.offset_page.refresh_context()
+        if self.training_page is not None:
+            self.training_page.refresh_context()
+
+        if self.status_lbl is not None:
+            display_name = payload.get("display_name", role)
+            output_path = payload.get("calibration_json_path", "")
+            self.status_lbl.setText(
+                f"{display_name} offset calibration saved: {output_path}"
+            )
+
+    def _collect_offset_assets(self) -> Dict[str, Dict[str, Any]]:
+        assets = self._filter_assets_for_current_sku(self.latest_offset_assets)
+        if self.offset_page is not None:
+            assets.update(
+                self._filter_assets_for_current_sku(
+                    self.offset_page.get_offset_assets()
+                )
+            )
+        self.latest_offset_assets = assets
+        self.recipe_doc["offset_assets"] = dict(assets)
+        return assets
+
     def _on_training_saved(self, role: str, payload: dict):
+        if not self._payload_matches_current_sku(payload):
+            return
         self.latest_training_assets[str(role)] = dict(payload or {})
         self.recipe_doc["training_assets"] = dict(self.latest_training_assets)
 
@@ -870,16 +1099,24 @@ class NewSKUPage(QWidget):
             self.status_lbl.setText(f"{display_name} model trained: {model_path}")
 
     def _collect_training_assets(self) -> Dict[str, Dict[str, Any]]:
-        assets = dict(self.latest_training_assets)
+        assets = self._filter_assets_for_current_sku(self.latest_training_assets)
         if self.training_page is not None:
-            assets.update(self.training_page.get_training_assets())
+            assets.update(
+                self._filter_assets_for_current_sku(
+                    self.training_page.get_training_assets()
+                )
+            )
         self.latest_training_assets = assets
         self.recipe_doc["training_assets"] = dict(assets)
         return assets
 
     def _on_template_saved(self, role: str, payload: dict):
+        if not self._payload_matches_current_sku(payload):
+            return
         self.latest_template_assets[str(role)] = dict(payload or {})
         self.recipe_doc["template_assets"] = dict(self.latest_template_assets)
+        if self.offset_page is not None:
+            self.offset_page.refresh_context()
         if self.training_page is not None:
             self.training_page.refresh_context()
 
@@ -889,14 +1126,20 @@ class NewSKUPage(QWidget):
             self.status_lbl.setText(f"{display_name} template saved: {output_path}")
 
     def _collect_template_assets(self) -> Dict[str, Dict[str, Any]]:
-        assets = dict(self.latest_template_assets)
+        assets = self._filter_assets_for_current_sku(self.latest_template_assets)
         if self.template_extractor_page is not None:
-            assets.update(self.template_extractor_page.get_template_assets())
+            assets.update(
+                self._filter_assets_for_current_sku(
+                    self.template_extractor_page.get_template_assets()
+                )
+            )
         self.latest_template_assets = assets
         self.recipe_doc["template_assets"] = dict(assets)
         return assets
 
     def _on_threshold_saved(self, role: str, payload: dict):
+        if not self._payload_matches_current_sku(payload):
+            return
         self.latest_threshold_assets[str(role)] = dict(payload or {})
         self.recipe_doc["threshold_assets"] = dict(self.latest_threshold_assets)
 
@@ -908,9 +1151,13 @@ class NewSKUPage(QWidget):
             )
 
     def _collect_threshold_assets(self) -> Dict[str, Dict[str, Any]]:
-        assets = dict(self.latest_threshold_assets)
+        assets = self._filter_assets_for_current_sku(self.latest_threshold_assets)
         if self.feature_threshold_page is not None:
-            assets.update(self.feature_threshold_page.get_threshold_assets())
+            assets.update(
+                self._filter_assets_for_current_sku(
+                    self.feature_threshold_page.get_threshold_assets()
+                )
+            )
         self.latest_threshold_assets = assets
         self.recipe_doc["threshold_assets"] = dict(assets)
         return assets
@@ -984,12 +1231,20 @@ class NewSKUPage(QWidget):
         zones_spin.setMaximum(5)
 
         img_count_spin = QSpinBox()
-        img_count_spin.setMinimum(2)
-        img_count_spin.setMaximum(100)
+        img_count_spin.setRange(CAPTURE_IMAGES_PER_SIDE, CAPTURE_IMAGES_PER_SIDE)
+        img_count_spin.setValue(CAPTURE_IMAGES_PER_SIDE)
+        img_count_spin.setEnabled(False)
+        img_count_spin.setToolTip(
+            "Fixed by the PLC New SKU capture workflow: two images per side."
+        )
 
         train_good_spin = QSpinBox()
-        train_good_spin.setMinimum(1)
-        train_good_spin.setMaximum(100)
+        train_good_spin.setRange(0, 0)
+        train_good_spin.setValue(0)
+        train_good_spin.setEnabled(False)
+        train_good_spin.setToolTip(
+            "Not used by the side-based two-image capture workflow."
+        )
 
         self.wizard_widgets = {
             "sku_name": sku_edit,
@@ -1007,11 +1262,13 @@ class NewSKUPage(QWidget):
         }
         self._apply_sku_meta_to_form()
 
-        # Defaults if no meta was supplied
+        # Defaults if no meta was supplied. Image count and train split remain
+        # fixed because this workflow always captures two corrected images per side.
         if not self.sku_meta:
             zones_spin.setValue(_to_int(env_vars.get("NEW_SKU_DEFAULT_ZONE_COUNT", 5), 5))
-            img_count_spin.setValue(_to_int(env_vars.get("NEW_SKU_DEFAULT_IMAGE_COUNT_PER_ZONE", 20), 20))
-            train_good_spin.setValue(_to_int(env_vars.get("NEW_SKU_DEFAULT_TRAIN_GOOD_COUNT", 10), 10))
+
+        img_count_spin.setValue(CAPTURE_IMAGES_PER_SIDE)
+        train_good_spin.setValue(0)
 
         form.addRow("SKU Name", sku_edit)
         form.addRow("Recipe Number", recipe_number_spin)
@@ -1023,8 +1280,8 @@ class NewSKUPage(QWidget):
         form.addRow("Barcode Pattern", barcode_pattern_edit)
         form.addRow("Operator", operator_edit)
         form.addRow("Inspection Zones", zones_spin)
-        form.addRow("Images per Zone", img_count_spin)
-        form.addRow("Train Good Count", train_good_spin)
+        form.addRow("Images per Side (Fixed)", img_count_spin)
+        form.addRow("Train Good Count (Not Used)", train_good_spin)
 
         form_l.addLayout(form)
         lay.addWidget(form_card)
@@ -1061,14 +1318,12 @@ class NewSKUPage(QWidget):
         barcode_pattern = self.wizard_widgets["barcode_pattern"].text().strip()
         operator = self.wizard_widgets["operator"].text().strip()
         inspection_zones = int(self.wizard_widgets["inspection_zones"].value())
-        image_count_per_zone = int(self.wizard_widgets["image_count_per_zone"].value())
-        train_good_count = int(self.wizard_widgets["train_good_count"].value())
+        # Fixed PLC capture plan: two images per side and no train/good split.
+        image_count_per_zone = CAPTURE_IMAGES_PER_SIDE
+        train_good_count = 0
 
         if not sku_name:
             QMessageBox.warning(self, "SKU Setup", "SKU name is required.")
-            return
-        if train_good_count >= image_count_per_zone:
-            QMessageBox.warning(self, "SKU Setup", "Train Good Count must be smaller than Images per Zone.")
             return
         tyre_outer_diameter = _to_float_or_none(tyre_outer_diameter_raw)
         tyre_rpm = _to_float_or_none(tyre_rpm_raw)
@@ -1117,6 +1372,7 @@ class NewSKUPage(QWidget):
             "train_good_count": train_good_count,
         })
         self.sku_meta.pop("machine_serial", None)
+        self._sync_workflow_sku()
         self.recipe_doc["sku_meta"] = dict(self.sku_meta)
 
         try:
@@ -1713,7 +1969,7 @@ class NewSKUPage(QWidget):
         title_lbl = QLabel("New SKU Image Capture")
         title_lbl.setObjectName("PageTitle")
         header_left.addWidget(title_lbl)
-        subtitle_lbl = QLabel("Capture and verify all tyre views before saving the SKU recipe.")
+        subtitle_lbl = QLabel("Capture two FFC-corrected images for each tyre side before saving the SKU recipe.")
         subtitle_lbl.setObjectName("PageSubTitle")
         header_left.addWidget(subtitle_lbl)
         header_row.addLayout(header_left)
@@ -1795,15 +2051,17 @@ class NewSKUPage(QWidget):
 
         self.capture_btn = self._make_button("Start Capture", "primary")
         self.capture_btn.clicked.connect(self.confirm_and_start_capture)
-        self.training_btn = self._make_button("Next: Training", "secondary")
-        self.training_btn.clicked.connect(lambda: self._switch_tab(TAB_TRAINING))
+        self.image_processing_btn = self._make_button("Next: Image Processing", "secondary")
+        self.image_processing_btn.clicked.connect(
+            lambda: self._switch_tab(TAB_IMAGE_PROCESSING)
+        )
         self.refresh_btn = self._make_button("Refresh Preview", "secondary")
         self.refresh_btn.clicked.connect(self.refresh_preview_with_raw_load)
         self.close_btn = self._make_button("Close", "secondary")
         self.close_btn.clicked.connect(self.close_page)
 
         action_l.addWidget(self.capture_btn)
-        action_l.addWidget(self.training_btn)
+        action_l.addWidget(self.image_processing_btn)
         action_l.addWidget(self.refresh_btn)
         action_l.addStretch(1)
         action_l.addWidget(self.close_btn)
@@ -1826,7 +2084,7 @@ class NewSKUPage(QWidget):
         root.addWidget(main_card, 1)
 
     def _set_controls_enabled(self, enabled: bool):
-        for btn in [self.capture_btn, self.training_btn, self.refresh_btn, self.close_btn]:
+        for btn in [self.capture_btn, self.image_processing_btn, self.refresh_btn, self.close_btn]:
             if btn is not None:
                 btn.setEnabled(enabled)
         if self.tab_buttons:
@@ -1866,18 +2124,8 @@ class NewSKUPage(QWidget):
                 self.img_labels[i].set_image_path(preview_paths[i])
 
     def _get_capture_plan(self):
-        total = _to_int(self.sku_meta.get("image_count_per_zone", env_vars.get("NEW_SKU_DEFAULT_IMAGE_COUNT_PER_ZONE", 20)), 20)
-        good_count = _to_int(self.sku_meta.get("train_good_count", env_vars.get("NEW_SKU_DEFAULT_TRAIN_GOOD_COUNT", 10)), 10)
-        expected = _to_int(self.sku_meta.get("inspection_zones", env_vars.get("NEW_SKU_DEFAULT_ZONE_COUNT", len(CAMERA_SERIAL_ORDER) or 5)), len(CAMERA_SERIAL_ORDER) or 5)
-        if total < 2:
-            total = 20
-        if good_count < 1:
-            good_count = 10
-        if good_count >= total:
-            good_count = max(1, total // 2)
-        if expected < 1:
-            expected = len(CAMERA_SERIAL_ORDER) or 5
-        return total, good_count, expected
+        """Fixed New SKU capture plan: two images for each of five sides."""
+        return CAPTURE_IMAGES_PER_SIDE, 0, len(CAPTURE_ROLE_ORDER)
 
     def confirm_and_start_capture(self):
         if self.capture_in_progress:
@@ -1887,11 +2135,20 @@ class NewSKUPage(QWidget):
         sku_name = self._get_sku_name()
 
         msg = (
-            f"Capture {total} images per camera for SKU: {sku_name}\n\n"
+            f"Capture {CAPTURE_IMAGES_PER_SIDE} images for each tyre side "
+            f"({CAPTURE_EXPECTED_TOTAL} images total) for SKU: {sku_name}\n\n"
+            "Sides: Sidewall 1, Sidewall 2, Innerwall, Tread and Bead\n\n"
             f"Save path:\n"
-            f"media/new_sku_images/{_safe_name(sku_name)}/<camera_serial>/\n\n"
-            "After placing the tyre, click OK.\n"
-            "Then software trigger will capture images from connected cameras."
+            f"media/new_sku_images/{_safe_name(sku_name)}/Cycle_<N>/<side>/\n\n"
+            "After clicking OK, the camera streams will start once and the "
+            "system will wait for the PLC trigger.\n\n"
+            "Capture set 1:\n"
+            "  MAIN DB74.DBX0.3 -> Sidewall1, Sidewall2, Innerwall and Tread\n"
+            "  BEAD DB74.DBX86.0 -> Bead\n\n"
+            "The same two PLC rising edges are required again for capture set 2.\n\n"
+            "For each trigger set, software FFC must complete successfully before "
+            "that set is saved. After 10 corrected images are saved, all streams "
+            "will stop once."
         )
 
         reply = QMessageBox.question(
@@ -1943,8 +2200,8 @@ class NewSKUPage(QWidget):
 
         if self.status_lbl is not None:
             self.status_lbl.setText(
-                f"Starting software capture | SKU={sku_name} | "
-                f"Images/camera={images_per_camera} | Train good={good_folder_count}"
+                f"Loading SKU camera profile and arming PLC capture | SKU={sku_name} | "
+                f"2 corrected images/side | Waiting for MAIN and BEAD trigger sets"
             )
 
         self.capture_worker = CaptureWorker(
@@ -2094,6 +2351,7 @@ class NewSKUPage(QWidget):
 
         recipe_doc["recipe_number"] = recipe_number
         recipe_doc["plc_recipe_number"] = recipe_number
+        recipe_doc["offset_assets"] = self._collect_offset_assets()
         recipe_doc["training_assets"] = self._collect_training_assets()
         recipe_doc["template_assets"] = self._collect_template_assets()
         recipe_doc["threshold_assets"] = self._collect_threshold_assets()
@@ -2124,6 +2382,25 @@ class NewSKUPage(QWidget):
             template_assets = recipe_doc.get("template_assets", {}) or {}
             sidewall1_template = (template_assets.get("sidewall1", {}) or {}).get("template_image", "Not saved")
             sidewall2_template = (template_assets.get("sidewall2", {}) or {}).get("template_image", "Not saved")
+            offset_assets = recipe_doc.get("offset_assets", {}) or {}
+            offset_role_names = {
+                "innerwall": "Inner Side",
+                "tread": "Tread",
+                "bead": "Bead",
+            }
+            offset_summary_lines = []
+            for offset_role, offset_display in offset_role_names.items():
+                offset_item = offset_assets.get(offset_role, {}) or {}
+                offset_summary_lines.append(
+                    f"{offset_display} Offset Ratio: "
+                    f"{offset_item.get('offset_ratio', 'Not calculated')}"
+                )
+                offset_summary_lines.append(
+                    f"{offset_display} Calibration JSON: "
+                    f"{offset_item.get('calibration_json_path', 'Not saved')}"
+                )
+            offset_summary = "\n".join(offset_summary_lines)
+
             training_assets = recipe_doc.get("training_assets", {}) or {}
             training_role_names = {
                 "sidewall1": "Sidewall 1",
@@ -2434,6 +2711,13 @@ class NewSKUPage(QWidget):
     def close_page(self):
         if self.capture_in_progress:
             QMessageBox.warning(self, "New SKU", "Please wait until capture is completed.")
+            return
+        if self.offset_page is not None and self.offset_page.is_running:
+            QMessageBox.warning(
+                self,
+                "New SKU",
+                "Please wait until the current offset calculation is completed.",
+            )
             return
         if self.training_page is not None and self.training_page.is_running:
             QMessageBox.warning(

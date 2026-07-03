@@ -228,6 +228,27 @@ def synchronize_cuda() -> None:
         torch.cuda.synchronize()
 
 
+def remove_generated_patch_folders(root: Path) -> int:
+    """Delete only generated patch folders while retaining target crops and reports."""
+    if not root.is_dir():
+        return 0
+
+    removed = 0
+    patch_dirs = sorted(
+        (
+            path
+            for path in root.rglob("patches_rtor1")
+            if path.is_dir()
+        ),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for patch_dir in patch_dirs:
+        shutil.rmtree(patch_dir)
+        removed += 1
+    return removed
+
+
 def list_images(path: Path) -> list[Path]:
     if path.is_file():
         if path.suffix.lower() not in IMAGE_EXTENSIONS:
@@ -2773,11 +2794,14 @@ def main() -> None:
         csv_log=csv_log,
     )
 
-    if (
-        not KEEP_GENERATED_PATCHES_AFTER_TRAINING
-    ):
-        shutil.rmtree(
+    removed_patch_folder_count = 0
+    if not KEEP_GENERATED_PATCHES_AFTER_TRAINING:
+        removed_patch_folder_count = remove_generated_patch_folders(
             PREPROCESS_OUTPUT_ROOT
+        )
+        print(
+            f"[{now_s()}] Removed {removed_patch_folder_count} generated patch "
+            "folder(s); cropped target images and preprocessing reports were retained."
         )
 
     pipeline_time = (
@@ -2799,6 +2823,18 @@ def main() -> None:
             preprocess_report
         ),
         "training": training_summary,
+        "retained_crop_root": str(
+            PREPROCESS_OUTPUT_ROOT.resolve()
+        ),
+        "cleanup": {
+            "generated_patches_kept": bool(
+                KEEP_GENERATED_PATCHES_AFTER_TRAINING
+            ),
+            "removed_patch_folder_count": int(
+                removed_patch_folder_count
+            ),
+            "crops_and_reports_retained": True,
+        },
     }
 
     final_summary_path = (

@@ -16,6 +16,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import cv2  # type: ignore
 
+from src.COMMON.new_sku_capture_paths import (
+    find_latest_image as find_latest_cycle_image,
+    resolve_role_folder,
+)
+
 from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal  # type: ignore
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap  # type: ignore
 from PyQt5.QtWidgets import (  # type: ignore
@@ -699,19 +704,16 @@ class TemplateExtractorPage(QWidget):
     # Image selection
     # ------------------------------------------------------------------
     def _default_source_folder(self, role: str) -> Path:
+        """Return the newest cycle folder containing this role's images."""
         sku = self._current_sku_name()
-        sku_root = self.media_path / "new_sku_images" / sku
         serial = str(self.camera_serials.get(role, "") or "").strip()
-        candidates = []
-        if serial:
-            candidates.append(sku_root / serial)
-        for alias in self.ROLE_ALIASES.get(role, (role,)):
-            candidates.append(sku_root / alias)
-        candidates.extend([sku_root, self.media_path / "new_sku_images", self.media_path])
-        for folder in candidates:
-            if folder.is_dir():
-                return folder.resolve()
-        return candidates[0].resolve() if candidates else self.media_path
+        return resolve_role_folder(
+            self.media_path,
+            sku,
+            role,
+            serial=serial,
+            require_images=True,
+        )
 
     def choose_image(self) -> None:
         role = self.active_role
@@ -725,14 +727,7 @@ class TemplateExtractorPage(QWidget):
             self._set_role_image(role, path)
 
     def _find_latest_image(self, folder: Path) -> Optional[Path]:
-        if not folder.exists():
-            return None
-        candidates = [
-            p for p in folder.rglob("*")
-            if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-            and "template_extractor" not in str(p).lower()
-        ]
-        return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+        return find_latest_cycle_image(folder, recursive=False)
 
     def load_latest_capture(self) -> None:
         role = self.active_role

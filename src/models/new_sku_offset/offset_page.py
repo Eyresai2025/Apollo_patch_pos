@@ -37,6 +37,10 @@ from PyQt5.QtWidgets import (  # type: ignore
 )
 
 from .offset_service import OffsetCalculationWorker
+from src.COMMON.new_sku_capture_paths import (
+    resolve_paired_role_folders,
+    resolve_role_folder,
+)
 
 
 def _safe_name(value: str) -> str:
@@ -695,26 +699,29 @@ class OffsetCalculationPage(QWidget):
     def _capture_folder(self, role: str) -> Path:
         sku = self._current_sku_name()
         serial = str(self.camera_serials.get(role, "") or "").strip()
-        role_aliases = {
-            "sidewall1": ("sidewall1", "Sidewall1", "SIDEWALL1"),
-            "sidewall2": ("sidewall2", "Sidewall2", "SIDEWALL2"),
-            "innerwall": ("innerwall", "inner", "Inner", "INNER"),
-            "tread": ("tread", "Tread", "TREAD"),
-            "bead": ("bead", "Bead", "BEAD"),
-        }
+        return resolve_role_folder(
+            self.media_path,
+            sku,
+            role,
+            serial=serial,
+            require_images=True,
+        )
 
-        roots: list[Path] = []
-        sku_root = self.media_path / "new_sku_images" / sku
-        if serial:
-            roots.append(sku_root / serial)
-        for alias in role_aliases.get(role, (role,)):
-            roots.append(sku_root / alias)
-        roots.append(sku_root)
-
-        for path in roots:
-            if path.is_dir():
-                return path.resolve()
-        return roots[0].resolve() if roots else self.media_path
+    def _paired_capture_folders(self, anchor_role: str, target_role: str) -> tuple[Path, Path]:
+        """Keep sidewall and target inputs inside the same latest cycle."""
+        sku = self._current_sku_name()
+        anchor_serial = str(self.camera_serials.get(anchor_role, "") or "").strip()
+        target_serial = str(self.camera_serials.get(target_role, "") or "").strip()
+        sidewall, target, _cycle = resolve_paired_role_folders(
+            self.media_path,
+            sku,
+            anchor_role,
+            target_role,
+            anchor_serial=anchor_serial,
+            target_serial=target_serial,
+            require_images=True,
+        )
+        return sidewall, target
 
     def _default_sidewall_template(self, anchor_role: str) -> str:
         assets: Dict[str, Dict[str, Any]] = {}
@@ -790,6 +797,8 @@ class OffsetCalculationPage(QWidget):
             "anchor_role": "sidewall1",
             "sidewall_input": "",
             "target_input": "",
+            "sidewall_input_manual": False,
+            "target_input_manual": False,
             "sidewall_template": "",
             "target_template": "",
             "output_json": "",
@@ -836,10 +845,11 @@ class OffsetCalculationPage(QWidget):
     def _apply_context_defaults(self, restore_existing: bool = True) -> None:
         for role, state in self.states.items():
             anchor = str(state.get("anchor_role") or "sidewall1")
-            if not state.get("sidewall_input"):
-                state["sidewall_input"] = str(self._capture_folder(anchor))
-            if not state.get("target_input"):
-                state["target_input"] = str(self._capture_folder(role))
+            auto_sidewall, auto_target = self._paired_capture_folders(anchor, role)
+            if not bool(state.get("sidewall_input_manual")):
+                state["sidewall_input"] = str(auto_sidewall)
+            if not bool(state.get("target_input_manual")):
+                state["target_input"] = str(auto_target)
 
             sidewall_template = self._default_sidewall_template(anchor)
             if sidewall_template and (
@@ -951,7 +961,11 @@ class OffsetCalculationPage(QWidget):
         anchor = str(self.anchor_combo.currentData() or "sidewall1")
         state = self.states[self.active_role]
         state["anchor_role"] = anchor
-        state["sidewall_input"] = str(self._capture_folder(anchor))
+        sidewall_folder, target_folder = self._paired_capture_folders(anchor, self.active_role)
+        state["sidewall_input"] = str(sidewall_folder)
+        state["target_input"] = str(target_folder)
+        state["sidewall_input_manual"] = False
+        state["target_input_manual"] = False
         state["sidewall_template"] = self._default_sidewall_template(anchor)
         state["result"] = {}
         self.role_rows[self.active_role].set_state("waiting", "Not calculated")
@@ -982,6 +996,8 @@ class OffsetCalculationPage(QWidget):
                 selected += ".json"
         if selected:
             self.states[self.active_role][key] = str(Path(selected).expanduser().resolve())
+            if key in ("sidewall_input", "target_input"):
+                self.states[self.active_role][f"{key}_manual"] = True
             self.states[self.active_role]["result"] = {}
             self.role_rows[self.active_role].set_state("waiting", "Not calculated")
             self._load_active_state()
@@ -1129,7 +1145,8 @@ class OffsetCalculationPage(QWidget):
             "Offset Calculation Completed",
             f"{self.ROLE_INFO[role]} offset calibration saved.\n\n"
             f"Offset ratio: {float(result.get('offset_ratio', 0.0)):.8f}\n"
-            f"JSON:\n{result.get('calibration_json_path', '')}",
+            f"JSON:\n{result.get('calibration_json_path', '')}\n\n"
+            f"Cropped images:\n{result.get('cropped_images_folder', '')}",
         )
 
     def _on_error(self, role: str, message: str) -> None:
@@ -1159,6 +1176,9 @@ class OffsetCalculationPage(QWidget):
             return
         self.result_summary.setText(
             f"Calibration JSON: {result.get('calibration_json_path', '')}\n"
+            f"Cropped images: {result.get('cropped_images_folder', '')}\n"
+            f"Saved crops: Sidewall={result.get('sidewall_cropped_image_count', 0)}   |   "
+            f"Target={result.get('target_cropped_image_count', 0)}\n"
             f"Offset ratio: {float(result.get('offset_ratio', 0.0)):.8f}   |   "
             f"Scale factor: {float(result.get('scale_factor', 0.0)):.8f}   |   "
             f"Sidewall revolution: {result.get('one_rev_sidewall_px')} px   |   "
