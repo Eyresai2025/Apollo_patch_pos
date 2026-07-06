@@ -14,5 +14,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 offset_calibration
-trainingmedia/*.pth
-media/*.pth
+
+# PatchCore / AI model files
+*.pth
+*.pt
+
+# Training model folders
+media/training/
+trainingmedia/
