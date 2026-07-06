@@ -222,10 +222,10 @@ MEDIA_PATH = str(BASE_DIR / "media")
 RAW_IMAGE_DIR = os.path.join(MEDIA_PATH, "raw images")
 STARTUP_IMAGE_PATHS = [
     os.path.join(RAW_IMAGE_DIR, "1.png"),
-    os.path.join(RAW_IMAGE_DIR, "2.jpg"),
-    os.path.join(RAW_IMAGE_DIR, "3.jpg"),
-    os.path.join(RAW_IMAGE_DIR, "4.jpg"),
-    os.path.join(RAW_IMAGE_DIR, "5.jpg"),
+    os.path.join(RAW_IMAGE_DIR, "2.png"),
+    os.path.join(RAW_IMAGE_DIR, "3.png"),
+    os.path.join(RAW_IMAGE_DIR, "4.png"),
+    os.path.join(RAW_IMAGE_DIR, "5.png"),
 ]
 
 BAR_CODE_DIR = os.path.join(MEDIA_PATH, "barcode_images")

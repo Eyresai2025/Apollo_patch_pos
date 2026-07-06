@@ -568,25 +568,49 @@ def _batched(items: list[PatchRecord], batch_size: int):
 
 
 def _to_uint8_preview(image: np.ndarray) -> np.ndarray:
+    """Convert result preview to uint8 exactly like the AI-team pipeline.
+
+    Important: this is used only when saving/displaying the detection image.
+    The PatchCore scoring image remains unchanged. The previous integration used
+    1st-99th percentile stretching here, which can clip bright tyre reflection
+    bands to pure white. The standalone AI pipeline uses full min/max scaling
+    for result previews, so we keep the same behavior here.
+    """
     if image.dtype == np.uint8:
         return image
-    array = image.astype(np.float32)
-    p1 = float(np.percentile(array, 1))
-    p99 = float(np.percentile(array, 99))
-    if p99 <= p1:
-        p1, p99 = float(array.min()), float(array.max())
-    if p99 <= p1:
+
+    minimum = float(np.min(image))
+    maximum = float(np.max(image))
+
+    if maximum <= minimum:
         return np.zeros(image.shape, dtype=np.uint8)
-    return np.clip((array - p1) / (p99 - p1) * 255.0, 0, 255).astype(np.uint8)
+
+    scaled = image.astype(np.float32) - minimum
+    scaled *= 255.0 / (maximum - minimum)
+    return np.clip(scaled, 0, 255).astype(np.uint8)
 
 
 def _to_preview_bgr(image: np.ndarray) -> np.ndarray:
+    """Create a drawable BGR image without changing brightness/bit depth.
+
+    This matches the AI-team inference files: draw boxes on the unchanged crop
+    first, then convert only the final saved preview to uint8.
+    """
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.ndim == 3 and image.shape[2] == 4:
+        return cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGRA2BGR)
+    return image.copy()
+
+
+def _save_result_preview(path: Path, image: np.ndarray, jpeg_quality: int) -> None:
     preview = _to_uint8_preview(image)
-    if preview.ndim == 2:
-        return cv2.cvtColor(preview, cv2.COLOR_GRAY2BGR)
-    if preview.ndim == 3 and preview.shape[2] == 4:
-        return cv2.cvtColor(preview, cv2.COLOR_BGRA2BGR)
-    return preview.copy()
+    if not cv2.imwrite(
+        str(path),
+        preview,
+        [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)],
+    ):
+        raise OSError(f"Unable to save result: {path}")
 
 
 def _draw_patch_boxes(
@@ -599,6 +623,15 @@ def _draw_patch_boxes(
     draw_score_labels: bool,
 ) -> np.ndarray:
     preview = _to_preview_bgr(source_image)
+
+    maximum_value = (
+        int(np.iinfo(preview.dtype).max)
+        if np.issubdtype(preview.dtype, np.integer)
+        else 1
+    )
+    red_colour = (0, 0, maximum_value)
+    white_colour = (maximum_value, maximum_value, maximum_value)
+
     for patch in patches:
         if not patch.is_defective:
             continue
@@ -606,15 +639,26 @@ def _draw_patch_boxes(
         y1 = max(0, int(round(patch.y * scale_y)))
         x2 = min(preview.shape[1] - 1, int(round(patch.x2 * scale_x)) - 1)
         y2 = min(preview.shape[0] - 1, int(round(patch.y2 * scale_y)) - 1)
-        cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 0, 255), box_width)
+        cv2.rectangle(preview, (x1, y1), (x2, y2), red_colour, box_width, cv2.LINE_8)
         if draw_score_labels:
+            label = f"DEFECT {patch.score:.4f}"
+            text_x = x1 + box_width + 3
+            text_y = min(preview.shape[0] - 8, y1 + 28)
+            (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+            cv2.rectangle(
+                preview,
+                (text_x - 4, max(0, text_y - th - 7)),
+                (min(preview.shape[1] - 1, text_x + tw + 5), min(preview.shape[0] - 1, text_y + baseline + 4)),
+                white_colour,
+                -1,
+            )
             cv2.putText(
                 preview,
-                f"DEFECT {patch.score:.4f}",
-                (x1 + 3, min(preview.shape[0] - 8, y1 + 26)),
+                label,
+                (text_x, text_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 255),
+                0.65,
+                red_colour,
                 2,
                 cv2.LINE_AA,
             )
@@ -983,12 +1027,7 @@ class PatchCoreSideRuntime:
             draw_score_labels=self.draw_score_labels,
         )
         final_path = final_dir / f"{self.side_name}_crop_detection.jpg"
-        if not cv2.imwrite(
-            str(final_path),
-            detection,
-            [cv2.IMWRITE_JPEG_QUALITY, self.result_jpeg_quality],
-        ):
-            raise OSError(f"Unable to save result: {final_path}")
+        _save_result_preview(final_path, detection, self.result_jpeg_quality)
 
         r_anchor = {
             "R1_top_y": int(y_start),
@@ -1076,12 +1115,7 @@ class PatchCoreSideRuntime:
             draw_score_labels=self.draw_score_labels,
         )
         final_path = final_dir / f"{self.side_name}_crop_detection.jpg"
-        if not cv2.imwrite(
-            str(final_path),
-            detection,
-            [cv2.IMWRITE_JPEG_QUALITY, self.result_jpeg_quality],
-        ):
-            raise OSError(f"Unable to save result: {final_path}")
+        _save_result_preview(final_path, detection, self.result_jpeg_quality)
 
         return self._finalize_result(
             raw_path=raw_path,
