@@ -30,12 +30,12 @@ This README describes the current integrated architecture, the purpose of every 
 
 The full button-wise architecture is available here:
 
-![Apollo button-wise architecture](docs/apollo_buttonwise_architecture.png)
+![Apollo button-wise architecture](docs/Apollo_Architecture.png)
 
 SVG version for zoom/editing:
 
 ```text
-docs/apollo_buttonwise_architecture.svg
+docs/Apollo_Architecture.svg
 ```
 
 ---
