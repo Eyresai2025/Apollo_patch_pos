@@ -2,9 +2,10 @@
 
 The camera layer and GUI call this module for both modes:
 
-* ``DEPLOYMENT=False``: process the configured local image (default
-  ``media/raw images/1.png``).
-* ``DEPLOYMENT=True``: process the image saved from the real camera capture.
+* ``DEPLOYMENT=False``: process five local side images from the configured
+  folder (default ``media/raw images``). Numbered files are mapped as:
+  ``1=sidewall1``, ``2=sidewall2``, ``3=innerwall``, ``4=tread``, ``5=bead``.
+* ``DEPLOYMENT=True``: process images saved from the real PLC/camera capture.
 
 PatchCore models are loaded only after the operator selects a SKU and starts
 Live.  They are cached per SKU/view for all following cycles.
@@ -18,6 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
 import numpy as np
@@ -32,6 +34,8 @@ from src.models.patchcore_runtime import (
     get_active_patchcore_sides,
     resolve_patchcore_artifacts,
     validate_sku_patchcore_assets,
+    get_r_source_side,
+    get_max_parallel_workers,
 )
 
 logger = get_logger(__name__, component="AI_PIPELINE")
@@ -326,62 +330,108 @@ def _image_files_in_folder(folder: Path) -> list[Path]:
     )
 
 
+LOCAL_NUMBERED_SIDE_STEMS: Dict[str, str] = {
+    "sidewall1": "1",
+    "sidewall2": "2",
+    "innerwall": "3",
+    "tread": "4",
+    "bead": "5",
+}
+LOCAL_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+
+
+def _find_local_image_by_stem(folder: Path, stem: str) -> Optional[Path]:
+    """Return one image whose filename stem matches exactly, case-insensitively."""
+    expected = str(stem).strip().lower()
+    matches = [
+        path
+        for path in _image_files_in_folder(folder)
+        if path.stem.strip().lower() == expected
+    ]
+    if not matches:
+        return None
+    # Prefer the newest file if duplicate extensions exist, e.g. 2.jpg + 2.png.
+    return max(matches, key=lambda path: path.stat().st_mtime_ns)
+
+
 def build_local_image_map(
     local_input: str | os.PathLike[str],
     sides_to_run: List[str],
 ) -> Dict[str, str]:
-    """Resolve local test input without requiring camera/serial folders.
+    """Resolve local test images without touching PLC or camera hardware.
 
-    A single file is valid when one view is active.  A folder can contain files
-    named ``sidewall1.png``, ``sidewall2.png`` and so on.  For the current
-    sidewall1 test, ``media/raw images/1.png`` is used directly.
+    Supported local layouts, in priority order:
+
+    1. Side-named files in one folder, e.g. ``sidewall1.png``.
+    2. Side subfolders containing images, e.g. ``sidewall1/<latest>.png``.
+    3. Numbered files in one folder using the fixed machine-view mapping:
+       ``1=sidewall1``, ``2=sidewall2``, ``3=innerwall``,
+       ``4=tread`` and ``5=bead``. File extensions may differ per side.
+
+    A direct file remains supported when exactly one PatchCore side is active.
+    When multiple sides are active and ``LOCAL_INSPECTION_INPUT`` still points
+    to a numbered file such as ``.../1.png``, its parent folder is used so the
+    sibling numbered files can be resolved automatically.
     """
 
+    requested_sides = [str(side).strip().lower() for side in sides_to_run]
     source = Path(local_input).expanduser().resolve()
+
     if source.is_file():
-        if len(sides_to_run) != 1:
-            raise ValueError(
-                "A single LOCAL_INSPECTION_INPUT file can be used only when one "
-                "PatchCore side is active."
-            )
-        return {sides_to_run[0]: str(source)}
+        if len(requested_sides) == 1:
+            return {requested_sides[0]: str(source)}
+        # Backward-compatible convenience: old .env may still point to 1.png.
+        source = source.parent
 
     if not source.is_dir():
         raise FileNotFoundError(f"Local inspection input not found: {source}")
 
     image_map: Dict[str, str] = {}
-    extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
-    for side_name in sides_to_run:
-        direct = next(
-            (
-                source / f"{side_name}{extension}"
-                for extension in extensions
-                if (source / f"{side_name}{extension}").is_file()
-            ),
-            None,
-        )
+
+    for side_name in requested_sides:
+        # 1) Preferred explicit side filename: sidewall1.png, tread.jpg, etc.
+        direct = _find_local_image_by_stem(source, side_name)
         if direct is not None:
             image_map[side_name] = str(direct.resolve())
             continue
 
+        # 2) Preferred side folder: sidewall1/<latest image>.
         side_files = _image_files_in_folder(source / side_name)
         if side_files:
             image_map[side_name] = str(side_files[-1].resolve())
+            continue
 
-    if len(sides_to_run) == 1 and sides_to_run[0] not in image_map:
-        preferred = source / "1.png"
-        if preferred.is_file():
-            image_map[sides_to_run[0]] = str(preferred.resolve())
-        else:
-            root_files = _image_files_in_folder(source)
-            if len(root_files) == 1:
-                image_map[sides_to_run[0]] = str(root_files[0].resolve())
-
-    missing = [side for side in sides_to_run if side not in image_map]
-    if missing:
-        raise FileNotFoundError(
-            f"Local input folder {source} has no image for: {', '.join(missing)}"
+        # 3) Fixed numbered local-test mapping requested by the application.
+        numbered_stem = LOCAL_NUMBERED_SIDE_STEMS.get(side_name)
+        numbered = (
+            _find_local_image_by_stem(source, numbered_stem)
+            if numbered_stem is not None
+            else None
         )
+        if numbered is not None:
+            image_map[side_name] = str(numbered.resolve())
+
+    missing = [side for side in requested_sides if side not in image_map]
+    if missing:
+        expected = ", ".join(
+            f"{LOCAL_NUMBERED_SIDE_STEMS.get(side, '?')}.*={side}"
+            for side in missing
+        )
+        raise FileNotFoundError(
+            f"Local input folder {source} has no image for: {', '.join(missing)}. "
+            f"Expected side-named files/folders or numbered files: {expected}"
+        )
+
+    logger.info(
+        "Local five-side image map resolved",
+        extra={
+            "event_code": "LOCAL_FIVE_SIDE_INPUT_RESOLVED",
+            "details": {
+                "input_root": str(source),
+                "image_map": dict(image_map),
+            },
+        },
+    )
     return image_map
 
 
@@ -470,7 +520,7 @@ def build_all_runtimes(
 
     return {
         "configured": True,
-        "pipeline": "PATCHCORE",
+        "pipeline": "PATCHCORE_FIVE_SIDE",
         "sku_name": sku_name,
         "tyre_name": tyre_name,
         "device": normalized_device,
@@ -506,7 +556,16 @@ def run_cycle(
     sku_name: Optional[str] = None,
     tyre_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Run every active view and return the common Apollo cycle payload."""
+    """Run the selected five-side PatchCore flow.
+
+    Dependency order is intentional:
+      1. Sidewall 1 and Sidewall 2 run first.
+      2. Innerwall, tread and bead reuse the configured source-side R anchor.
+
+    CPU preprocessing can run concurrently. PatchCoreScorer internally protects
+    the shared GPU backbone so five models do not execute unsafe overlapping
+    forwards on the same network object.
+    """
 
     del r_gpu_sem, yolo_gpu_sem
     sides = _resolve_sides(sides_to_run)
@@ -516,67 +575,147 @@ def run_cycle(
 
     if not isinstance(runtimes, dict) or not runtimes.get("configured"):
         raise RuntimeError("PatchCore runtimes were not preloaded.")
-    side_runtime_map = runtimes.get("side_runtimes") or {}
 
+    side_runtime_map = runtimes.get("side_runtimes") or {}
     started = time.perf_counter()
     cycle_dir = os.path.join(output_root, cycle_id)
     os.makedirs(cycle_dir, exist_ok=True)
     side_results: Dict[str, Dict[str, Any]] = {}
+    max_workers = max(1, min(get_max_parallel_workers(), len(sides)))
 
-    for index, side_name in enumerate(sides, start=1):
-        set_live_progress(
-            phase="INFERENCE",
-            active_zone=side_name,
-            images_captured=len(image_map),
-            total_images=len(sides),
-            message=f"PatchCore inference {index}/{len(sides)}: {side_name}",
-        )
+    def failed_result(side_name: str, error: Exception) -> Dict[str, Any]:
         side_output = os.path.join(cycle_dir, side_name)
+        os.makedirs(side_output, exist_ok=True)
+        failed = {
+            "side": side_name,
+            "input_image": image_map.get(side_name, ""),
+            "image": os.path.basename(image_map.get(side_name, "")),
+            "final_label": "FAILED",
+            "pipeline_status": "FAILED",
+            "error": f"{type(error).__name__}: {error}",
+            "defect_count": 0,
+            "defects": [],
+            "output_dir": side_output,
+        }
+        with open(
+            os.path.join(side_output, "inference_summary.json"),
+            "w",
+            encoding="utf-8",
+        ) as file:
+            json.dump(_json_safe(failed), file, indent=2, ensure_ascii=False)
+        logger.exception(
+            "PatchCore side inference failed",
+            extra={
+                "event_code": "PATCHCORE_INFERENCE_FAILED",
+                "cycle_id": cycle_id,
+                "sku_name": sku_name or runtimes.get("sku_name"),
+                "details": {"side": side_name, "error": str(error)},
+            },
+        )
+        return failed
+
+    def run_sidewall(side_name: str) -> tuple[str, Dict[str, Any]]:
         runtime = side_runtime_map.get(side_name)
         if runtime is None:
-            side_results[side_name] = {
-                "input_image": image_map[side_name],
-                "final_label": "FAILED",
-                "pipeline_status": "FAILED",
-                "error": f"No preloaded runtime for {side_name}",
-                "defect_count": 0,
-            }
-            continue
+            raise RuntimeError(f"No preloaded runtime for {side_name}")
+        result = runtime.process(
+            image_map[side_name],
+            os.path.join(cycle_dir, side_name),
+        )
+        return side_name, result
 
-        try:
-            side_results[side_name] = runtime.process(
-                image_map[side_name],
-                side_output,
+    def run_offset(
+        side_name: str,
+        r_anchor: Dict[str, Any],
+        r_source_side: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        runtime = side_runtime_map.get(side_name)
+        if runtime is None:
+            raise RuntimeError(f"No preloaded runtime for {side_name}")
+        result = runtime.process(
+            image_map[side_name],
+            os.path.join(cycle_dir, side_name),
+            r_anchor=r_anchor,
+            r_source_side=r_source_side,
+        )
+        return side_name, result
+
+    sidewall_sides = [side for side in sides if side in {"sidewall1", "sidewall2"}]
+    offset_sides = [side for side in sides if side in {"innerwall", "tread", "bead"}]
+
+    # Stage 1: both sidewalls can preprocess concurrently.
+    if sidewall_sides:
+        with ThreadPoolExecutor(
+            max_workers=min(max_workers, len(sidewall_sides)),
+            thread_name_prefix="patchcore-sidewall",
+        ) as pool:
+            future_map = {pool.submit(run_sidewall, side): side for side in sidewall_sides}
+            for index, future in enumerate(as_completed(future_map), start=1):
+                side_name = future_map[future]
+                set_live_progress(
+                    phase="INFERENCE",
+                    active_zone=side_name,
+                    images_captured=len(image_map),
+                    total_images=len(sides),
+                    message=f"PatchCore sidewall {index}/{len(sidewall_sides)}: {side_name}",
+                )
+                try:
+                    name, result = future.result()
+                    side_results[name] = result
+                except Exception as error:
+                    side_results[side_name] = failed_result(side_name, error)
+
+    # Stage 2: offset views depend on the configured sidewall R anchor.
+    if offset_sides:
+        r_source_side = get_r_source_side()
+        source_result = side_results.get(r_source_side) or {}
+        r_anchor = source_result.get("R_anchor")
+        if source_result.get("pipeline_status") != "COMPLETED" or not isinstance(r_anchor, dict):
+            dependency_error = RuntimeError(
+                f"{r_source_side} did not produce a valid R anchor; "
+                "innerwall/tread/bead cannot be processed."
             )
-        except Exception as error:
-            os.makedirs(side_output, exist_ok=True)
-            failed = {
-                "side": side_name,
-                "input_image": image_map[side_name],
-                "image": os.path.basename(image_map[side_name]),
+            for side_name in offset_sides:
+                side_results[side_name] = failed_result(side_name, dependency_error)
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(max_workers, len(offset_sides)),
+                thread_name_prefix="patchcore-offset",
+            ) as pool:
+                future_map = {
+                    pool.submit(run_offset, side, r_anchor, r_source_side): side
+                    for side in offset_sides
+                }
+                for index, future in enumerate(as_completed(future_map), start=1):
+                    side_name = future_map[future]
+                    set_live_progress(
+                        phase="INFERENCE",
+                        active_zone=side_name,
+                        images_captured=len(image_map),
+                        total_images=len(sides),
+                        message=f"PatchCore offset view {index}/{len(offset_sides)}: {side_name}",
+                    )
+                    try:
+                        name, result = future.result()
+                        side_results[name] = result
+                    except Exception as error:
+                        side_results[side_name] = failed_result(side_name, error)
+
+    # Preserve the configured side order in saved payloads and GUI consumption.
+    side_results = {
+        side: side_results.get(
+            side,
+            {
+                "side": side,
                 "final_label": "FAILED",
                 "pipeline_status": "FAILED",
-                "error": f"{type(error).__name__}: {error}",
+                "error": "No result was produced.",
                 "defect_count": 0,
                 "defects": [],
-                "output_dir": side_output,
-            }
-            side_results[side_name] = failed
-            with open(
-                os.path.join(side_output, "inference_summary.json"),
-                "w",
-                encoding="utf-8",
-            ) as file:
-                json.dump(_json_safe(failed), file, indent=2, ensure_ascii=False)
-            logger.exception(
-                "PatchCore side inference failed",
-                extra={
-                    "event_code": "PATCHCORE_INFERENCE_FAILED",
-                    "cycle_id": cycle_id,
-                    "sku_name": sku_name or runtimes.get("sku_name"),
-                    "details": {"side": side_name, "error": str(error)},
-                },
-            )
+            },
+        )
+        for side in sides
+    }
 
     elapsed = round(time.perf_counter() - started, 4)
     final_label = combine_tire_decision(side_results)
@@ -594,7 +733,7 @@ def run_cycle(
         "cycle_id": cycle_id,
         "sku_name": sku_name or runtimes.get("sku_name"),
         "tyre_name": tyre_name or runtimes.get("tyre_name"),
-        "pipeline": "PATCHCORE",
+        "pipeline": "PATCHCORE_FIVE_SIDE",
         "pipeline_status": pipeline_status,
         "final_label": final_label,
         "final_tire_label": final_label,
@@ -606,6 +745,7 @@ def run_cycle(
         "cycle_dir": cycle_dir,
         "image_map": image_map,
         "active_sides": sides,
+        "r_source_side": get_r_source_side(),
     }
 
     if SAVE_CYCLE_SUMMARY:
@@ -630,10 +770,10 @@ def run_cycle(
         active_zone="All Zones",
         images_captured=len(image_map),
         total_images=len(sides),
-        message=f"PatchCore inspection completed: {final_label}",
+        message=f"Five-side PatchCore inspection completed: {final_label}",
     )
     logger.info(
-        "PatchCore cycle completed",
+        "Five-side PatchCore cycle completed",
         extra={
             "event_code": "PATCHCORE_CYCLE_COMPLETED",
             "cycle_id": cycle_id,
@@ -645,3 +785,4 @@ def run_cycle(
         },
     )
     return payload
+

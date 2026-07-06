@@ -1,0 +1,20 @@
+{
+  "pipeline": "multiview",
+  "role": "tread",
+  "display_name": "Tread",
+  "sku_name": "SKU_001",
+  "out_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\SKU_001_tread_patchcore_model.pth",
+  "preprocess_output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\prepared_training",
+  "timing_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\training_timings.csv",
+  "preprocess_report_json": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\preprocess_report.json",
+  "coreset_percentage": 0.1,
+  "batch_size": 32,
+  "num_workers": 4,
+  "keep_generated_patches": false,
+  "anchor_role": "sidewall1",
+  "sidewall_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1",
+  "target_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread",
+  "r_template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png",
+  "calibration_json_path": "C:\\Users\\Hi\\Downloads\\tread_raw_to_patchcore_training_pipeline\\tyre_calibration.json",
+  "created_at": "2026-07-02T11:45:08"
+}

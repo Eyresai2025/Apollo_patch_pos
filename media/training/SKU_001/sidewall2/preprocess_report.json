@@ -1,0 +1,107 @@
+{
+  "raw_training_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2",
+  "raw_image_count": 1,
+  "successful_raw_image_count": 1,
+  "failed_raw_image_count": 0,
+  "successful_raw_images": [
+    "sidewall1_254901432_Cycle_1_20260608_194125_477967_ffc_corrected.png"
+  ],
+  "failed_raw_images": [],
+  "generated_training_patch_count": 400,
+  "preprocessing_time": 32.13671120000072,
+  "resize_width": 4036,
+  "resize_height": 17920,
+  "patch_width": 448,
+  "patch_height": 448,
+  "patch_stride_x": 448,
+  "patch_stride_y": 448,
+  "cover_complete_R_crop": true,
+  "image_statuses": [
+    {
+      "status": "success",
+      "raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2\\sidewall1_254901432_Cycle_1_20260608_194125_477967_ffc_corrected.png",
+      "raw_width": 4096,
+      "raw_height": 42000,
+      "R_match_boxes": [
+        {
+          "box": [
+            1633,
+            11833,
+            1907,
+            12053
+          ],
+          "score": 0.9973133206367493,
+          "tile_offset_x": 0,
+          "tile_offset_y": 8400
+        },
+        {
+          "box": [
+            1634,
+            29502,
+            1908,
+            29722
+          ],
+          "score": 0.9108138084411621,
+          "tile_offset_x": 0,
+          "tile_offset_y": 29400
+        }
+      ],
+      "R_bands": [
+        {
+          "top_y": 11833,
+          "bottom_y_inclusive": 12052,
+          "center_y": 11942,
+          "height": 220
+        },
+        {
+          "top_y": 29502,
+          "bottom_y_inclusive": 29721,
+          "center_y": 29612,
+          "height": 220
+        }
+      ],
+      "R_detection_metadata": {
+        "image_width": 4096,
+        "image_height": 42000,
+        "template_width": 274,
+        "template_height": 220,
+        "tile_count": 10,
+        "matched_tile_count": 2,
+        "box_count": 2,
+        "band_count": 2,
+        "threshold": 0.7,
+        "detection_time": 10.637775000010151
+      },
+      "top_R_band": {
+        "top_y": 11833,
+        "bottom_y_inclusive": 12052,
+        "center_y": 11942,
+        "height": 220
+      },
+      "bottom_R_band": {
+        "top_y": 29502,
+        "bottom_y_inclusive": 29721,
+        "center_y": 29612,
+        "height": 220
+      },
+      "R_crop_y_start": 11833,
+      "R_crop_y_end_exclusive": 29502,
+      "R_crop_width": 4096,
+      "R_crop_height": 17669,
+      "resized_R_crop_width": 4036,
+      "resized_R_crop_height": 17920,
+      "patch_count": 400,
+      "patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\prepared_training\\0001_sidewall1_254901432_Cycle_1_20260608_194125_477967_ffc_corrected\\patches_rtor1",
+      "R_detection_preview": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\prepared_training\\0001_sidewall1_254901432_Cycle_1_20260608_194125_477967_ffc_corrected\\00_R_DETECTION_PREVIEW.png",
+      "stage_times": {
+        "raw_image_load": 1.5920634999929462,
+        "R_detection": 10.65461409999989,
+        "raw_R_crop": 0.048816499998793006,
+        "optional_diagnostic_saves": 11.415066799992928,
+        "resize_and_resized_crop_save": 2.4020272999769077,
+        "vit_patch_generation": 5.960058199998457,
+        "total_preprocess_time": 32.07361590000801
+      }
+    }
+  ]
+}

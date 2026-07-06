@@ -907,10 +907,11 @@ class MainWindow(QMainWindow):
                     self,
                     "Local SKU Error",
                     "No locally configured SKU was found.\n\n"
-                    "Expected PatchCore files under:\n"
-                    "media/feature_threshold/<SKU>/sidewall1/\n\n"
-                    "and the matching template under:\n"
-                    "media/template_extractor/<SKU>/sidewall1/",
+                    "Expected five-side PatchCore artifacts under:\n"
+                    "media/training/<SKU>/<side>/\n"
+                    "media/feature_threshold/<SKU>/<side>/\n"
+                    "media/template_extractor/<SKU>/<side>/  (sidewalls)\n"
+                    "media/offset_calibration/<SKU>/<side>/  (inner/tread/bead)",
                 )
                 return
 

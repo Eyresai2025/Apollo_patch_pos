@@ -1,0 +1,17 @@
+{
+  "pipeline": "sidewall",
+  "role": "sidewall2",
+  "display_name": "Sidewall 2",
+  "sku_name": "SKU_001",
+  "out_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\SKU_001_sidewall2_patchcore_model.pth",
+  "preprocess_output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\prepared_training",
+  "timing_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\training_timings.csv",
+  "preprocess_report_json": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\preprocess_report.json",
+  "coreset_percentage": 0.1,
+  "batch_size": 32,
+  "num_workers": 4,
+  "keep_generated_patches": false,
+  "raw_train_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2",
+  "r_template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall2\\SKU_001_sidewall2_template.png",
+  "created_at": "2026-07-02T11:11:17"
+}

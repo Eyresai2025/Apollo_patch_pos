@@ -1,0 +1,189 @@
+{
+  "pipeline_start": "2026-07-02 11:45:14.470782",
+  "pipeline_end": "2026-07-02 11:46:02.534285",
+  "total_pipeline_time": 48.06395939999493,
+  "preprocessing": {
+    "sidewall_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1",
+    "tread_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread",
+    "R_template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png",
+    "calibration_JSON": "C:\\Users\\Hi\\Downloads\\tread_raw_to_patchcore_training_pipeline\\tyre_calibration.json",
+    "calibration": {
+      "tyre_type": "Aperra_Cross_Marked",
+      "one_rev_sidewall_px": 14666,
+      "sw_r1_top_y": 8764,
+      "sw_images_averaged": 1,
+      "one_rev_tread_px": 14661,
+      "tread_tape1_center_y": 10215,
+      "tread_images_averaged": 1,
+      "offset_ratio": 0.0989363152870585,
+      "scale_factor": 0.999659,
+      "phase2_crop_formula": {
+        "start_y": "R1_top_y_detected + offset_ratio * one_rev_sidewall_detected",
+        "end_y": "start_y + one_rev_tread_px",
+        "note": "one_rev_sidewall_detected = YOLO R detection at runtime; one_rev_tread_px = fixed from this calibration file"
+      },
+      "source_sidewall_json": "C:\\Users\\Lenovo\\Downloads\\Master_Tyres_resize\\Amperion_R16_Marked\\sidewall1\\corrected\\coordinates.json",
+      "source_tread_json": "C:\\Users\\Lenovo\\Downloads\\Master_Tyres_resize\\Amperion_R16_Marked\\tread\\corrected\\coordinates.json"
+    },
+    "matched_pair_count": 1,
+    "successful_pair_count": 1,
+    "failed_pair_count": 0,
+    "successful_pairs": [
+      "ordered_pair_000001"
+    ],
+    "failed_pairs": [],
+    "missing_in_tread": [],
+    "missing_in_sidewall": [],
+    "generated_training_patch_count": 115,
+    "preprocessing_time": 37.140666899998905,
+    "resize_target": {
+      "width": 2000,
+      "height": 10000
+    },
+    "patch_settings": {
+      "width": 448,
+      "height": 448,
+      "stride_x": 448,
+      "stride_y": 448,
+      "cover_complete": true
+    },
+    "pair_statuses": [
+      {
+        "status": "success",
+        "pair_index": 1,
+        "cycle_key": "ordered_pair_000001",
+        "sidewall_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\sidewall1_254901432_Cycle_1_20260608_194125_477967_ffc_corrected.png",
+        "tread_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread\\4.png",
+        "R_template": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png",
+        "calibration_JSON": "C:\\Users\\Hi\\Downloads\\tread_raw_to_patchcore_training_pipeline\\tyre_calibration.json",
+        "calibration": {
+          "tyre_type": "Aperra_Cross_Marked",
+          "one_rev_sidewall_px": 14666,
+          "sw_r1_top_y": 8764,
+          "sw_images_averaged": 1,
+          "one_rev_tread_px": 14661,
+          "tread_tape1_center_y": 10215,
+          "tread_images_averaged": 1,
+          "offset_ratio": 0.0989363152870585,
+          "scale_factor": 0.999659,
+          "phase2_crop_formula": {
+            "start_y": "R1_top_y_detected + offset_ratio * one_rev_sidewall_detected",
+            "end_y": "start_y + one_rev_tread_px",
+            "note": "one_rev_sidewall_detected = YOLO R detection at runtime; one_rev_tread_px = fixed from this calibration file"
+          },
+          "source_sidewall_json": "C:\\Users\\Lenovo\\Downloads\\Master_Tyres_resize\\Amperion_R16_Marked\\sidewall1\\corrected\\coordinates.json",
+          "source_tread_json": "C:\\Users\\Lenovo\\Downloads\\Master_Tyres_resize\\Amperion_R16_Marked\\tread\\corrected\\coordinates.json"
+        },
+        "sidewall_raw_shape": [
+          42000,
+          4096
+        ],
+        "tread_raw_shape": [
+          30000,
+          4096
+        ],
+        "R_anchor": {
+          "R1_top_y": 11833,
+          "R2_top_y": 29502,
+          "one_rev_height": 17669,
+          "R1_box": {
+            "x1": 1633.0,
+            "y1": 11833.0,
+            "x2": 1907.0,
+            "y2": 12052.0,
+            "conf": 0.9973133206367493,
+            "cx": 1770.0,
+            "cy": 11942.5,
+            "w": 274.0,
+            "h": 219.0
+          },
+          "R2_box": {
+            "x1": 1634.0,
+            "y1": 29502.0,
+            "x2": 1908.0,
+            "y2": 29721.0,
+            "conf": 0.9108138084411621,
+            "cx": 1771.0,
+            "cy": 29611.5,
+            "w": 274.0,
+            "h": 219.0
+          }
+        },
+        "all_R_detections": [
+          {
+            "x1": 1633.0,
+            "y1": 11833.0,
+            "x2": 1907.0,
+            "y2": 12052.0,
+            "conf": 0.9973133206367493,
+            "cx": 1770.0,
+            "cy": 11942.5,
+            "w": 274.0,
+            "h": 219.0
+          },
+          {
+            "x1": 1634.0,
+            "y1": 29502.0,
+            "x2": 1908.0,
+            "y2": 29721.0,
+            "conf": 0.9108138084411621,
+            "cx": 1771.0,
+            "cy": 29611.5,
+            "w": 274.0,
+            "h": 219.0
+          }
+        ],
+        "tread_crop_window": {
+          "start_y": 13581,
+          "end_y_exclusive": 28242,
+          "height": 14661,
+          "warnings": []
+        },
+        "tread_crop_original_shape": [
+          14661,
+          4096
+        ],
+        "tread_crop_resized_shape": [
+          10000,
+          2000
+        ],
+        "patch_count": 115,
+        "patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\prepared_training\\0001_ordered_pair_000001\\patches_rtor1",
+        "outputs": {
+          "original_tread_crop": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\prepared_training\\0001_ordered_pair_000001\\01_TREAD_CROP_ORIGINAL.png",
+          "resized_tread_crop": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\prepared_training\\0001_ordered_pair_000001\\02_TREAD_CROP_2000x10000.png",
+          "sidewall_R_overlay": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\prepared_training\\0001_ordered_pair_000001\\03_SIDEWALL_R_OVERLAY.png",
+          "tread_crop_overlay": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\prepared_training\\0001_ordered_pair_000001\\04_TREAD_CROP_WINDOW_OVERLAY.png"
+        },
+        "stage_times": {
+          "image_loading": 2.6215537000098266,
+          "sidewall_R_detection": 10.847297300002538,
+          "crop_window_calculation": 9.799987310543656e-06,
+          "raw_tread_crop": 0.043119800015119836,
+          "tread_resize": 0.03015679999953136,
+          "crop_image_saves": 2.7088754999858793,
+          "debug_overlay_saves": 19.161923099978594,
+          "vit_patch_generation": 1.6853229000116698,
+          "total_preprocess_time": 37.09878159998334
+        }
+      }
+    ]
+  },
+  "training": {
+    "device": "cuda",
+    "generated_training_patch_count": 115,
+    "successfully_loaded_training_patch_count": 115,
+    "feature_patch_count_before_coreset": 1840,
+    "memory_bank_shape": [
+      184,
+      9216
+    ],
+    "coreset_percentage": 0.1,
+    "feature_extraction_time": 7.362928399990778,
+    "memory_build_time": 0.039713800011668354,
+    "coreset_time": 0.004074800002854317,
+    "model_save_time": 0.008739400014746934,
+    "total_training_time": 9.733168300008401,
+    "model_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\SKU_001_tread_patchcore_model.pth"
+  }
+}

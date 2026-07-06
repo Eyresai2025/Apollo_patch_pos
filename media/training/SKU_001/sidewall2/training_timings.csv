@@ -1,0 +1,13 @@
+timestamp,stage,item_start,item_end,count,duration_s,notes
+2026-07-02 11:11:55,raw_preprocess,1,1,400,32.0736,sidewall1_254901432_Cycle_1_20260608_194125_477967_ffc_corrected.png
+2026-07-02 11:11:55,complete_raw_preprocessing,1,1,400,32.1367,"successful_raw=1,failed_raw=0"
+2026-07-02 11:12:22,training_image_progress,0,31,32,0.9018,
+2026-07-02 11:12:22,training_image_progress,96,127,32,0.0385,
+2026-07-02 11:12:22,training_image_progress,192,223,32,0.0384,
+2026-07-02 11:12:22,training_image_progress,288,319,32,0.0392,
+2026-07-02 11:12:23,training_image_progress,384,399,16,0.2900,
+2026-07-02 11:12:23,feature_extraction,0,399,6400,25.3570,generated_R_crop_patches
+2026-07-02 11:12:23,build_memory_bank,0,0,"torch.Size([6400, 9216])",0.1333,in_memory_concat
+2026-07-02 11:12:23,coreset_subsample,0,0,"torch.Size([640, 9216])",0.0056,percentage=0.1
+2026-07-02 11:12:23,final_model_save,0,0,"torch.Size([640, 9216])",0.0531,out_path=C:\Users\Hi\OneDrive - radometech.com\Desktop\Apollo_patch_pos\media\training\SKU_001\sidewall2\SKU_001_sidewall2_patchcore_model.pth
+2026-07-02 11:12:24,complete_pipeline,0,0,400,61.1403,model=C:\Users\Hi\OneDrive - radometech.com\Desktop\Apollo_patch_pos\media\training\SKU_001\sidewall2\SKU_001_sidewall2_patchcore_model.pth
