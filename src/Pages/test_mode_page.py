@@ -15,6 +15,7 @@ from src.COMMON.full_hardware_check import start_full_hardware_check_from_test_p
 from src.COMMON.db import save_test_mode_result, get_alarm_service
 from src.COMMON.security import Permission, SessionContext
 from src.Pages.alarm_center_page import AlarmCenterPage
+from src.Pages.lab_camera_mode_page import LabCameraModeTab
 
 
 def _card():
@@ -578,6 +579,7 @@ class TestModePage(QWidget):
         self.on_close = on_close
         self.hardware_tab = None
         self.alarm_center_page = None
+        self.lab_camera_tab = None
 
         self.setStyleSheet("QWidget { background-color: #f5f5f5; }")
         root = QVBoxLayout(self)
@@ -628,6 +630,14 @@ class TestModePage(QWidget):
                 parent=self,
             )
             self.tabs.addTab(self.hardware_tab, "Hardware Test")
+
+            # Lab-only camera software-trigger cycle. This is separate from
+            # production Auto Start and does not use PLC trigger/result sending.
+            self.lab_camera_tab = LabCameraModeTab(
+                media_path=media_path,
+                parent=self,
+            )
+            self.tabs.addTab(self.lab_camera_tab, "Lab Camera AI")
 
         if has_alarm:
             service = alarm_service or get_alarm_service()
