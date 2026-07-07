@@ -139,6 +139,7 @@ class PatchRecord:
     y: int
     width: int
     height: int
+    path: Optional[Path] = None
     score: float = 0.0
     is_defective: bool = False
 
@@ -544,6 +545,22 @@ def _axis_starts(length: int, patch_size: int, step: int, cover_edges: bool) -> 
     return starts
 
 
+def _natural_key(value: str | Path) -> list[Any]:
+    name = value.name if isinstance(value, Path) else str(value)
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
+
+
+def _save_lossless_temp_image(image: np.ndarray, path: Path, png_compression: int = 0) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        ok = cv2.imwrite(str(path), image, [cv2.IMWRITE_PNG_COMPRESSION, int(png_compression)])
+    else:
+        ok = cv2.imwrite(str(path), image)
+    if not ok:
+        raise OSError(f"Unable to save temporary PatchCore image: {path}")
+
+
 def _build_patch_records(
     width: int,
     height: int,
@@ -568,20 +585,12 @@ def _batched(items: list[PatchRecord], batch_size: int):
 
 
 def _to_uint8_preview(image: np.ndarray) -> np.ndarray:
-    """Convert result preview to uint8 exactly like the AI-team pipeline.
-
-    Important: this is used only when saving/displaying the detection image.
-    The PatchCore scoring image remains unchanged. The previous integration used
-    1st-99th percentile stretching here, which can clip bright tyre reflection
-    bands to pure white. The standalone AI pipeline uses full min/max scaling
-    for result previews, so we keep the same behavior here.
-    """
+    """AI-team preview conversion: use full min/max, not percentile stretch."""
     if image.dtype == np.uint8:
         return image
 
     minimum = float(np.min(image))
     maximum = float(np.max(image))
-
     if maximum <= minimum:
         return np.zeros(image.shape, dtype=np.uint8)
 
@@ -591,19 +600,16 @@ def _to_uint8_preview(image: np.ndarray) -> np.ndarray:
 
 
 def _to_preview_bgr(image: np.ndarray) -> np.ndarray:
-    """Create a drawable BGR image without changing brightness/bit depth.
-
-    This matches the AI-team inference files: draw boxes on the unchanged crop
-    first, then convert only the final saved preview to uint8.
-    """
+    """AI-team drawing behavior: draw on the original dtype image first."""
     if image.ndim == 2:
         return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     if image.ndim == 3 and image.shape[2] == 4:
-        return cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGRA2BGR)
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
     return image.copy()
 
 
 def _save_result_preview(path: Path, image: np.ndarray, jpeg_quality: int) -> None:
+    """Save the visual result exactly like AI-team scripts: min/max preview only at save time."""
     preview = _to_uint8_preview(image)
     if not cv2.imwrite(
         str(path),
@@ -624,13 +630,13 @@ def _draw_patch_boxes(
 ) -> np.ndarray:
     preview = _to_preview_bgr(source_image)
 
-    maximum_value = (
-        int(np.iinfo(preview.dtype).max)
+    max_val = (
+        np.iinfo(preview.dtype).max
         if np.issubdtype(preview.dtype, np.integer)
-        else 1
+        else 1.0
     )
-    red_colour = (0, 0, maximum_value)
-    white_colour = (maximum_value, maximum_value, maximum_value)
+    red = (0, 0, max_val)
+    white = (max_val, max_val, max_val)
 
     for patch in patches:
         if not patch.is_defective:
@@ -639,26 +645,26 @@ def _draw_patch_boxes(
         y1 = max(0, int(round(patch.y * scale_y)))
         x2 = min(preview.shape[1] - 1, int(round(patch.x2 * scale_x)) - 1)
         y2 = min(preview.shape[0] - 1, int(round(patch.y2 * scale_y)) - 1)
-        cv2.rectangle(preview, (x1, y1), (x2, y2), red_colour, box_width, cv2.LINE_8)
+        cv2.rectangle(preview, (x1, y1), (x2, y2), red, box_width, cv2.LINE_8)
         if draw_score_labels:
             label = f"DEFECT {patch.score:.4f}"
-            text_x = x1 + box_width + 3
-            text_y = min(preview.shape[0] - 8, y1 + 28)
-            (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+            (tw, th), base = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+            tx = x1 + box_width + 3
+            ty = min(preview.shape[0] - 8, y1 + 28)
             cv2.rectangle(
                 preview,
-                (text_x - 4, max(0, text_y - th - 7)),
-                (min(preview.shape[1] - 1, text_x + tw + 5), min(preview.shape[0] - 1, text_y + baseline + 4)),
-                white_colour,
+                (tx - 4, max(0, ty - th - 7)),
+                (min(preview.shape[1] - 1, tx + tw + 5), min(preview.shape[0] - 1, ty + base + 4)),
+                white,
                 -1,
             )
             cv2.putText(
                 preview,
                 label,
-                (text_x, text_y),
+                (tx, ty),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
-                red_colour,
+                red,
                 2,
                 cv2.LINE_AA,
             )
@@ -751,6 +757,23 @@ class PatchCoreSideRuntime:
         self.result_jpeg_quality = _as_int(
             raw.get("PATCHCORE_RESULT_JPEG_QUALITY", "90"), 90
         )
+        # AI-team updated inference now writes the prepared crop and generated
+        # patches to a temporary folder, then scores the patch image paths.
+        # This prevents stale in-memory patch arrays from being reused across
+        # sides/cycles and mirrors their latest maincycle pipeline.
+        self.use_temp_patch_files = _as_bool(
+            raw.get("PATCHCORE_USE_TEMP_PATCH_FILES", "True"), True
+        )
+        self.keep_temp_patch_files = _as_bool(
+            raw.get("PATCHCORE_KEEP_TEMP_PATCH_FILES", "False"), False
+        )
+        self.temp_png_compression = min(
+            9,
+            max(
+                0,
+                _as_int(raw.get("PATCHCORE_TEMP_PNG_COMPRESSION", "0"), 0, minimum=0),
+            ),
+        )
 
         patch_cfg = dict(self.artifacts.threshold_metadata.get("patch_configuration") or {})
         processing = dict(self.artifacts.threshold_metadata.get("processing") or {})
@@ -838,28 +861,153 @@ class PatchCoreSideRuntime:
     def signature(self) -> tuple:
         return self.artifacts.signature
 
-    def _score_prepared(self, prepared: np.ndarray) -> list[PatchRecord]:
-        records = _build_patch_records(
-            width=int(prepared.shape[1]),
-            height=int(prepared.shape[0]),
-            patch_width=self.patch_width,
-            patch_height=self.patch_height,
-            stride_x=self.patch_stride_x,
-            stride_y=self.patch_stride_y,
-            cover_edges=self.cover_complete,
+    def _make_temp_patch_root(self, side_output: Path, prepared_stem: str) -> Path:
+        return side_output / "_runtime_temp" / prepared_stem
+
+    def _generate_temp_patch_files(
+        self,
+        prepared: np.ndarray,
+        side_output: Path,
+        prepared_stem: str,
+    ) -> tuple[list[PatchRecord], Path]:
+        """Save prepared crop and generate Vit_patch-compatible patch PNG files.
+
+        The AI-team updated inference changed from in-memory patch arrays to:
+            saved resized crop -> saved patch PNGs -> score_batch(paths).
+
+        This implementation intentionally reopens the saved lossless PNG before
+        cutting patches, so the scorer consumes the same disk-backed pixels that
+        their latest scripts consume.  Filenames match Vit_patch.py:
+            <crop_stem>__r000_c000.png
+        """
+        temp_root = self._make_temp_patch_root(side_output, prepared_stem)
+        if temp_root.exists():
+            shutil.rmtree(temp_root)
+        temp_root.mkdir(parents=True, exist_ok=True)
+
+        resized_crop_path = temp_root / f"{prepared_stem}.png"
+        _save_lossless_temp_image(
+            prepared,
+            resized_crop_path,
+            png_compression=self.temp_png_compression,
         )
-        for batch in _batched(records, IMAGE_BATCH_SIZE):
-            arrays = [
-                prepared[item.y : item.y2, item.x : item.x2]
-                for item in batch
-            ]
-            scores = self.scorer.score_array_batch(arrays)
-            if len(scores) != len(batch):
-                raise RuntimeError("PatchCore returned an unexpected number of scores.")
-            for item, score in zip(batch, scores):
-                item.score = float(score)
-                item.is_defective = item.score > self.artifacts.threshold
-        return records
+
+        # IMPORTANT: match AI-team Vit_patch.py exactly.
+        # Their patcher calls cv2.imread(file_path) WITHOUT IMREAD_UNCHANGED.
+        # For 16-bit mono PNG crops this converts the saved crop into an 8-bit
+        # 3-channel BGR image before cutting patches. PatchCore thresholds were
+        # generated from those saved patch pixels, so live inference must use the
+        # same decoded pixel representation. Using IMREAD_UNCHANGED here keeps
+        # 16-bit mono data and changes anomaly scores.
+        reopened = cv2.imread(str(resized_crop_path))
+        if reopened is None:
+            raise RuntimeError(f"Cannot reopen temporary prepared crop: {resized_crop_path}")
+
+        patch_folder = temp_root / "patches_rtor1"
+        if patch_folder.exists():
+            shutil.rmtree(patch_folder)
+        patch_folder.mkdir(parents=True, exist_ok=True)
+
+        crop_height, crop_width = reopened.shape[:2]
+        x_starts = _axis_starts(crop_width, self.patch_width, self.patch_stride_x, self.cover_complete)
+        y_starts = _axis_starts(crop_height, self.patch_height, self.patch_stride_y, self.cover_complete)
+
+        records: list[PatchRecord] = []
+        extension = resized_crop_path.suffix.lower()
+        base_name = resized_crop_path.stem
+
+        for row, y in enumerate(y_starts):
+            for col, x in enumerate(x_starts):
+                patch_image = reopened[y : y + self.patch_height, x : x + self.patch_width]
+                if patch_image.shape[0] != self.patch_height or patch_image.shape[1] != self.patch_width:
+                    raise RuntimeError(
+                        f"Generated incomplete PatchCore patch row={row}, col={col}, "
+                        f"shape={patch_image.shape}"
+                    )
+                patch_path = patch_folder / f"{base_name}__r{row:03d}_c{col:03d}{extension}"
+                _save_lossless_temp_image(
+                    patch_image,
+                    patch_path,
+                    png_compression=self.temp_png_compression,
+                )
+                records.append(
+                    PatchRecord(
+                        row=row,
+                        col=col,
+                        x=int(x),
+                        y=int(y),
+                        width=int(self.patch_width),
+                        height=int(self.patch_height),
+                        path=patch_path,
+                    )
+                )
+
+        if not records:
+            raise RuntimeError("Temporary PatchCore patch generation produced no patches.")
+
+        # Sort exactly like the AI helper's natural filename order before scoring.
+        records.sort(key=lambda item: _natural_key(item.path or ""))
+        return records, temp_root
+
+    def _score_prepared(
+        self,
+        prepared: np.ndarray,
+        side_output: Path,
+        *,
+        prepared_stem: str,
+    ) -> tuple[list[PatchRecord], dict[str, Any]]:
+        if not self.use_temp_patch_files:
+            records = _build_patch_records(
+                width=int(prepared.shape[1]),
+                height=int(prepared.shape[0]),
+                patch_width=self.patch_width,
+                patch_height=self.patch_height,
+                stride_x=self.patch_stride_x,
+                stride_y=self.patch_stride_y,
+                cover_edges=self.cover_complete,
+            )
+            for batch in _batched(records, IMAGE_BATCH_SIZE):
+                arrays = [prepared[item.y : item.y2, item.x : item.x2] for item in batch]
+                scores = self.scorer.score_array_batch(arrays)
+                if len(scores) != len(batch):
+                    raise RuntimeError("PatchCore returned an unexpected number of scores.")
+                for item, score in zip(batch, scores):
+                    item.score = float(score)
+                    item.is_defective = item.score > self.artifacts.threshold
+            return records, {
+                "patch_io_mode": "memory_arrays",
+                "temporary_patch_files_used": False,
+                "temporary_patch_files_removed": True,
+            }
+
+        temp_root: Optional[Path] = None
+        try:
+            records, temp_root = self._generate_temp_patch_files(
+                prepared,
+                side_output,
+                prepared_stem=prepared_stem,
+            )
+            for batch in _batched(records, IMAGE_BATCH_SIZE):
+                patch_paths = [item.path for item in batch if item.path is not None]
+                if len(patch_paths) != len(batch):
+                    raise RuntimeError("A generated patch record is missing its file path.")
+                scores = self.scorer.score_batch(patch_paths)
+                if len(scores) != len(batch):
+                    raise RuntimeError("PatchCore returned an unexpected number of scores.")
+                for item, score in zip(batch, scores):
+                    item.score = float(score)
+                    item.is_defective = item.score > self.artifacts.threshold
+            return records, {
+                "patch_io_mode": "disk_temp_vit_patch_compatible",
+                "temporary_patch_files_used": True,
+                "temporary_patch_root": str(temp_root),
+                "temporary_patch_files_removed": not self.keep_temp_patch_files,
+                "temporary_patch_format": "png",
+                "temporary_png_compression": int(self.temp_png_compression),
+            }
+        finally:
+            if temp_root is not None and not self.keep_temp_patch_files:
+                shutil.rmtree(temp_root, ignore_errors=True)
 
     def process(
         self,
@@ -921,7 +1069,7 @@ class PatchCoreSideRuntime:
                 "type": "PATCHCORE_ANOMALY",
                 "score": float(patch.score),
                 "threshold": float(self.artifacts.threshold),
-                "patch_name": f"patch__r{patch.row:03d}_c{patch.col:03d}.png",
+                "patch_name": (patch.path.name if patch.path is not None else f"patch__r{patch.row:03d}_c{patch.col:03d}.png"),
                 "bbox": {
                     "x1": int(round(patch.x * scale_x)),
                     "y1": int(crop_start_y + round(patch.y * scale_y)),
@@ -1014,7 +1162,11 @@ class PatchCoreSideRuntime:
             raw_image, r_bands
         )
         prepared = cv2.resize(raw_crop, (self.resize_width, self.resize_height))
-        patches = self._score_prepared(prepared)
+        patches, patch_io_metadata = self._score_prepared(
+            prepared,
+            side_output,
+            prepared_stem=f"{self.side_name}_{raw_path.stem}_resized_crop",
+        )
 
         scale_x = raw_crop.shape[1] / float(self.resize_width)
         scale_y = raw_crop.shape[0] / float(self.resize_height)
@@ -1055,6 +1207,7 @@ class PatchCoreSideRuntime:
                 "R_crop_y_start": int(y_start),
                 "R_crop_y_end_exclusive": int(y_end),
                 "R_anchor": r_anchor,
+                **patch_io_metadata,
             },
         )
 
@@ -1102,7 +1255,11 @@ class PatchCoreSideRuntime:
                 f"Calculated {self.side_name} crop is empty: start={start_y}, end={end_y}"
             )
         prepared = cv2.resize(target_crop, (self.resize_width, self.resize_height))
-        patches = self._score_prepared(prepared)
+        patches, patch_io_metadata = self._score_prepared(
+            prepared,
+            side_output,
+            prepared_stem=f"{self.side_name}_{raw_path.stem}_resized_crop",
+        )
 
         scale_x = target_crop.shape[1] / float(self.resize_width)
         scale_y = target_crop.shape[0] / float(self.resize_height)
@@ -1136,5 +1293,6 @@ class PatchCoreSideRuntime:
                 "crop_end_y": int(end_y),
                 "offset_ratio": float(calibration["offset_ratio"]),
                 "one_rev_target_px": int(one_rev_target),
+                **patch_io_metadata,
             },
         )
