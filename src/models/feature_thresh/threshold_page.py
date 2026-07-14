@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (  # type: ignore
 
 from .config import ALL_ROLES, DEFAULT_PERCENTILE, IMAGE_EXTENSIONS, SIDEWALL_ROLES
 from .threshold_service import calculate_threshold_for_image
+from .five_side_threshold_service import run_five_side_threshold_cycle
 from src.COMMON.new_sku_capture_paths import resolve_role_folder
 
 
@@ -59,6 +60,25 @@ class ThresholdWorker(QThread):
                 **self.kwargs,
                 status_callback=self.statusSignal.emit,
                 progress_callback=self.progressSignal.emit,
+            )
+            self.finishedSignal.emit(dict(result or {}))
+        except Exception as exc:
+            self.errorSignal.emit(f"{type(exc).__name__}: {exc}")
+
+
+class FiveSideThresholdWorker(QThread):
+    statusSignal = pyqtSignal(str)
+    finishedSignal = pyqtSignal(dict)
+    errorSignal = pyqtSignal(str)
+
+    def __init__(self, kwargs: dict, parent=None):
+        super().__init__(parent)
+        self.kwargs = dict(kwargs)
+
+    def run(self) -> None:
+        try:
+            result = run_five_side_threshold_cycle(
+                **self.kwargs, status_callback=self.statusSignal.emit
             )
             self.finishedSignal.emit(dict(result or {}))
         except Exception as exc:
@@ -296,7 +316,7 @@ class FeatureThresholdPage(QWidget):
         self.template_assets_provider = template_assets_provider
         self.active_role = "sidewall1"
         self._context_sku = ""
-        self.worker: Optional[ThresholdWorker] = None
+        self.worker: Optional[QThread] = None
 
         self.states: Dict[str, Dict[str, Any]] = {
             role: self._empty_state() for role in ALL_ROLES
@@ -320,6 +340,7 @@ class FeatureThresholdPage(QWidget):
         self.status_label: Optional[QLabel] = None
         self.result_label: Optional[QLabel] = None
         self.run_button: Optional[QPushButton] = None
+        self.run_all_button: Optional[QPushButton] = None
         self.active_title: Optional[QLabel] = None
 
         self._build_ui()
@@ -575,6 +596,10 @@ class FeatureThresholdPage(QWidget):
         self.status_label.setObjectName("HintText")
         self.status_label.setWordWrap(True)
         action_layout.addWidget(self.status_label, 1)
+
+        self.run_all_button = self._make_button("Run All 5 Sides", "success")
+        self.run_all_button.clicked.connect(self.start_all_threshold_calculation)
+        action_layout.addWidget(self.run_all_button)
 
         self.run_button = self._make_button("Run Current View", "primary")
         self.run_button.clicked.connect(self.start_threshold_calculation)
@@ -1040,6 +1065,92 @@ class FeatureThresholdPage(QWidget):
             self.progress.setValue(max(0, min(100, int(value))))
         if self.progress_label is not None:
             self.progress_label.setText(message)
+
+    def _validate_all_five_inputs(self) -> Optional[str]:
+        self._store_active_percentile()
+        missing = []
+        for role in ALL_ROLES:
+            state = self.states[role]
+            image = Path(str(state.get("image_path") or ""))
+            model = Path(str(state.get("model_path") or ""))
+            if not image.is_file():
+                missing.append(f"{self.ROLE_INFO[role]} GOOD reference image")
+            if not model.is_file():
+                missing.append(f"{self.ROLE_INFO[role]} PatchCore model")
+            if role in SIDEWALL_ROLES:
+                if not Path(str(state.get("template_path") or "")).is_file():
+                    missing.append(f"{self.ROLE_INFO[role]} R template")
+                if not Path(str(state.get("recipe_path") or "")).is_file():
+                    missing.append(f"{self.ROLE_INFO[role]} fast R recipe")
+        sku = self._current_sku_name()
+        for role in ("tread", "innerwall", "bead"):
+            folder = self.media_path / "offset_calibration" / sku / role
+            if not folder.is_dir() or not any(
+                p.is_file() and "calibration" in p.name.lower() and p.suffix.lower() == ".json"
+                for p in folder.iterdir()
+            ):
+                missing.append(f"{self.ROLE_INFO[role]} offset calibration JSON")
+        if missing:
+            return "The five-side threshold cycle cannot start.\n\nMissing:\n- " + "\n- ".join(missing)
+        return None
+
+    def start_all_threshold_calculation(self) -> None:
+        if self.is_running:
+            return
+        sku = self._current_sku_name()
+        if sku == "unknown_sku":
+            QMessageBox.warning(self, "Feature Threshold", "Complete and save SKU Setup first.")
+            return
+        self._apply_context_defaults(restore_existing=False)
+        error = self._validate_all_five_inputs()
+        if error:
+            QMessageBox.warning(self, "Five-Side Threshold", error)
+            return
+        # Use the selected percentile from the active view as the common value.
+        common_percentile = float(self.percentile_spin.value() if self.percentile_spin else DEFAULT_PERCENTILE)
+        for state in self.states.values():
+            state["percentile"] = common_percentile
+        kwargs = {
+            "media_path": self.media_path,
+            "project_root": self.project_root,
+            "sku_name": sku,
+            "states": {role: dict(state) for role, state in self.states.items()},
+            "percentile": common_percentile,
+            "save_processing_images": bool(
+                self.keep_processing_check.isChecked() if self.keep_processing_check else True
+            ),
+        }
+        self._set_controls_enabled(False)
+        self._start_busy_progress("Running all five threshold jobs...")
+        if self.status_label is not None:
+            self.status_label.setText("Starting AI-team five-side threshold cycle...")
+        self.worker = FiveSideThresholdWorker(kwargs, self)
+        self.worker.statusSignal.connect(self._on_worker_status)
+        self.worker.finishedSignal.connect(self._on_all_worker_finished)
+        self.worker.errorSignal.connect(self._on_worker_error)
+        self.worker.start()
+
+    def _on_all_worker_finished(self, assets: dict) -> None:
+        assets = dict(assets or {})
+        for role in ALL_ROLES:
+            result = dict(assets.get(role) or {})
+            if result:
+                self.states[role]["result"] = result
+                self.thresholdSaved.emit(role, result)
+        self._set_controls_enabled(True)
+        self._reset_progress("All five sides completed", 100)
+        self._refresh_role_styles()
+        self._show_result(self.states[self.active_role].get("result") or {})
+        if self.status_label is not None:
+            self.status_label.setText("All five PatchCore thresholds were calculated successfully.")
+        if self.worker is not None:
+            self.worker.deleteLater()
+            self.worker = None
+        QMessageBox.information(
+            self,
+            "Five-Side Threshold Completed",
+            "Threshold calculation completed successfully for Sidewall 1, Sidewall 2, Tread, Inner Side and Bead.",
+        )
 
     def start_threshold_calculation(self) -> None:
         if self.is_running:

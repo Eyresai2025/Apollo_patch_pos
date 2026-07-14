@@ -21,11 +21,15 @@ from src.COMMON.recipe_service import RecipeService
 from src.COMMON.new_sku_capture_paths import (
     find_latest_image as find_latest_cycle_image,
     latest_cycle_dir,
+    next_cycle_dir,
     resolve_role_folder,
 )
 from src.models.template_extracter import TemplateExtractorPage
 from src.models.new_sku_training.training_page import NewSKUTrainingPage
+from src.models.new_sku_training.r_recipe_page import RRecipeCreationPage
 from src.models.new_sku_offset.offset_page import OffsetCalculationPage
+from src.models.patch_creation.patch_creation_page import PatchCreationPage
+from src.models.augmentation.augmentation_page import AugmentationPage
 from src.models.feature_thresh.threshold_page import FeatureThresholdPage
 
 try:
@@ -40,10 +44,13 @@ TAB_SKU_SETUP = 0
 TAB_AXIS_TEACHING = 1
 TAB_CAPTURE = 2
 TAB_IMAGE_PROCESSING = 3
-TAB_OFFSET_CALCULATION = 4
-TAB_TRAINING = 5
-TAB_FEATURE_THRESHOLD = 6
-TAB_SAVE_RECIPE = 7
+TAB_R_RECIPE_CREATION = 4
+TAB_OFFSET_CALCULATION = 5
+TAB_PATCH_CREATION = 6
+TAB_AUGMENTATION = 7
+TAB_TRAINING = 8
+TAB_FEATURE_THRESHOLD = 9
+TAB_SAVE_RECIPE = 10
 
 # Backward-compatible alias used by older helper names.
 TAB_TEMPLATE_EXTRACTOR = TAB_IMAGE_PROCESSING
@@ -312,6 +319,126 @@ class FlexibleStackedWidget(QStackedWidget):
         return QSize(0, 0)
 
 
+class ExistingSKUDialog(QDialog):
+    """Compact selector for loading the newest saved version of an SKU."""
+
+    def __init__(self, recipes: List[Dict[str, Any]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Load Existing SKU")
+        self.setModal(True)
+        self.setMinimumWidth(660)
+        self._recipes = [dict(item or {}) for item in recipes]
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 18)
+        root.setSpacing(12)
+
+        title = QLabel("Load Existing SKU")
+        title.setStyleSheet(
+            "font:800 18px 'Segoe UI'; color:#571c86; background:transparent;"
+        )
+        root.addWidget(title)
+
+        subtitle = QLabel(
+            "Select an already saved SKU. Its latest recipe version, axis targets, "
+            "templates, offsets, trained models and thresholds will be restored."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet(
+            "font:500 10pt 'Segoe UI'; color:#7b7288; background:transparent;"
+        )
+        root.addWidget(subtitle)
+
+        selector_label = QLabel("Saved SKU")
+        selector_label.setStyleSheet(
+            "font:700 10pt 'Segoe UI'; color:#571c86; background:transparent;"
+        )
+        root.addWidget(selector_label)
+
+        self.selector = QComboBox()
+        self.selector.setMinimumHeight(40)
+        self.selector.setStyleSheet(
+            "QComboBox { background:#ffffff; border:1px solid #d9d0e6; "
+            "border-radius:10px; padding:0 12px; color:#2f2a36; } "
+            "QComboBox:focus { border:2px solid #6a2ca0; }"
+        )
+        for item in self._recipes:
+            sku_name = str(item.get("sku_name") or "UNKNOWN")
+            recipe_number = item.get("recipe_number") or item.get("plc_recipe_number")
+            version = item.get("version", "-")
+            source = str(item.get("record_source") or "RECIPE")
+            version_text = "Setup only" if source == "SKU_SETUP" else f"Version {version}"
+            tyre_name = str(item.get("tyre_name") or "").strip()
+            text = f"{sku_name}  |  Recipe {recipe_number or '-'}  |  {version_text}"
+            if tyre_name and tyre_name.lower() != sku_name.lower():
+                text += f"  |  {tyre_name}"
+            self.selector.addItem(text, item)
+        self.selector.currentIndexChanged.connect(self._refresh_details)
+        root.addWidget(self.selector)
+
+        self.details = QLabel()
+        self.details.setWordWrap(True)
+        self.details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.details.setStyleSheet(
+            "QLabel { background:#faf8fd; border:1px solid #ebe3f4; "
+            "border-radius:12px; padding:12px; color:#5f5669; "
+            "font:500 9.5pt 'Segoe UI'; }"
+        )
+        root.addWidget(self.details)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+
+        cancel_button = QPushButton("Cancel")
+        load_button = QPushButton("Load SKU")
+        for button in (cancel_button, load_button):
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFixedHeight(38)
+            button.setMinimumWidth(120)
+        cancel_button.setStyleSheet(
+            "QPushButton { background:#ffffff; color:#571c86; "
+            "border:1px solid #d7cae7; border-radius:19px; "
+            "font:700 10pt 'Segoe UI'; } "
+            "QPushButton:hover { background:#faf7fd; }"
+        )
+        load_button.setStyleSheet(
+            "QPushButton { background:#571c86; color:#ffffff; border:none; "
+            "border-radius:19px; font:700 10pt 'Segoe UI'; } "
+            "QPushButton:hover { background:#6b2aa3; }"
+        )
+        cancel_button.clicked.connect(self.reject)
+        load_button.clicked.connect(self.accept)
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(load_button)
+        root.addLayout(button_row)
+
+        self._refresh_details()
+
+    def _refresh_details(self) -> None:
+        recipe = self.selected_recipe()
+        if not recipe:
+            self.details.setText("No saved SKU selected.")
+            return
+        sku_meta = dict(recipe.get("sku_meta") or {})
+        tyre_name = recipe.get("tyre_name") or sku_meta.get("tyre_name") or "-"
+        tyre_size = recipe.get("tyre_size") or sku_meta.get("tyre_size") or "-"
+        updated_at = recipe.get("updated_at") or recipe.get("created_at") or "-"
+        source = str(recipe.get("record_source") or "RECIPE")
+        version_text = "Setup only" if source == "SKU_SETUP" else str(recipe.get("version", "-"))
+        self.details.setText(
+            f"SKU: {recipe.get('sku_name', '-')}\n"
+            f"Recipe Number: {recipe.get('recipe_number') or recipe.get('plc_recipe_number') or '-'}\n"
+            f"Latest Version: {version_text}\n"
+            f"Tyre: {tyre_name}\n"
+            f"Size: {tyre_size}\n"
+            f"Last Updated: {updated_at}"
+        )
+
+    def selected_recipe(self) -> Dict[str, Any]:
+        data = self.selector.currentData()
+        return dict(data or {}) if isinstance(data, dict) else {}
+
+
 class CaptureWorker(QThread):
     status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(dict)
@@ -423,7 +550,10 @@ class NewSKUPage(QWidget):
         self.axis_teaching_page: Optional[QWidget] = None
         self.capture_page: Optional[QWidget] = None
         self.template_extractor_page: Optional[TemplateExtractorPage] = None
+        self.r_recipe_page: Optional[RRecipeCreationPage] = None
         self.offset_page: Optional[OffsetCalculationPage] = None
+        self.patch_creation_page: Optional[PatchCreationPage] = None
+        self.augmentation_page: Optional[AugmentationPage] = None
         self.training_page: Optional[NewSKUTrainingPage] = None
         self.feature_threshold_page: Optional[FeatureThresholdPage] = None
         self.recipe_page: Optional[QWidget] = None
@@ -457,6 +587,8 @@ class NewSKUPage(QWidget):
         self._update_preview_from_latest()
         if self.template_extractor_page is not None:
             self.template_extractor_page.refresh_context()
+        if self.r_recipe_page is not None:
+            self.r_recipe_page.refresh_context()
         if self.offset_page is not None:
             self.offset_page.refresh_context()
         if self.training_page is not None:
@@ -771,6 +903,7 @@ class NewSKUPage(QWidget):
 
             for page in (
                 self.template_extractor_page,
+                self.r_recipe_page,
                 self.offset_page,
                 self.training_page,
                 self.feature_threshold_page,
@@ -793,6 +926,7 @@ class NewSKUPage(QWidget):
 
         for page in (
             self.template_extractor_page,
+            self.r_recipe_page,
             self.offset_page,
             self.training_page,
             self.feature_threshold_page,
@@ -932,8 +1066,14 @@ class NewSKUPage(QWidget):
 
         if idx == TAB_IMAGE_PROCESSING and self.template_extractor_page is not None:
             self.template_extractor_page.refresh_context()
+        elif idx == TAB_R_RECIPE_CREATION and self.r_recipe_page is not None:
+            self.r_recipe_page.refresh_context()
         elif idx == TAB_OFFSET_CALCULATION and self.offset_page is not None:
             self.offset_page.refresh_context()
+        elif idx == TAB_PATCH_CREATION and self.patch_creation_page is not None:
+            self.patch_creation_page.refresh_context()
+        elif idx == TAB_AUGMENTATION and self.augmentation_page is not None:
+            self.augmentation_page.refresh_context()
         elif idx == TAB_TRAINING and self.training_page is not None:
             self.training_page.refresh_context()
         elif idx == TAB_FEATURE_THRESHOLD and self.feature_threshold_page is not None:
@@ -960,9 +1100,12 @@ class NewSKUPage(QWidget):
             "Axis Teaching",
             "Capture",
             "Image Processing",
+            "R Recipe Creation",
             "Offset Calculation",
+            "Patch Creation",
+            "Augmentation",
             "Training",
-            "Feature & Threshold",
+            "Feature Threshold",
             "Save Recipe",
         ]
         for idx, name in enumerate(tab_names):
@@ -995,6 +1138,16 @@ class NewSKUPage(QWidget):
         )
         self.template_extractor_page.templateSaved.connect(self._on_template_saved)
         self.template_extractor_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_R_RECIPE_CREATION)
+        )
+
+        self.r_recipe_page = RRecipeCreationPage(
+            media_path=self.media_path,
+            sku_name_provider=self._get_sku_name,
+            template_assets_provider=self._collect_template_assets,
+            parent=self,
+        )
+        self.r_recipe_page.continueRequested.connect(
             lambda: self._switch_tab(TAB_OFFSET_CALCULATION)
         )
 
@@ -1008,6 +1161,26 @@ class NewSKUPage(QWidget):
         )
         self.offset_page.offsetSaved.connect(self._on_offset_saved)
         self.offset_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_PATCH_CREATION)
+        )
+
+        self.patch_creation_page = PatchCreationPage(
+            media_path=self.media_path,
+            project_root=str(PROJECT_ROOT),
+            sku_name_provider=self._get_sku_name,
+            parent=self,
+        )
+        self.patch_creation_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_AUGMENTATION)
+        )
+
+        self.augmentation_page = AugmentationPage(
+            media_path=self.media_path,
+            project_root=str(PROJECT_ROOT),
+            sku_name_provider=self._get_sku_name,
+            parent=self,
+        )
+        self.augmentation_page.continueRequested.connect(
             lambda: self._switch_tab(TAB_TRAINING)
         )
 
@@ -1048,7 +1221,10 @@ class NewSKUPage(QWidget):
         self.stack.addWidget(self.axis_teaching_page)
         self.stack.addWidget(self.capture_page)
         self.stack.addWidget(self.template_extractor_page)
+        self.stack.addWidget(self.r_recipe_page)
         self.stack.addWidget(self.offset_page)
+        self.stack.addWidget(self.patch_creation_page)
+        self.stack.addWidget(self.augmentation_page)
         self.stack.addWidget(self.training_page)
         self.stack.addWidget(self.feature_threshold_page)
         self.stack.addWidget(self.recipe_page)
@@ -1165,6 +1341,184 @@ class NewSKUPage(QWidget):
     # ======================================================================
     # F-015 SKU SETUP
     # ======================================================================
+    def _load_existing_sku(self) -> None:
+        """Load the latest saved recipe for an existing SKU and continue capturing."""
+        if self.capture_in_progress:
+            QMessageBox.warning(
+                self,
+                "Load Existing SKU",
+                "Wait until the current capture is completed before changing SKU.",
+            )
+            return
+
+        try:
+            recipes = self.recipe_service.list_existing_skus()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Load Existing SKU",
+                f"Unable to read saved SKUs from PostgreSQL:\n{exc}",
+            )
+            return
+
+        if not recipes:
+            QMessageBox.information(
+                self,
+                "Load Existing SKU",
+                "No saved SKU recipes were found in PostgreSQL.",
+            )
+            return
+
+        dialog = ExistingSKUDialog(recipes, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        recipe = dialog.selected_recipe()
+        if not recipe:
+            return
+
+        try:
+            self._restore_existing_sku_recipe(recipe)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Load Existing SKU",
+                f"The selected SKU could not be loaded:\n{exc}",
+            )
+
+    def _restore_existing_sku_recipe(self, recipe: Dict[str, Any]) -> None:
+        """Restore one saved recipe without creating another recipe version."""
+        recipe = dict(recipe or {})
+        sku_meta = dict(recipe.get("sku_meta") or {})
+
+        # Older recipe records may keep some setup values only at top level.
+        meta_keys = (
+            "sku_name",
+            "recipe_number",
+            "plc_recipe_number",
+            "tyre_name",
+            "tyre_size",
+            "tyre_outer_diameter",
+            "tyre_rpm",
+            "barcode",
+            "barcode_pattern",
+            "operator",
+            "inspection_zones",
+            "image_count_per_zone",
+            "train_good_count",
+        )
+        for key in meta_keys:
+            current = sku_meta.get(key)
+            if current in (None, "") and recipe.get(key) not in (None, ""):
+                sku_meta[key] = recipe.get(key)
+
+        sku_name = str(
+            recipe.get("sku_name")
+            or sku_meta.get("sku_name")
+            or ""
+        ).strip()
+        if not sku_name:
+            raise ValueError("The selected recipe does not contain an SKU name.")
+
+        recipe_number = (
+            recipe.get("recipe_number")
+            or recipe.get("plc_recipe_number")
+            or sku_meta.get("recipe_number")
+            or sku_meta.get("plc_recipe_number")
+        )
+        if recipe_number in (None, ""):
+            raise ValueError(f"Recipe number is missing for {sku_name}.")
+
+        sku_meta["sku_name"] = sku_name
+        sku_meta["recipe_number"] = int(recipe_number)
+        sku_meta["plc_recipe_number"] = int(recipe_number)
+        sku_meta["image_count_per_zone"] = CAPTURE_IMAGES_PER_SIDE
+        sku_meta["train_good_count"] = 0
+        sku_meta.pop("machine_serial", None)
+
+        # First switch every child page to the selected SKU. This clears only
+        # the previous SKU's in-memory state and restores files for this SKU.
+        self.sku_meta = sku_meta
+        self._apply_sku_meta_to_form()
+        self._sync_workflow_sku(force=True)
+
+        # Then restore the saved recipe state and its per-stage assets.
+        self.recipe_doc = dict(recipe)
+        self.recipe_doc["sku_meta"] = dict(sku_meta)
+        self.latest_template_assets = self._filter_assets_for_current_sku(
+            dict(recipe.get("template_assets") or {})
+        )
+        self.latest_offset_assets = self._filter_assets_for_current_sku(
+            dict(recipe.get("offset_assets") or {})
+        )
+        self.latest_training_assets = self._filter_assets_for_current_sku(
+            dict(recipe.get("training_assets") or {})
+        )
+        self.latest_threshold_assets = self._filter_assets_for_current_sku(
+            dict(recipe.get("threshold_assets") or {})
+        )
+
+        self.recipe_doc["template_assets"] = dict(self.latest_template_assets)
+        self.recipe_doc["offset_assets"] = dict(self.latest_offset_assets)
+        self.recipe_doc["training_assets"] = dict(self.latest_training_assets)
+        self.recipe_doc["threshold_assets"] = dict(self.latest_threshold_assets)
+
+        is_saved_recipe = str(recipe.get("record_source") or "RECIPE") != "SKU_SETUP"
+        self.saved_recipe_doc = dict(recipe) if is_saved_recipe else None
+        self.saved_recipe_result = {
+            "loaded_existing": True,
+            "sku_name": sku_name,
+            "version": recipe.get("version"),
+        }
+        if self.load_machine_btn is not None:
+            self.load_machine_btn.setEnabled(
+                is_saved_recipe and bool(recipe.get("recipe_axis_targets"))
+            )
+
+        for page in (
+            self.template_extractor_page,
+            self.r_recipe_page,
+            self.offset_page,
+            self.training_page,
+            self.feature_threshold_page,
+        ):
+            refresh = getattr(page, "refresh_context", None) if page is not None else None
+            if callable(refresh):
+                refresh()
+
+        self.load_raw_images_for_preview()
+        if self.axis_table is not None:
+            self._refresh_axis_table()
+
+        upcoming_cycle = next_cycle_dir(
+            self.media_path,
+            sku_name,
+            create=False,
+        ).name
+        if self.status_lbl is not None:
+            self.status_lbl.setText(
+                f"Loaded existing SKU {sku_name}. Next capture will use {upcoming_cycle}."
+            )
+
+        loaded_version = (
+            "Setup only"
+            if str(recipe.get("record_source") or "RECIPE") == "SKU_SETUP"
+            else str(recipe.get("version", "-"))
+        )
+        QMessageBox.information(
+            self,
+            "Existing SKU Loaded",
+            (
+                f"SKU {sku_name} was loaded successfully.\n\n"
+                f"Recipe Number: {int(recipe_number)}\n"
+                f"Loaded Version: {loaded_version}\n"
+                f"Next Capture Folder: {upcoming_cycle}\n\n"
+                "The existing recipe is not duplicated. Start Capture to create "
+                "the next cycle for this SKU."
+            ),
+        )
+        self._switch_tab(TAB_CAPTURE)
+
     def _build_wizard_page(self):
         root = QVBoxLayout(self.wizard_page)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1177,8 +1531,8 @@ class NewSKUPage(QWidget):
         lay.setSpacing(18)
 
         lay.addLayout(self._section_header(
-            "New SKU Creation Wizard",
-            "Create a new tyre SKU by entering tyre, barcode, operator and image capture configuration. Machine serial is intentionally removed.",
+            "SKU Setup & Capture Workflow",
+            "Create a new tyre SKU or load an existing saved SKU before capturing its next cycle. Machine serial is intentionally removed.",
         ))
 
         form_card = QFrame()
@@ -1291,12 +1645,19 @@ class NewSKUPage(QWidget):
         lay.addWidget(hint)
 
         btn_row = QHBoxLayout()
+
+        load_existing_btn = self._make_button("Load Existing SKU", "secondary")
+        load_existing_btn.setToolTip(
+            "Load the latest saved recipe for an SKU and continue with its next capture cycle."
+        )
+        load_existing_btn.clicked.connect(self._load_existing_sku)
+        btn_row.addWidget(load_existing_btn)
         btn_row.addStretch(1)
 
         next_btn = self._make_button("Next: Axis Teaching", "secondary")
         next_btn.clicked.connect(lambda: self._switch_tab(TAB_AXIS_TEACHING))
 
-        save_setup_btn = self._make_button("Save SKU Setup", "primary")
+        save_setup_btn = self._make_button("Save New SKU Setup", "primary")
         save_setup_btn.clicked.connect(self._save_sku_setup)
 
         btn_row.addWidget(next_btn)
@@ -1338,20 +1699,24 @@ class NewSKUPage(QWidget):
         existing_recipe = self.recipe_service.find_recipe_by_number(recipe_number)
 
         if existing_recipe:
-            existing_sku = existing_recipe.get("sku_name", "UNKNOWN")
+            existing_sku = str(existing_recipe.get("sku_name", "UNKNOWN") or "UNKNOWN").strip()
             existing_version = existing_recipe.get("version", "-")
 
-            QMessageBox.warning(
-                self,
-                "Duplicate Recipe Number",
-                (
-                    f"Recipe number {recipe_number} already exists.\n\n"
-                    f"Existing SKU: {existing_sku}\n"
-                    f"Version: {existing_version}\n\n"
-                    "Please use a different recipe number."
+            # The same recipe number may be reused only for the same SKU. This
+            # allows an existing SKU setup to be reloaded/updated without
+            # treating its own recipe number as a duplicate.
+            if _safe_name(existing_sku).lower() != _safe_name(sku_name).lower():
+                QMessageBox.warning(
+                    self,
+                    "Duplicate Recipe Number",
+                    (
+                        f"Recipe number {recipe_number} already exists.\n\n"
+                        f"Existing SKU: {existing_sku}\n"
+                        f"Version: {existing_version}\n\n"
+                        "Please use a different recipe number."
+                    )
                 )
-            )
-            return
+                return
         tyre_name = tyre_name or sku_name
         barcode = barcode or barcode_pattern
         operator = operator or "operator"

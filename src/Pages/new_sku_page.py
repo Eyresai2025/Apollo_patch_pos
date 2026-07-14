@@ -1,23 +1,25 @@
 import os
 import re
+import json
 import cv2
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent, QSize  # type: ignore
-from PyQt5.QtGui import QPixmap  # type: ignore
+from PyQt5.QtGui import QPixmap, QColor  # type: ignore
 from PyQt5.QtWidgets import (  # type: ignore
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QMessageBox, QSizePolicy, QApplication,
     QGridLayout, QScrollArea, QDialog, QStackedWidget,
     QFormLayout, QLineEdit, QSpinBox,
-    QTableWidget, QTableWidgetItem, QHeaderView,QComboBox
+    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QProgressBar
 )
 
 from src.COMMON.common import load_env
 from src.COMMON.db import save_new_sku_image
 from src.COMMON.recipe_service import RecipeService
+from src.COMMON.new_sku_workflow_service import NewSKUWorkflowService
 from src.COMMON.new_sku_capture_paths import (
     find_latest_image as find_latest_cycle_image,
     latest_cycle_dir,
@@ -54,6 +56,29 @@ TAB_SAVE_RECIPE = 10
 
 # Backward-compatible alias used by older helper names.
 TAB_TEMPLATE_EXTRACTOR = TAB_IMAGE_PROCESSING
+
+WORKFLOW_STEPS = [
+    ("sku_setup", "SKU Setup"),
+    ("axis_teaching", "Axis Teaching"),
+    ("capture", "Capture"),
+    ("image_processing", "Image Processing"),
+    ("r_recipe", "R Recipe"),
+    ("offset", "Offset"),
+    ("patch_creation", "Patch Creation"),
+    ("augmentation", "Augmentation"),
+    ("training", "Training"),
+    ("feature_threshold", "Threshold"),
+    ("save_recipe", "Save Recipe"),
+]
+
+WORKFLOW_STATUS_META = {
+    "not_started": ("○", "#9b93a6", "#f3f0f6"),
+    "in_progress": ("●", "#2563eb", "#eaf2ff"),
+    "completed": ("✓", "#16884f", "#eaf8f0"),
+    "partial": ("!", "#c97908", "#fff5e5"),
+    "failed": ("×", "#d14343", "#fdecec"),
+    "needs_update": ("↻", "#a35f00", "#fff2dc"),
+}
 
 
 # =========================
@@ -439,6 +464,148 @@ class ExistingSKUDialog(QDialog):
         return dict(data or {}) if isinstance(data, dict) else {}
 
 
+class WorkflowValidationDialog(QDialog):
+    """Apollo-styled workflow readiness report."""
+
+    def __init__(self, sku: str, steps, report: Dict[str, Dict[str, Any]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Workflow Readiness")
+        self.setModal(True)
+        self.resize(820, 620)
+        self.selected_step_index: Optional[int] = None
+        self._steps = list(steps)
+        self._report = dict(report or {})
+
+        self.setStyleSheet("""
+            QDialog { background:#f7f5fa; }
+            QLabel { background:transparent; }
+            QTableWidget { background:#ffffff; border:1px solid #e2d8ed; border-radius:12px; gridline-color:#eee8f4; }
+            QHeaderView::section { background:#f2ecf8; color:#571c86; border:none; border-bottom:1px solid #ddd2e8; padding:8px; font:700 10pt 'Segoe UI'; }
+            QTableWidget::item { padding:8px; color:#3f3748; font:500 9.5pt 'Segoe UI'; }
+            QPushButton { min-height:36px; border-radius:18px; padding:0 16px; font:700 10pt 'Segoe UI'; }
+            QPushButton#Primary { background:#571c86; color:white; border:none; }
+            QPushButton#Primary:hover { background:#6b2aa3; }
+            QPushButton#Secondary { background:white; color:#571c86; border:1px solid #d7cae7; }
+            QPushButton#Secondary:hover { background:#faf7fd; }
+        """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 20, 22, 18)
+        root.setSpacing(14)
+
+        title = QLabel("Workflow Readiness")
+        title.setStyleSheet("font:800 20px 'Segoe UI'; color:#571c86;")
+        root.addWidget(title)
+
+        ready_count = sum(
+            1 for key, _ in self._steps
+            if bool((self._report.get(key) or {}).get("ready"))
+        )
+        total = len(self._steps)
+        percent = int(round((ready_count / total) * 100)) if total else 0
+
+        summary = QFrame()
+        summary.setStyleSheet(
+            "QFrame { background:#ffffff; border:1px solid #e6deef; border-radius:12px; }"
+        )
+        sl = QHBoxLayout(summary)
+        sl.setContentsMargins(14, 10, 14, 10)
+        sku_lbl = QLabel(f"SKU  •  {sku}")
+        sku_lbl.setStyleSheet("font:800 11pt 'Segoe UI'; color:#571c86;")
+        pct_lbl = QLabel(f"{ready_count} of {total} steps ready  •  {percent}%")
+        pct_lbl.setStyleSheet("font:600 10pt 'Segoe UI'; color:#6f657b;")
+        sl.addWidget(sku_lbl)
+        sl.addStretch(1)
+        sl.addWidget(pct_lbl)
+        root.addWidget(summary)
+
+        self.table = QTableWidget(total, 3)
+        self.table.setHorizontalHeaderLabels(["Step", "Status", "Missing requirements"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setAlternatingRowColors(False)
+
+        first_missing = None
+        for row, (key, label) in enumerate(self._steps):
+            result = dict(self._report.get(key) or {})
+            ready = bool(result.get("ready"))
+            missing = list(result.get("missing") or [])
+            status_text = "Ready" if ready else "Action required"
+            missing_text = "—" if ready else "\n".join(f"• {item}" for item in missing)
+            if not ready and first_missing is None:
+                first_missing = row
+
+            palette = ("#eaf8f0", "#167844") if ready else ("#fff7e8", "#a56508")
+            for col, text in enumerate((label, status_text, missing_text)):
+                item = QTableWidgetItem(text)
+                item.setBackground(QColor(palette[0]))
+                item.setForeground(QColor(palette[1] if col == 1 else "#3f3748"))
+                if col == 1:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                alignment = Qt.AlignCenter if col == 1 else Qt.AlignLeft
+                item.setTextAlignment(Qt.AlignVCenter | alignment)
+                self.table.setItem(row, col, item)
+            self.table.setRowHeight(row, max(42, 24 + 18 * max(1, len(missing))))
+
+        root.addWidget(self.table, 1)
+
+        self.detail = QLabel("Select a row to review its requirements.")
+        self.detail.setWordWrap(True)
+        self.detail.setStyleSheet(
+            "QLabel { background:#ffffff; border:1px solid #e6deef; border-radius:10px; "
+            "padding:10px; color:#5f5669; font:500 9.5pt 'Segoe UI'; }"
+        )
+        root.addWidget(self.detail)
+        self.table.currentCellChanged.connect(self._update_detail)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.go_btn = QPushButton("Go to First Missing Step")
+        self.go_btn.setObjectName("Primary")
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("Secondary")
+        self.go_btn.setEnabled(first_missing is not None)
+        self._first_missing = first_missing
+        self.go_btn.clicked.connect(self._go_first_missing)
+        close_btn.clicked.connect(self.reject)
+        buttons.addWidget(self.go_btn)
+        buttons.addWidget(close_btn)
+        root.addLayout(buttons)
+
+        if first_missing is not None:
+            self.table.selectRow(first_missing)
+        elif total:
+            self.table.selectRow(0)
+
+    def _update_detail(self, row: int, _column: int, _prev_row: int, _prev_column: int) -> None:
+        if not (0 <= row < len(self._steps)):
+            return
+        key, label = self._steps[row]
+        result = dict(self._report.get(key) or {})
+        message = str(result.get("message") or "").strip()
+        missing = list(result.get("missing") or [])
+        if result.get("ready"):
+            text = f"{label} is ready. All required inputs are available."
+        else:
+            details = "\n".join(f"• {item}" for item in missing) or "• Required inputs are not available"
+            text = f"{label} needs attention.\n{details}"
+            if message:
+                text += f"\n\n{message}"
+        self.detail.setText(text)
+
+    def _go_first_missing(self) -> None:
+        if self._first_missing is None:
+            return
+        self.selected_step_index = int(self._first_missing)
+        self.accept()
+
+
 class CaptureWorker(QThread):
     status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(dict)
@@ -531,6 +698,7 @@ class NewSKUPage(QWidget):
             media_path=self.media_path,
             plc_client=self.plc_client,
         )
+        self.workflow_service = NewSKUWorkflowService(self.media_path)
         self.recipe_doc: Dict[str, Any] = {}
         self.saved_recipe_doc: Optional[Dict[str, Any]] = None
         self.saved_recipe_result: Optional[Dict[str, Any]] = None
@@ -544,6 +712,16 @@ class NewSKUPage(QWidget):
 
         self.tab_buttons: List[QPushButton] = []
         self.wizard_widgets: Dict[str, Any] = {}
+        self.workflow_statuses: Dict[str, str] = {
+            key: "not_started" for key, _label in WORKFLOW_STEPS
+        }
+        self.workflow_downstream_state: Dict[str, Dict[str, Any]] = {}
+        self.workflow_summary_sku: Optional[QLabel] = None
+        self.workflow_summary_status: Optional[QLabel] = None
+        self.workflow_summary_count: Optional[QLabel] = None
+        self.workflow_progress: Optional[QProgressBar] = None
+        self.workflow_nav_frame: Optional[QFrame] = None
+        self.workflow_validate_btn: Optional[QPushButton] = None
 
         self.stack: Optional[QStackedWidget] = None
         self.wizard_page: Optional[QWidget] = None
@@ -627,6 +805,7 @@ class NewSKUPage(QWidget):
 
         self.capture_in_progress = False
         self._set_controls_enabled(True)
+        self._refresh_workflow_header()
 
         if self.preview_timer:
             self.preview_timer.start(1500)
@@ -758,6 +937,41 @@ class NewSKUPage(QWidget):
                 border: none;
                 border-bottom: 1px solid #ddd3ea;
                 font: 700 11px 'Segoe UI';
+            }
+            QFrame#WorkflowHeader {
+                background: #ffffff;
+                border: 1px solid #e6deef;
+                border-radius: 16px;
+            }
+            QLabel#WorkflowSku {
+                color: #571c86;
+                font: 800 12px 'Segoe UI';
+                background: transparent;
+            }
+            QLabel#WorkflowMeta {
+                color: #756b80;
+                font: 600 10px 'Segoe UI';
+                background: transparent;
+            }
+            QProgressBar#WorkflowProgress {
+                background: #eee8f4;
+                border: none;
+                border-radius: 4px;
+                min-height: 8px;
+                max-height: 8px;
+                text-align: center;
+            }
+            QProgressBar#WorkflowProgress::chunk {
+                background: #571c86;
+                border-radius: 4px;
+            }
+            QToolTip {
+                background: #ffffff;
+                color: #4f3f5f;
+                border: 1px solid #d9cbea;
+                border-radius: 8px;
+                padding: 7px 10px;
+                font: 600 10px 'Segoe UI';
             }
         """
 
@@ -905,6 +1119,8 @@ class NewSKUPage(QWidget):
                 self.template_extractor_page,
                 self.r_recipe_page,
                 self.offset_page,
+                self.patch_creation_page,
+                self.augmentation_page,
                 self.training_page,
                 self.feature_threshold_page,
             ):
@@ -1030,6 +1246,346 @@ class NewSKUPage(QWidget):
                 )
 
     # ======================================================================
+    # WORKFLOW STATUS / STEPPER
+    # ======================================================================
+    def _workflow_state_path(self) -> Path:
+        sku = _safe_name(self._get_sku_name())
+        return Path(self.media_path) / "new_sku_workflow" / sku / "workflow_state.json"
+
+    @staticmethod
+    def _has_images(folder: Path) -> bool:
+        if not folder.exists() or not folder.is_dir():
+            return False
+        try:
+            return any(
+                path.is_file() and path.suffix.lower() in IMAGE_EXTS
+                for path in folder.rglob("*")
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _first_existing(paths: List[Path]) -> Optional[Path]:
+        for path in paths:
+            if path.exists():
+                return path
+        return None
+
+    def _compute_workflow_statuses(self) -> Dict[str, str]:
+        sku = _safe_name(self._get_sku_name())
+        media = Path(self.media_path)
+        statuses = {key: "not_started" for key, _ in WORKFLOW_STEPS}
+
+        # 1. SKU setup
+        if sku != "unknown_sku" and bool(str(self.sku_meta.get("sku_name") or "").strip()):
+            statuses["sku_setup"] = "completed"
+
+        # 2. Axis teaching
+        recipe_targets = dict(self.recipe_doc.get("recipe_axis_targets") or {})
+        if recipe_targets:
+            try:
+                required = len(self.recipe_service.get_recipe_target_configs())
+            except Exception:
+                required = len(recipe_targets)
+            completed_targets = sum(
+                1 for item in recipe_targets.values()
+                if (item or {}).get("value") not in (None, "")
+            )
+            statuses["axis_teaching"] = (
+                "completed" if required > 0 and completed_targets >= required else "partial"
+            )
+
+        # 3. Capture
+        capture_roles = 0
+        for role in CAPTURE_ROLE_ORDER:
+            serial = str(CAMERA_SERIAL_MAP.get(role, "") or "")
+            folder = resolve_role_folder(
+                self.media_path, sku, role, serial=serial, require_images=True
+            )
+            if folder and self._has_images(Path(folder)):
+                capture_roles += 1
+        if capture_roles == len(CAPTURE_ROLE_ORDER):
+            statuses["capture"] = "completed"
+        elif capture_roles > 0:
+            statuses["capture"] = "partial"
+
+        # 4. Templates / image processing (two sidewalls)
+        template_roles = 0
+        for role in ("sidewall1", "sidewall2"):
+            candidates = [
+                media / "template_extractor" / sku / role / f"{sku}_{role}_template.png",
+                media / "template_extracter" / sku / role / f"{sku}_{role}_template.png",
+            ]
+            if self._first_existing(candidates):
+                template_roles += 1
+        if template_roles == 2:
+            statuses["image_processing"] = "completed"
+        elif template_roles:
+            statuses["image_processing"] = "partial"
+
+        # 5. Fast R recipes
+        recipe_count = sum(
+            (media / "training" / sku / role / f"{sku}_{role}_fast_recipe.json").exists()
+            for role in ("sidewall1", "sidewall2")
+        )
+        if recipe_count == 2:
+            statuses["r_recipe"] = "completed"
+        elif recipe_count:
+            statuses["r_recipe"] = "partial"
+
+        # 6. Offset calibration
+        offset_roles = 0
+        for role in ("tread", "innerwall", "bead"):
+            folder = media / "offset_calibration" / sku / role
+            if folder.exists() and any(folder.glob("*calibration*.json")):
+                offset_roles += 1
+        if offset_roles == 3:
+            statuses["offset"] = "completed"
+        elif offset_roles:
+            statuses["offset"] = "partial"
+
+        # 7. Patch creation
+        patch_roles = 0
+        for role in ("sidewall1", "sidewall2", "tread", "innerwall", "bead"):
+            root = media / "patch_creation" / sku / role
+            summary = root / "patch_creation_summary.json"
+            patches = root / "patches_rtor1"
+            if summary.exists() and self._has_images(patches):
+                patch_roles += 1
+        if patch_roles == 5:
+            statuses["patch_creation"] = "completed"
+        elif patch_roles:
+            statuses["patch_creation"] = "partial"
+
+        # 8. Augmentation
+        aug_roles = 0
+        for role in ("sidewall1", "sidewall2", "tread", "innerwall", "bead"):
+            root = media / "augmentation" / sku / role
+            summary = root / "augmentation_summary.json"
+            out_candidates = [root / "04_augmented_patches", root / "augmented_patches"]
+            if summary.exists() and any(self._has_images(folder) for folder in out_candidates):
+                aug_roles += 1
+        if aug_roles == 5:
+            statuses["augmentation"] = "completed"
+        elif aug_roles:
+            statuses["augmentation"] = "partial"
+
+        # 9. Training models
+        model_roles = 0
+        model_names = {
+            "sidewall1": f"{sku}_sidewall1_patchcore_model.pth",
+            "sidewall2": f"{sku}_sidewall2_patchcore_model.pth",
+            "tread": f"{sku}_tread_patchcore_model.pth",
+            "innerwall": f"{sku}_innerwall_patchcore_model.pth",
+            "bead": f"{sku}_bead_patchcore_model.pth",
+        }
+        for role, filename in model_names.items():
+            if (media / "training" / sku / role / filename).exists():
+                model_roles += 1
+        if model_roles == 5:
+            statuses["training"] = "completed"
+        elif model_roles:
+            statuses["training"] = "partial"
+
+        # 10. Feature thresholds
+        threshold_roles = 0
+        for role in ("sidewall1", "sidewall2", "tread", "innerwall", "bead"):
+            root = media / "feature_threshold" / sku / role
+            if root.exists() and any(root.glob("*.json")):
+                threshold_roles += 1
+        # Also trust assets already restored from a saved recipe.
+        threshold_roles = max(threshold_roles, len(self._collect_threshold_assets()))
+        if threshold_roles >= 5:
+            statuses["feature_threshold"] = "completed"
+        elif threshold_roles:
+            statuses["feature_threshold"] = "partial"
+
+        # 11. Saved recipe
+        if self.saved_recipe_doc or self.saved_recipe_result:
+            statuses["save_recipe"] = "completed"
+
+        # Apply automatic downstream invalidation. Existing outputs remain on disk,
+        # but completed stages become "needs_update" when an upstream dependency
+        # has newer outputs or is already outdated.
+        statuses, self.workflow_downstream_state = (
+            self.workflow_service.apply_downstream_invalidation(
+                sku=sku,
+                base_statuses=statuses,
+                recipe_doc=self.recipe_doc,
+                saved_recipe=self.saved_recipe_doc,
+            )
+        )
+
+        # Mark the currently active step as in progress only when it has no output yet.
+        if self.stack is not None:
+            active_idx = self.stack.currentIndex()
+            if 0 <= active_idx < len(WORKFLOW_STEPS):
+                active_key = WORKFLOW_STEPS[active_idx][0]
+                if statuses.get(active_key) == "not_started":
+                    statuses[active_key] = "in_progress"
+
+        return statuses
+
+    def _save_workflow_state(self) -> None:
+        try:
+            self.workflow_service.save_ui_state(
+                sku=_safe_name(self._get_sku_name()),
+                current_step=self.stack.currentIndex() if self.stack is not None else 0,
+                statuses=self.workflow_statuses,
+                recipe_doc=self.recipe_doc,
+                saved_recipe=self.saved_recipe_doc,
+            )
+        except Exception:
+            # Workflow indicators must never block production processing.
+            pass
+
+    def _workflow_button_style(self, active: bool, status: str) -> str:
+        status_palette = {
+            "completed": ("#167844", "#eef8f2", "#d8eddf"),
+            "in_progress": ("#3659a8", "#f0f4ff", "#dce5fb"),
+            "partial": ("#a56508", "#fff8e8", "#f4e2b5"),
+            "failed": ("#b63232", "#fff0f0", "#f1d0d0"),
+            "needs_update": ("#9a6810", "#fff8ea", "#f1deb8"),
+            "not_started": ("#8a8393", "transparent", "transparent"),
+        }
+        text_color, background, outline = status_palette.get(
+            status, status_palette["not_started"]
+        )
+
+        if active:
+            text_color = "#571c86"
+            background = "#f5effb"
+            outline = "#dac9ec"
+
+        font_weight = "700" if active else "600"
+        bottom_border = "2px solid #571c86" if active else "2px solid transparent"
+        side_border = "1px solid transparent" if outline == "transparent" else f"1px solid {outline}"
+
+        return f"""
+            QPushButton {{
+                background: {background};
+                color: {text_color};
+                border: {side_border};
+                border-bottom: {bottom_border};
+                border-radius: 8px;
+                font: {font_weight} 10px 'Segoe UI';
+                padding: 5px 8px 4px 8px;
+                text-align: center;
+            }}
+            QPushButton:hover {{
+                background: #faf7fd;
+                color: #571c86;
+                border: 1px solid #dfd2ec;
+                border-bottom: {bottom_border};
+            }}
+            QPushButton:disabled {{
+                background: transparent;
+                color: #b7afbf;
+                border: 1px solid transparent;
+                border-bottom: 2px solid transparent;
+            }}
+        """
+
+    def _refresh_workflow_header(self) -> None:
+        self.workflow_statuses = self._compute_workflow_statuses()
+        active_idx = self.stack.currentIndex() if self.stack is not None else 0
+
+        for index, button in enumerate(self.tab_buttons):
+            key, label = WORKFLOW_STEPS[index]
+            status = self.workflow_statuses.get(key, "not_started")
+            button.setText(label)
+            button.setStyleSheet(self._workflow_button_style(index == active_idx, status))
+            tooltip = (
+                f"Step {index + 1}: {label}\n"
+                f"Status: {status.replace('_', ' ').title()}"
+            )
+            if status == "needs_update":
+                reason = str(
+                    (self.workflow_downstream_state.get(key) or {}).get("reason") or ""
+                ).strip()
+                if reason:
+                    tooltip += f"\nReason: {reason}"
+            button.setToolTip(tooltip)
+
+        completed = sum(
+            1 for status in self.workflow_statuses.values() if status == "completed"
+        )
+        total = len(WORKFLOW_STEPS)
+        percent = int(round((completed / total) * 100)) if total else 0
+        active_label = WORKFLOW_STEPS[active_idx][1] if 0 <= active_idx < total else "-"
+
+        if self.workflow_summary_sku is not None:
+            self.workflow_summary_sku.setText(f"SKU  •  {_safe_name(self._get_sku_name())}")
+        if self.workflow_summary_count is not None:
+            self.workflow_summary_count.setText(f"{completed} of {total} steps completed  •  {percent}%")
+        if self.workflow_summary_status is not None:
+            self.workflow_summary_status.setText(f"Current step  •  {active_label}")
+        if self.workflow_progress is not None:
+            self.workflow_progress.setValue(percent)
+            self.workflow_progress.setFormat("")
+
+        self._save_workflow_state()
+
+
+    def _current_readiness_report(self) -> Dict[str, Dict[str, Any]]:
+        return self.workflow_service.validate_all(
+            sku=_safe_name(self._get_sku_name()),
+            recipe_doc=self.recipe_doc,
+            saved_recipe=self.saved_recipe_doc,
+        )
+
+    @staticmethod
+    def _format_missing_items(items: List[str], limit: int = 8) -> str:
+        visible = [str(item) for item in items[:limit]]
+        text = "\n".join(f"• {item}" for item in visible)
+        if len(items) > limit:
+            text += f"\n• ... and {len(items) - limit} more"
+        return text
+
+    def _confirm_step_readiness(self, idx: int) -> bool:
+        if not (0 <= idx < len(WORKFLOW_STEPS)):
+            return True
+
+        key, label = WORKFLOW_STEPS[idx]
+        result = self.workflow_service.validate_step(
+            key,
+            sku=_safe_name(self._get_sku_name()),
+            recipe_doc=self.recipe_doc,
+            saved_recipe=self.saved_recipe_doc,
+        )
+        if result.get("ready", False):
+            return True
+
+        missing = list(result.get("missing") or [])
+        details = self._format_missing_items(missing)
+        message = (
+            f"{label} is not ready.\n\n"
+            f"Missing requirements:\n{details or '• Required inputs are not available'}\n\n"
+            f"{result.get('message') or 'Complete the required earlier steps first.'}\n\n"
+            "You may open the page for review, but processing should not be started "
+            "until the missing requirements are resolved."
+        )
+        reply = QMessageBox.question(
+            self,
+            "Workflow Readiness",
+            message,
+            QMessageBox.Open | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return reply == QMessageBox.Open
+
+    def _validate_workflow(self) -> None:
+        report = self._current_readiness_report()
+        dialog = WorkflowValidationDialog(
+            sku=_safe_name(self._get_sku_name()),
+            steps=WORKFLOW_STEPS,
+            report=report,
+            parent=self,
+        )
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_step_index is not None:
+            self._switch_tab(dialog.selected_step_index, check_readiness=False)
+
+    # ======================================================================
     # MAIN PAGE UI
     # ======================================================================
     def _tab_button_style(self, active: bool) -> str:
@@ -1056,13 +1612,19 @@ class NewSKUPage(QWidget):
             QPushButton:hover { color: #571c86; }
         """
 
-    def _switch_tab(self, idx: int):
+    def _switch_tab(self, idx: int, check_readiness: bool = True):
         if self.stack is None:
             return
         self._sync_workflow_sku()
+        current_idx = self.stack.currentIndex()
+        if (
+            check_readiness
+            and idx != current_idx
+            and not self._confirm_step_readiness(idx)
+        ):
+            return
         self.stack.setCurrentIndex(idx)
-        for i, btn in enumerate(self.tab_buttons):
-            btn.setStyleSheet(self._tab_button_style(i == idx))
+        self._refresh_workflow_header()
 
         if idx == TAB_IMAGE_PROCESSING and self.template_extractor_page is not None:
             self.template_extractor_page.refresh_context()
@@ -1087,40 +1649,72 @@ class NewSKUPage(QWidget):
         root.setContentsMargins(18, 8, 18, 6)
         root.setSpacing(12)
 
-        nav_frame = QFrame()
-        nav_frame.setFixedHeight(38)
-        nav_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
-        nav_l = QHBoxLayout(nav_frame)
+        self.workflow_nav_frame = QFrame()
+        self.workflow_nav_frame.setObjectName("WorkflowHeader")
+        nav_outer = QVBoxLayout(self.workflow_nav_frame)
+        nav_outer.setContentsMargins(16, 8, 16, 6)
+        nav_outer.setSpacing(5)
+
+        summary_row = QHBoxLayout()
+        summary_row.setSpacing(12)
+        self.workflow_summary_sku = QLabel("SKU  •  unknown_sku")
+        self.workflow_summary_sku.setObjectName("WorkflowSku")
+        self.workflow_summary_count = QLabel("0 of 11 steps completed  •  0%")
+        self.workflow_summary_count.setObjectName("WorkflowMeta")
+        self.workflow_summary_status = QLabel("Current step  •  SKU Setup")
+        self.workflow_summary_status.setObjectName("WorkflowMeta")
+        summary_row.addWidget(self.workflow_summary_sku)
+        summary_row.addWidget(self.workflow_summary_count)
+        summary_row.addStretch(1)
+
+        self.workflow_validate_btn = QPushButton("Validate Workflow")
+        self.workflow_validate_btn.setCursor(Qt.PointingHandCursor)
+        self.workflow_validate_btn.setFixedHeight(26)
+        self.workflow_validate_btn.setStyleSheet("""
+            QPushButton {
+                background: #ffffff;
+                color: #571c86;
+                border: 1px solid #d9cbea;
+                border-radius: 13px;
+                padding: 0 12px;
+                font: 700 9px 'Segoe UI';
+            }
+            QPushButton:hover {
+                background: #f8f3fc;
+                border-color: #bfa7d8;
+            }
+            QPushButton:pressed {
+                background: #eee3f7;
+            }
+        """)
+        self.workflow_validate_btn.clicked.connect(self._validate_workflow)
+        summary_row.addWidget(self.workflow_validate_btn)
+        summary_row.addWidget(self.workflow_summary_status)
+        nav_outer.addLayout(summary_row)
+
+        self.workflow_progress = QProgressBar()
+        self.workflow_progress.setObjectName("WorkflowProgress")
+        self.workflow_progress.setRange(0, 100)
+        self.workflow_progress.setValue(0)
+        self.workflow_progress.setTextVisible(False)
+        nav_outer.addWidget(self.workflow_progress)
+
+        nav_l = QHBoxLayout()
         nav_l.setContentsMargins(0, 0, 0, 0)
-        nav_l.setSpacing(0)
+        nav_l.setSpacing(6)
 
         self.tab_buttons = []
-        tab_names = [
-            "SKU Setup",
-            "Axis Teaching",
-            "Capture",
-            "Image Processing",
-            "R Recipe Creation",
-            "Offset Calculation",
-            "Patch Creation",
-            "Augmentation",
-            "Training",
-            "Feature Threshold",
-            "Save Recipe",
-        ]
-        for idx, name in enumerate(tab_names):
-            btn = QPushButton(name)
+        for idx, (_key, name) in enumerate(WORKFLOW_STEPS):
+            btn = QPushButton()
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedHeight(34)
+            btn.setFixedHeight(36)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.clicked.connect(lambda checked=False, i=idx: self._switch_tab(i))
-            nav_l.addWidget(btn)
+            nav_l.addWidget(btn, 1)
             self.tab_buttons.append(btn)
 
-        nav_l.addStretch(1)
-        version_lbl = QLabel("v1.0")
-        version_lbl.setStyleSheet("font: 500 9px 'Segoe UI'; color: #b9b0c7; padding: 0 6px;")
-        nav_l.addWidget(version_lbl)
-        root.addWidget(nav_frame)
+        nav_outer.addLayout(nav_l)
+        root.addWidget(self.workflow_nav_frame)
 
         self.stack = FlexibleStackedWidget()
         self.stack.setMinimumSize(0, 0)
@@ -1238,6 +1832,7 @@ class NewSKUPage(QWidget):
             return
         self.latest_offset_assets[str(role)] = dict(payload or {})
         self.recipe_doc["offset_assets"] = dict(self.latest_offset_assets)
+        self._refresh_workflow_header()
 
         if self.offset_page is not None:
             self.offset_page.refresh_context()
@@ -1268,6 +1863,7 @@ class NewSKUPage(QWidget):
             return
         self.latest_training_assets[str(role)] = dict(payload or {})
         self.recipe_doc["training_assets"] = dict(self.latest_training_assets)
+        self._refresh_workflow_header()
 
         if self.status_lbl is not None:
             display_name = payload.get("display_name", role)
@@ -1291,6 +1887,7 @@ class NewSKUPage(QWidget):
             return
         self.latest_template_assets[str(role)] = dict(payload or {})
         self.recipe_doc["template_assets"] = dict(self.latest_template_assets)
+        self._refresh_workflow_header()
         if self.offset_page is not None:
             self.offset_page.refresh_context()
         if self.training_page is not None:
@@ -1318,6 +1915,7 @@ class NewSKUPage(QWidget):
             return
         self.latest_threshold_assets[str(role)] = dict(payload or {})
         self.recipe_doc["threshold_assets"] = dict(self.latest_threshold_assets)
+        self._refresh_workflow_header()
 
         if self.status_lbl is not None:
             threshold = payload.get("threshold")
@@ -1754,6 +2352,7 @@ class NewSKUPage(QWidget):
         if self.status_lbl is not None:
             self.status_lbl.setText(f"SKU setup saved successfully: {sku_name}")
         QMessageBox.information(self, "SKU Setup", f"SKU setup saved successfully for {sku_name}.")
+        self._refresh_workflow_header()
         self._switch_tab(TAB_AXIS_TEACHING)
 
     # ======================================================================
@@ -2994,6 +3593,27 @@ class NewSKUPage(QWidget):
         return msg
     def _save_recipe_final(self):
         try:
+            readiness = self.workflow_service.validate_step(
+                "save_recipe",
+                sku=_safe_name(self._get_sku_name()),
+                recipe_doc=self.recipe_doc,
+                saved_recipe=self.saved_recipe_doc,
+            )
+            if not readiness.get("ready", False):
+                missing = list(readiness.get("missing") or [])
+                details = self._format_missing_items(missing, limit=12)
+                QMessageBox.warning(
+                    self,
+                    "Recipe Not Ready",
+                    (
+                        "The production recipe cannot be saved because one or more "
+                        "workflow outputs are missing or outdated.\n\n"
+                        f"{details or '• Complete all mandatory workflow steps'}\n\n"
+                        "Re-run the indicated steps, then validate the workflow again."
+                    ),
+                )
+                return
+
             recipe_doc = self._build_final_recipe_doc()
 
             result = self.recipe_service.save_recipe(
@@ -3004,6 +3624,7 @@ class NewSKUPage(QWidget):
             self.saved_recipe_doc = dict(recipe_doc)
             self.saved_recipe_doc["_id"] = result.get("inserted_id")
             self.saved_recipe_doc["version"] = result.get("version", recipe_doc.get("version"))
+            self.saved_recipe_doc["updated_at"] = datetime.now().isoformat(timespec="seconds")
 
             self.saved_recipe_result = dict(result)
 
@@ -3068,6 +3689,7 @@ class NewSKUPage(QWidget):
             if self.recipe_summary_lbl is not None:
                 self.recipe_summary_lbl.setText(msg)
 
+            self._refresh_workflow_header()
             QMessageBox.information(self, "Recipe Saved", msg)
 
         except Exception as e:
