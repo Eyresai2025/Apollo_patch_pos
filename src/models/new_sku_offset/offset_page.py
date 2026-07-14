@@ -669,7 +669,7 @@ class OffsetCalculationPage(QWidget):
         self.run_button = self._make_button("Calculate Inner Side Offset", "primary")
         self.run_button.clicked.connect(self.start_active_calculation)
         action_row.addWidget(self.run_button)
-        self.next_button = self._make_button("Next: Training", "secondary")
+        self.next_button = self._make_button("Next: Patch Creation", "secondary")
         self.next_button.clicked.connect(self._request_continue)
         action_row.addWidget(self.next_button)
         main_layout.addLayout(action_row)

@@ -310,6 +310,9 @@ class FeatureThresholdPage(QWidget):
         self.template_title: Optional[QLabel] = None
         self.template_label: Optional[QLabel] = None
         self.template_choose_button: Optional[QPushButton] = None
+        self.recipe_title: Optional[QLabel] = None
+        self.recipe_label: Optional[QLabel] = None
+        self.recipe_choose_button: Optional[QPushButton] = None
         self.percentile_spin: Optional[QDoubleSpinBox] = None
         self.keep_processing_check: Optional[QCheckBox] = None
         self.progress: Optional[QProgressBar] = None
@@ -366,8 +369,8 @@ class FeatureThresholdPage(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Select one GOOD image, PatchCore model and percentile for each inspection view. "
-            "R templates are used only for Sidewall 1 and Sidewall 2."
+            "The latest GOOD reference image is loaded automatically for each SKU and inspection view. "
+            "Fast R recipe JSON files are used for Sidewall 1 and Sidewall 2; tiled template matching remains a safety fallback."
         )
         subtitle.setObjectName("PageSubTitle")
         subtitle.setWordWrap(True)
@@ -474,6 +477,19 @@ class FeatureThresholdPage(QWidget):
         config_layout.addWidget(self.template_title, 2, 0)
         config_layout.addWidget(self.template_label, 2, 1, 1, 3)
         config_layout.addWidget(self.template_choose_button, 2, 4)
+
+        self.recipe_title = QLabel("Fast R Recipe JSON")
+        self.recipe_title.setStyleSheet("font:700 9.5pt 'Segoe UI'; color:#571c86; border:none;")
+        self.recipe_label = QLabel("Not selected")
+        self.recipe_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.recipe_label.setWordWrap(False)
+        self.recipe_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.recipe_label.setStyleSheet("color:#756d80; border:none;")
+        self.recipe_choose_button = self._make_button("Choose Recipe", "secondary")
+        self.recipe_choose_button.clicked.connect(self.choose_recipe)
+        config_layout.addWidget(self.recipe_title, 3, 0)
+        config_layout.addWidget(self.recipe_label, 3, 1, 1, 3)
+        config_layout.addWidget(self.recipe_choose_button, 3, 4)
         config_layout.setColumnStretch(1, 1)
         main_layout.addWidget(config_card)
 
@@ -605,6 +621,15 @@ class FeatureThresholdPage(QWidget):
         expected = self.media_path / "template_extractor" / sku / role / f"{sku}_{role}_template.png"
         return str(expected.resolve()) if expected.is_file() else ""
 
+    def _default_recipe_path(self, role: str) -> str:
+        if role not in SIDEWALL_ROLES:
+            return ""
+        sku = self._current_sku_name()
+        expected = (
+            self.media_path / "training" / sku / role / f"{sku}_{role}_fast_recipe.json"
+        ).resolve()
+        return str(expected) if expected.is_file() else str(expected)
+
     def _capture_folder(self, role: str) -> Path:
         sku = self._current_sku_name()
         serial = str(self.camera_serials.get(role, "") or "").strip()
@@ -616,12 +641,44 @@ class FeatureThresholdPage(QWidget):
             require_images=True,
         )
 
+    def _default_good_reference_image(self, role: str) -> str:
+        """Return the latest valid GOOD/reference image for the active SKU and role.
+
+        The capture-path resolver is used first so this follows the same SKU/role
+        folder rules as the rest of the application. The newest supported image
+        is selected and previewed automatically.
+        """
+        try:
+            folder = self._capture_folder(role)
+        except Exception:
+            folder = self.media_path / "new_sku_images" / self._current_sku_name() / role
+
+        candidates = []
+        if folder.is_file() and folder.suffix.lower() in IMAGE_EXTENSIONS:
+            candidates = [folder]
+        elif folder.is_dir():
+            candidates = [
+                path for path in folder.rglob("*")
+                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+            ]
+
+        if not candidates:
+            return ""
+
+        # Prefer the latest capture. Name is used as a stable tie-breaker.
+        candidates.sort(
+            key=lambda path: (path.stat().st_mtime, path.name.lower()),
+            reverse=True,
+        )
+        return str(candidates[0].resolve())
+
     @staticmethod
     def _empty_state() -> Dict[str, Any]:
         return {
             "image_path": "",
             "model_path": "",
             "template_path": "",
+            "recipe_path": "",
             "percentile": float(DEFAULT_PERCENTILE),
             "result": {},
         }
@@ -659,6 +716,8 @@ class FeatureThresholdPage(QWidget):
         )
         if restored_image and Path(restored_image).is_file():
             state["image_path"] = str(Path(restored_image).resolve())
+        if result.get("R_recipe_path") and Path(str(result["R_recipe_path"])).is_file():
+            state["recipe_path"] = str(Path(str(result["R_recipe_path"])).resolve())
         if result.get("percentile") is not None:
             state["percentile"] = float(result["percentile"])
 
@@ -683,12 +742,28 @@ class FeatureThresholdPage(QWidget):
                 default_template = self._default_template_path(role)
                 if default_template:
                     state["template_path"] = default_template
+                state["recipe_path"] = self._default_recipe_path(role)
             if not state.get("model_path"):
                 auto_model = self._discover_model(role)
                 if auto_model:
                     state["model_path"] = str(auto_model)
+
+            current_image = str(state.get("image_path") or "")
+            if not current_image or not Path(current_image).is_file():
+                auto_image = self._default_good_reference_image(role)
+                if auto_image:
+                    state["image_path"] = auto_image
+
             if restore_existing and not state.get("result"):
                 self._restore_existing_result(role, state)
+
+            # Existing threshold files may point to an older or missing image.
+            # Keep a valid restored image, otherwise refill from the current SKU.
+            restored_image = str(state.get("image_path") or "")
+            if not restored_image or not Path(restored_image).is_file():
+                auto_image = self._default_good_reference_image(role)
+                if auto_image:
+                    state["image_path"] = auto_image
 
     def refresh_context(self) -> None:
         current_sku = self._current_sku_name()
@@ -764,6 +839,16 @@ class FeatureThresholdPage(QWidget):
             self.template_choose_button.setVisible(sidewall)
             self.template_choose_button.setEnabled(sidewall and not self.is_running)
 
+        recipe_path = str(state.get("recipe_path") or "")
+        if self.recipe_title is not None:
+            self.recipe_title.setVisible(sidewall)
+        if self.recipe_label is not None:
+            self.recipe_label.setVisible(sidewall)
+            self.recipe_label.setText(recipe_path or "Create the fast R recipe first")
+        if self.recipe_choose_button is not None:
+            self.recipe_choose_button.setVisible(sidewall)
+            self.recipe_choose_button.setEnabled(sidewall and not self.is_running)
+
         self._show_result(state.get("result") or {})
         if self.status_label is not None and not self.is_running:
             self.status_label.setText(f"Configure {display} and run feature extraction.")
@@ -833,6 +918,24 @@ class FeatureThresholdPage(QWidget):
         )
         if path:
             self.states[self.active_role]["template_path"] = str(Path(path).resolve())
+            self.states[self.active_role]["result"] = {}
+            self._refresh_active_view()
+            self._refresh_role_styles()
+
+    def choose_recipe(self) -> None:
+        if self.active_role not in SIDEWALL_ROLES:
+            return
+        start = self.states[self.active_role].get("recipe_path") or str(
+            self.media_path / "training" / self._current_sku_name() / self.active_role
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Choose {self.ROLE_INFO[self.active_role]} Fast R Recipe",
+            str(start),
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if path:
+            self.states[self.active_role]["recipe_path"] = str(Path(path).resolve())
             self.states[self.active_role]["result"] = {}
             self._refresh_active_view()
             self._refresh_role_styles()
@@ -969,6 +1072,7 @@ class FeatureThresholdPage(QWidget):
             return
 
         template_path: Optional[Path] = None
+        recipe_path: Optional[Path] = None
         if role in SIDEWALL_ROLES:
             template_text = str(state.get("template_path") or "")
             template_path = Path(template_text) if template_text else None
@@ -979,6 +1083,16 @@ class FeatureThresholdPage(QWidget):
                     f"Choose a valid R template for {self.ROLE_INFO[role]}.",
                 )
                 return
+            recipe_text = str(state.get("recipe_path") or "")
+            recipe_path = Path(recipe_text) if recipe_text else None
+            if recipe_path is None or not recipe_path.is_file():
+                QMessageBox.warning(
+                    self,
+                    "Feature Threshold",
+                    f"Fast R recipe is missing for {self.ROLE_INFO[role]}.\n\n"
+                    "Create it in the R Recipe Creation tab first.",
+                )
+                return
 
         output_root = self.media_path / "feature_threshold" / sku / role
         kwargs = {
@@ -987,6 +1101,8 @@ class FeatureThresholdPage(QWidget):
             "image_path": image_path,
             "model_path": model_path,
             "template_path": template_path,
+            "recipe_path": recipe_path,
+            "fast_fallback_to_tiled": True,
             "output_root": output_root,
             "percentile": float(state.get("percentile", DEFAULT_PERCENTILE)),
             "save_processing_images": bool(

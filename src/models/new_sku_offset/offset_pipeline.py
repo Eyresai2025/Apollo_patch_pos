@@ -284,10 +284,16 @@ def calculate_offset_calibration(
         )
 
         # Cropped calibration images are production outputs, not diagnostics.
-        # They are therefore always retained even when diagnostic previews are disabled.
-        cropped_images_root = output_json_path.parent / "cropped_images"
-        sidewall_cropped_dir = cropped_images_root / "sidewall"
-        target_cropped_dir = cropped_images_root / str(role)
+        # The same anchor-sidewall image is reused for Tread, Inner and Bead.
+        # Store that crop once at SKU level, while each target keeps its own crop
+        # inside its role-specific calibration folder.
+        sku_output_root = output_json_path.parent.parent
+        shared_cropped_images_root = sku_output_root / "cropped_images"
+        sidewall_cropped_dir = shared_cropped_images_root / "sidewall1"
+
+        target_cropped_images_root = output_json_path.parent / "cropped_images"
+        target_cropped_dir = target_cropped_images_root / str(role)
+
         sidewall_cropped_dir.mkdir(parents=True, exist_ok=True)
         target_cropped_dir.mkdir(parents=True, exist_ok=True)
 
@@ -435,7 +441,8 @@ def calculate_offset_calibration(
             "diagnostic_folder": str(diagnostic_dir.resolve())
             if diagnostic_dir is not None
             else "",
-            "cropped_images_folder": str(cropped_images_root.resolve()),
+            "cropped_images_folder": str(target_cropped_images_root.resolve()),
+            "shared_sidewall_cropped_folder": str(sidewall_cropped_dir.resolve()),
             "sidewall_cropped_folder": str(sidewall_cropped_dir.resolve()),
             "target_cropped_folder": str(target_cropped_dir.resolve()),
             "sidewall_cropped_image_count": len(sidewall_success),

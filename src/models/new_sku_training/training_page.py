@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal  # type: ignore
+from PyQt5.QtCore import Qt, QThread, pyqtSignal  # type: ignore
 from PyQt5.QtGui import QFont  # type: ignore
 from PyQt5.QtWidgets import (  # type: ignore
     QCheckBox,
@@ -40,7 +40,7 @@ from PyQt5.QtWidgets import (  # type: ignore
     QWidget,
 )
 
-from .training_service import LocalTrainingWorker
+from .training_service import LocalTrainingWorker, FiveSideTrainingWorker
 from src.COMMON.new_sku_capture_paths import (
     resolve_paired_role_folders,
     resolve_role_folder,
@@ -208,7 +208,7 @@ class NewSKUTrainingPage(QWidget):
 
         self.active_role = "sidewall1"
         self._context_sku = ""
-        self.worker: Optional[LocalTrainingWorker] = None
+        self.worker: Optional[QThread] = None
         self.running_role: Optional[str] = None
         self._loading_widgets = False
 
@@ -307,9 +307,7 @@ class NewSKUTrainingPage(QWidget):
 
         for role, display in self.ROLE_INFO.items():
             pipeline_label = (
-                "R-crop pipeline"
-                if role in self.SIDEWALL_ROLES
-                else "Paired-view pipeline"
+                "Patch-only training"
             )
             row = RoleTrainingRow(role, display, pipeline_label, self)
             row.selected.connect(self.set_active_role)
@@ -348,12 +346,13 @@ class NewSKUTrainingPage(QWidget):
         self.config_grid.setHorizontalSpacing(10)
         self.config_grid.setVerticalSpacing(8)
 
-        self._add_path_row(0, "raw_train_folder", "GOOD Raw Image Folder", "folder")
+        self._add_path_row(0, "raw_train_folder", "Augmented Patch Folder", "folder")
         self._add_path_row(1, "sidewall_input", "Anchor Sidewall Input", "folder")
         self._add_path_row(2, "target_input", "GOOD Target Image Folder", "folder")
         self._add_path_row(3, "r_template_path", "R Template", "image")
-        self._add_path_row(4, "calibration_json_path", "Calibration JSON", "json")
-        self._add_path_row(5, "out_path", "Output Model", "save_model")
+        self._add_path_row(4, "r_recipe_path", "Fast R Recipe JSON", "json")
+        self._add_path_row(5, "calibration_json_path", "Calibration JSON", "json")
+        self._add_path_row(6, "out_path", "Output Model", "save_model")
 
         anchor_label = QLabel("Anchor Sidewall")
         anchor_label.setStyleSheet("font:700 9pt 'Segoe UI'; color:#571c86; border:none;")
@@ -362,8 +361,8 @@ class NewSKUTrainingPage(QWidget):
         self.anchor_combo.addItem("Sidewall 2", "sidewall2")
         self.anchor_combo.setFixedHeight(34)
         self.anchor_combo.currentIndexChanged.connect(self._on_anchor_changed)
-        self.config_grid.addWidget(anchor_label, 6, 0)
-        self.config_grid.addWidget(self.anchor_combo, 6, 1, 1, 2)
+        self.config_grid.addWidget(anchor_label, 7, 0)
+        self.config_grid.addWidget(self.anchor_combo, 7, 1, 1, 2)
         self.anchor_widgets = (anchor_label, self.anchor_combo)
 
         settings_label = QLabel("Training Settings")
@@ -387,10 +386,9 @@ class NewSKUTrainingPage(QWidget):
         self.worker_spin.setPrefix("Workers ")
         self.worker_spin.valueChanged.connect(self._store_widget_values)
 
-        self.keep_patches_check = QCheckBox("Keep generated 448 × 448 patch images")
+        self.keep_patches_check = QCheckBox("Search patch images recursively")
         self.keep_patches_check.setToolTip(
-            "Full cropped images are always saved. Enable this only when the "
-            "generated patch images must also be retained after training."
+            "Search all subfolders inside the selected augmented patch folder."
         )
         self.keep_patches_check.stateChanged.connect(self._store_widget_values)
 
@@ -401,8 +399,8 @@ class NewSKUTrainingPage(QWidget):
         settings_row.addWidget(self.worker_spin)
         settings_row.addWidget(self.keep_patches_check)
         settings_row.addStretch(1)
-        self.config_grid.addWidget(settings_label, 7, 0)
-        self.config_grid.addLayout(settings_row, 7, 1, 1, 2)
+        self.config_grid.addWidget(settings_label, 8, 0)
+        self.config_grid.addLayout(settings_row, 8, 1, 1, 2)
         self.config_grid.setColumnStretch(1, 1)
         main_layout.addWidget(config_card)
 
@@ -469,10 +467,16 @@ class NewSKUTrainingPage(QWidget):
         self.open_output_button.clicked.connect(self.open_output_folder)
         action_row.addWidget(self.open_output_button)
         action_row.addStretch(1)
+        self.train_all_button = self._make_button("Train All 5 Sides", "success")
+        self.train_all_button.setToolTip(
+            "Train all five PatchCore models directly from their augmented patch folders."
+        )
+        self.train_all_button.clicked.connect(self.start_all_training)
+        action_row.addWidget(self.train_all_button)
         self.local_train_button = self._make_button("Start Sidewall 1 Training", "primary")
         self.local_train_button.clicked.connect(self.start_active_training)
         action_row.addWidget(self.local_train_button)
-        self.next_button = self._make_button("Next: Feature & Threshold", "secondary")
+        self.next_button = self._make_button("Next: Feature Threshold", "secondary")
         self.next_button.clicked.connect(self._request_continue)
         action_row.addWidget(self.next_button)
         main_layout.addLayout(action_row)
@@ -546,6 +550,19 @@ class NewSKUTrainingPage(QWidget):
         expected = self.media_path / "template_extractor" / sku / role / f"{sku}_{role}_template.png"
         return str(expected.resolve()) if expected.is_file() else ""
 
+    def _default_fast_recipe(self, role: str) -> str:
+        if role not in self.SIDEWALL_ROLES:
+            return ""
+        sku = self._current_sku_name()
+        expected = (
+            self.media_path
+            / "training"
+            / sku
+            / role
+            / f"{sku}_{role}_fast_recipe.json"
+        ).resolve()
+        return str(expected)
+
     def _provided_calibration(self, role: str) -> str:
         if role not in self.MULTIVIEW_ROLES:
             return ""
@@ -586,6 +603,15 @@ class NewSKUTrainingPage(QWidget):
                 return str(path.resolve())
         return ""
 
+    def _default_patch_folder(self, role: str) -> Path:
+        sku = self._current_sku_name()
+        root = self.media_path / "augmentation" / sku / role
+        candidates = [root / "04_augmented_patches", root / "augmented_patches", root]
+        for candidate in candidates:
+            if candidate.is_dir() and any(p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"} for p in candidate.rglob("*")):
+                return candidate.resolve()
+        return candidates[0].resolve()
+
     def _default_output_model(self, role: str) -> Path:
         sku = self._current_sku_name()
         return (
@@ -598,34 +624,29 @@ class NewSKUTrainingPage(QWidget):
 
     def _empty_state(self, role: str) -> Dict[str, Any]:
         return {
-            "pipeline": "sidewall" if role in self.SIDEWALL_ROLES else "multiview",
+            "pipeline": "patch_only",
             "raw_train_folder": "",
             "raw_train_folder_manual": False,
-            "anchor_role": "sidewall1",
-            "sidewall_input": "",
-            "sidewall_input_manual": False,
-            "target_input": "",
-            "target_input_manual": False,
-            "r_template_path": "",
-            "calibration_json_path": "",
-            "out_path": "",
-            "coreset_percentage": 0.10,
-            "batch_size": 32,
-            "num_workers": min(4, os.cpu_count() or 1),
-            "keep_generated_patches": False,
-            "result": {},
+            "anchor_role": "sidewall1", "sidewall_input": "", "target_input": "",
+            "r_template_path": "", "r_recipe_path": "", "calibration_json_path": "",
+            "out_path": "", "coreset_percentage": 0.10, "batch_size": 32,
+            "num_workers": 0, "keep_generated_patches": True, "result": {},
         }
 
     def _restore_existing_result(self, role: str, state: Dict[str, Any]) -> None:
         model_path = Path(str(state.get("out_path") or ""))
         if not model_path.is_file():
             return
-        summary_name = (
-            "raw_to_patchcore_training_summary.json"
-            if role in self.SIDEWALL_ROLES
-            else "tread_raw_to_patchcore_training_summary.json"
-        )
-        summary_path = model_path.parent / summary_name
+        summary_names = {
+            "sidewall1": "raw_to_patchcore_training_summary.json",
+            "sidewall2": "raw_to_patchcore_training_summary.json",
+            "tread": "tread_raw_to_patchcore_training_summary.json",
+            "innerwall": "inner_raw_to_patchcore_training_summary.json",
+            "bead": "bead_raw_to_patchcore_training_summary.json",
+        }
+        preferred_summary = model_path.parent / summary_names[role]
+        legacy_summary = model_path.parent / "tread_raw_to_patchcore_training_summary.json"
+        summary_path = preferred_summary if preferred_summary.is_file() else legacy_summary
         summary: Dict[str, Any] = {}
         if summary_path.is_file():
             try:
@@ -689,31 +710,8 @@ class NewSKUTrainingPage(QWidget):
 
     def _apply_context_defaults(self, restore_existing: bool = True) -> None:
         for role, state in self.states.items():
-            if role in self.SIDEWALL_ROLES:
-                if not bool(state.get("raw_train_folder_manual")):
-                    state["raw_train_folder"] = str(self._capture_folder(role))
-                template = self._default_template(role)
-                if template:
-                    state["r_template_path"] = template
-            else:
-                anchor = str(state.get("anchor_role") or "sidewall1")
-                auto_sidewall, auto_target = self._paired_capture_folders(anchor, role)
-                if not bool(state.get("sidewall_input_manual")):
-                    state["sidewall_input"] = str(auto_sidewall)
-                if not bool(state.get("target_input_manual")):
-                    state["target_input"] = str(auto_target)
-                template = self._default_template(anchor)
-                if template:
-                    state["r_template_path"] = template
-                provided_calibration = self._provided_calibration(role)
-                if provided_calibration:
-                    state["calibration_json_path"] = provided_calibration
-                elif (
-                    not state.get("calibration_json_path")
-                    or not Path(str(state.get("calibration_json_path"))).is_file()
-                ):
-                    state["calibration_json_path"] = self._default_calibration(role)
-
+            if not bool(state.get("raw_train_folder_manual")):
+                state["raw_train_folder"] = str(self._default_patch_folder(role))
             if not state.get("out_path"):
                 state["out_path"] = str(self._default_output_model(role))
             if restore_existing and not state.get("result"):
@@ -760,43 +758,19 @@ class NewSKUTrainingPage(QWidget):
         self._loading_widgets = True
         try:
             display = self.ROLE_INFO[self.active_role]
-            sidewall = self.active_role in self.SIDEWALL_ROLES
-
-            if not sidewall:
-                target_label = self.path_rows["target_input"][0]
-                target_label.setText(f"GOOD {display} Image Folder")
-                self.path_edits["target_input"].setPlaceholderText(
-                    f"Select good {display.lower()} image folder"
-                )
-
             self.active_title.setText(f"{display} Training")
-            self.pipeline_badge.setText(
-                "SIDEWALL R-CROP PIPELINE" if sidewall else "PAIRED-VIEW OFFSET PIPELINE"
-            )
+            self.pipeline_badge.setText("PATCH-ONLY TRAINING")
             self.local_train_button.setText(f"Start {display} Training")
-
-            self._set_path_row_visible("raw_train_folder", sidewall)
-            self._set_path_row_visible("sidewall_input", not sidewall)
-            self._set_path_row_visible("target_input", not sidewall)
-            self._set_path_row_visible("r_template_path", True)
-            self._set_path_row_visible("calibration_json_path", not sidewall)
-            self._set_path_row_visible("out_path", True)
-            for widget in self.anchor_widgets:
-                widget.setVisible(not sidewall)
-
-            for key, edit in self.path_edits.items():
-                edit.setText(str(state.get(key) or ""))
-
-            anchor_role = str(state.get("anchor_role") or "sidewall1")
-            index = self.anchor_combo.findData(anchor_role)
-            self.anchor_combo.setCurrentIndex(max(0, index))
-            self.coreset_spin.setValue(float(state.get("coreset_percentage", 0.10)) * 100.0)
-            self.batch_spin.setValue(int(state.get("batch_size", 32)))
-            self.worker_spin.setValue(int(state.get("num_workers", min(4, os.cpu_count() or 1))))
-            self.keep_patches_check.setChecked(bool(state.get("keep_generated_patches", False)))
+            for key in self.path_rows:
+                self._set_path_row_visible(key, key in {"raw_train_folder", "out_path"})
+            for widget in self.anchor_widgets: widget.setVisible(False)
+            for key, edit in self.path_edits.items(): edit.setText(str(state.get(key) or ""))
+            self.coreset_spin.setValue(float(state.get("coreset_percentage",0.10))*100.0)
+            self.batch_spin.setValue(int(state.get("batch_size",32)))
+            self.worker_spin.setValue(int(state.get("num_workers",0)))
+            self.keep_patches_check.setChecked(bool(state.get("keep_generated_patches",True)))
             self._show_result(dict(state.get("result") or {}))
-        finally:
-            self._loading_widgets = False
+        finally: self._loading_widgets=False
 
     def _store_widget_values(self, *_args) -> None:
         if self._loading_widgets or self.active_role not in self.states:
@@ -862,80 +836,112 @@ class NewSKUTrainingPage(QWidget):
             self.role_rows[self.active_role].set_state("waiting", "Not trained")
 
     def _validate_active_config(self) -> Optional[Dict[str, Any]]:
-        self._store_widget_values()
-        role = self.active_role
-        display = self.ROLE_INFO[role]
-        state = self.states[role]
-        sku = self._current_sku_name()
-        if sku == "unknown_sku":
-            QMessageBox.warning(self, "Training", "Complete and save SKU Setup first.")
-            return None
+        self._store_widget_values(); role=self.active_role; state=self.states[role]; sku=self._current_sku_name()
+        if sku=="unknown_sku": QMessageBox.warning(self,"Training","Complete and save SKU Setup first."); return None
+        patch_folder=Path(str(state.get("raw_train_folder") or "")); output_model=Path(str(state.get("out_path") or ""))
+        if not patch_folder.is_dir(): QMessageBox.warning(self,"Training",f"Choose a valid augmented patch folder for {self.ROLE_INFO[role]}.\n\n{patch_folder}"); return None
+        if not any(p.is_file() and p.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".tif",".tiff"} for p in patch_folder.rglob("*")):
+            QMessageBox.warning(self,"Training",f"No patch images found in:\n{patch_folder}"); return None
+        if not str(output_model): QMessageBox.warning(self,"Training","Choose the output model path."); return None
+        return {"pipeline":"patch_only","role":role,"display_name":self.ROLE_INFO[role],"sku_name":sku,"patch_folder":str(patch_folder.resolve()),"out_path":str(output_model.resolve()),"coreset_percentage":float(state.get("coreset_percentage",0.10)),"batch_size":int(state.get("batch_size",32)),"num_workers":int(state.get("num_workers",0)),"recursive":bool(state.get("keep_generated_patches",True))}
 
-        output_text = str(state.get("out_path") or "").strip()
-        if not output_text:
-            QMessageBox.warning(self, "Training", "Choose the output model path.")
-            return None
-        output_model = Path(output_text)
+    def _build_all_training_config(self) -> Optional[Dict[str, Any]]:
+        self._store_widget_values(); sku=self._current_sku_name(); jobs=[]; errors=[]
+        role_names={"sidewall1":"sidewall1","sidewall2":"sidewall2","tread":"tread","innerwall":"inner","bead":"bead"}
+        for role in ("sidewall1","sidewall2","tread","innerwall","bead"):
+            state=self.states[role]; folder=Path(str(state.get("raw_train_folder") or self._default_patch_folder(role))); model=Path(str(state.get("out_path") or self._default_output_model(role)))
+            if not folder.is_dir(): errors.append(f"{self.ROLE_INFO[role]}: augmented patch folder is invalid: {folder}")
+            elif not any(p.is_file() and p.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".tif",".tiff"} for p in folder.rglob("*")): errors.append(f"{self.ROLE_INFO[role]}: no patch images found in {folder}")
+            jobs.append({"name":role_names[role],"enabled":True,"patch_folder":str(folder.resolve()),"out_model":str(model.resolve()),"image_batch_size":int(state.get("batch_size",32)),"num_workers":int(state.get("num_workers",0)),"coreset_percentage":float(state.get("coreset_percentage",0.10)),"recursive":bool(state.get("keep_generated_patches",True))})
+        if errors: QMessageBox.warning(self,"Train All 5 Sides","Please correct these inputs:\n\n"+"\n".join(errors)); return None
+        root=(self.media_path/"training"/sku).resolve()
+        return {"cycle_name":f"{sku}_patch_only_training_cycle","cycle_config_root":str(root),"output_root":str(root),"max_parallel_workers":min(2,max(1,os.cpu_count() or 1)),"cuda_visible_devices":"0","cpu_threads_per_worker":1,"device":"auto","image_batch_size":32,"num_workers":0,"input_size":224,"feature_patch_size":3,"coreset_percentage":0.1,"seed":0,"recursive":True,"jobs":jobs}
 
-        config: Dict[str, Any] = {
-            "pipeline": state["pipeline"],
-            "role": role,
-            "display_name": display,
-            "sku_name": sku,
-            "out_path": str(output_model.expanduser().resolve()),
-            "preprocess_output_root": str((output_model.parent / "prepared_training").resolve()),
-            "timing_csv": str((output_model.parent / "training_timings.csv").resolve()),
-            "preprocess_report_json": str((output_model.parent / "preprocess_report.json").resolve()),
-            "coreset_percentage": float(state.get("coreset_percentage", 0.10)),
-            "batch_size": int(state.get("batch_size", 32)),
-            "num_workers": int(state.get("num_workers", 4)),
-            "keep_generated_patches": bool(state.get("keep_generated_patches", False)),
-        }
+    def start_all_training(self) -> None:
+        if self.is_running:
+            return
+        config = self._build_all_training_config()
+        if config is None:
+            return
+        reply = QMessageBox.question(
+            self, "Train All 5 Sides",
+            "Start patch-only PatchCore training for all five inspection views?\n\nEach model will use its augmented patch folder directly.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.running_role = "all"
+        self.log_box.clear()
+        self.log_box.appendPlainText("Starting AI-team patch-only five-side training cycle...")
+        self.status_title.setText("Training all five sides")
+        self.result_pill.setText("RUNNING ALL")
+        self.progress.setRange(0, 0)
+        for row in self.role_rows.values():
+            row.set_state("running", "Running")
+        self._set_controls_enabled(False)
+        self.worker = FiveSideTrainingWorker(config, str(self.project_root), self)
+        self.worker.statusSignal.connect(self._on_training_status)
+        self.worker.finishedSignal.connect(self._on_all_training_finished)
+        self.worker.errorSignal.connect(self._on_all_training_error)
+        self.worker.start()
 
-        if role in self.SIDEWALL_ROLES:
-            raw_folder = Path(str(state.get("raw_train_folder") or ""))
-            template = Path(str(state.get("r_template_path") or ""))
-            if not raw_folder.is_dir():
-                QMessageBox.warning(self, "Training", f"Choose a valid GOOD raw image folder for {display}.")
-                return None
-            if not template.is_file():
-                QMessageBox.warning(self, "Training", f"Choose a valid R template for {display}.")
-                return None
-            config.update(
-                {
-                    "raw_train_folder": str(raw_folder.resolve()),
-                    "r_template_path": str(template.resolve()),
+    def _on_all_training_finished(self, summary: Dict[str, Any]) -> None:
+        role_map = {"sidewall1": "sidewall1", "sidewall2": "sidewall2", "tread": "tread", "inner": "innerwall", "bead": "bead"}
+        failed = []
+        for item in list(summary.get("results") or []):
+            role = role_map.get(str(item.get("name", "")))
+            if not role:
+                continue
+            status = str(item.get("status", ""))
+            if status == "success" and item.get("out_model_path"):
+                result = {
+                    "sku_name": self._current_sku_name(), "role": role,
+                    "display_name": self.ROLE_INFO[role], "pipeline": "patch_only",
+                    "model_path": str(item.get("out_model_path", "")),
+                    "summary_path": str(Path(str(item.get("out_model_path", ""))).resolve().parent / "main_patch_training_summary.json"),
+                    "patch_folder": str(item.get("patch_folder", "")),
+                    "timing_csv": str(Path(str(item.get("out_model_path", ""))).resolve().parent / "main_patch_training_summary.csv"),
+                    "worker_log": str(item.get("worker_log", "")),
+                    "total_pipeline_time": float(item.get("elapsed_seconds", 0.0) or 0.0),
+                    "generated_training_patch_count": int(item.get("patch_image_count", 0) or 0),
+                    "successful_input_count": int(item.get("successful_patch_image_count", 0) or 0),
+                    "failed_input_count": int(item.get("failed_patch_image_count", 0) or 0),
+                    "cycle_output_root": str(summary.get("cycle_output_root", "")),
                 }
-            )
-        else:
-            sidewall_input = Path(str(state.get("sidewall_input") or ""))
-            target_input = Path(str(state.get("target_input") or ""))
-            template = Path(str(state.get("r_template_path") or ""))
-            calibration = Path(str(state.get("calibration_json_path") or ""))
-            for label, path in (
-                ("anchor sidewall input", sidewall_input),
-                (f"{display} target input", target_input),
-            ):
-                if not path.exists():
-                    QMessageBox.warning(self, "Training", f"Choose a valid {label}.")
-                    return None
-            if not template.is_file():
-                QMessageBox.warning(self, "Training", "Choose a valid anchor-sidewall R template.")
-                return None
-            if not calibration.is_file():
-                QMessageBox.warning(self, "Training", "Choose a valid calibration JSON file.")
-                return None
-            config.update(
-                {
-                    "anchor_role": str(state.get("anchor_role") or "sidewall1"),
-                    "sidewall_input": str(sidewall_input.resolve()),
-                    "target_input": str(target_input.resolve()),
-                    "r_template_path": str(template.resolve()),
-                    "calibration_json_path": str(calibration.resolve()),
-                }
-            )
+                self.states[role]["result"] = result
+                self.role_rows[role].set_state("done", "Completed")
+                self.trainingSaved.emit(role, dict(result))
+            else:
+                self.role_rows[role].set_state("failed", "Failed")
+                failed.append(self.ROLE_INFO[role])
+        self.progress.setRange(0, 100); self.progress.setValue(100)
+        self.result_pill.setText("COMPLETED" if not failed else "PARTIAL")
+        self.status_title.setText("Five-side training completed" if not failed else "Five-side training completed with failures")
+        self._set_controls_enabled(True)
+        if self.worker is not None:
+            self.worker.deleteLater(); self.worker = None
+        self.running_role = None
+        self._show_result(dict(self.states[self.active_role].get("result") or {}))
+        message = (
+            "All models and related files were saved in their respective side folders.\n\n"
+            f"SKU training root:\n{summary.get('cycle_output_root', '')}"
+        )
+        if failed: message += "\n\nFailed or skipped: " + ", ".join(failed)
+        QMessageBox.information(self, "Five-Side Training", message)
 
-        return config
+    def _on_all_training_error(self, message: str) -> None:
+        for role, row in self.role_rows.items():
+            if not (self.states[role].get("result") or {}).get("model_path"):
+                row.set_state("failed", "Failed")
+        self.progress.setRange(0, 100); self.progress.setValue(0)
+        self.result_pill.setText("FAILED")
+        self.status_title.setText("Five-side training failed")
+        self.log_box.appendPlainText(str(message))
+        self._set_controls_enabled(True)
+        if self.worker is not None:
+            self.worker.deleteLater(); self.worker = None
+        self.running_role = None
+        QMessageBox.critical(self, "Five-Side Training Error", str(message))
 
     def start_active_training(self) -> None:
         if self.is_running:
@@ -986,6 +992,7 @@ class NewSKUTrainingPage(QWidget):
         self.batch_spin.setEnabled(enabled)
         self.worker_spin.setEnabled(enabled)
         self.keep_patches_check.setEnabled(enabled)
+        self.train_all_button.setEnabled(enabled)
         self.local_train_button.setEnabled(enabled)
         self.next_button.setEnabled(enabled)
         self.cloud_button.setEnabled(enabled)
@@ -1069,7 +1076,7 @@ class NewSKUTrainingPage(QWidget):
         )
         self.result_summary.setText(
             f"Model: {result.get('model_path', '')}\n"
-            f"Cropped images: {crop_count} saved in {crop_root}\n"
+            f"Patch folder: {result.get('patch_folder', crop_root)}\n"
             f"Generated patches: {result.get('generated_training_patch_count', 0)}    |    "
             f"Successful inputs: {result.get('successful_input_count', 0)}    |    "
             f"Failed inputs: {result.get('failed_input_count', 0)}    |    "

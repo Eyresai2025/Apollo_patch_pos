@@ -519,7 +519,7 @@ class TemplateExtractorPage(QWidget):
         self.save_all_btn = self._make_button("Save All Templates", "success")
         self.save_all_btn.clicked.connect(self.save_all_templates)
         action_layout.addWidget(self.save_all_btn)
-        next_btn = self._make_button("Next: Offset Calculation", "secondary")
+        next_btn = self._make_button("Next: R Recipe Creation", "secondary")
         next_btn.clicked.connect(self.continueRequested.emit)
         action_layout.addWidget(next_btn)
         page_layout.addWidget(action_bar)

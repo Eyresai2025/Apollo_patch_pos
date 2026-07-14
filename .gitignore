@@ -21,4 +21,6 @@ offset_calibration
 
 # Training model folders
 media/training/
-trainingmedia/
+media/training/*
+media/augmentation/
+media/patch_creation/

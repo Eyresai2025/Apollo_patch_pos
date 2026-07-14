@@ -26,7 +26,10 @@ from src.COMMON.new_sku_capture_paths import (
 )
 from src.models.template_extracter import TemplateExtractorPage
 from src.models.new_sku_training.training_page import NewSKUTrainingPage
+from src.models.new_sku_training.r_recipe_page import RRecipeCreationPage
 from src.models.new_sku_offset.offset_page import OffsetCalculationPage
+from src.models.patch_creation.patch_creation_page import PatchCreationPage
+from src.models.augmentation.augmentation_page import AugmentationPage
 from src.models.feature_thresh.threshold_page import FeatureThresholdPage
 
 try:
@@ -41,10 +44,13 @@ TAB_SKU_SETUP = 0
 TAB_AXIS_TEACHING = 1
 TAB_CAPTURE = 2
 TAB_IMAGE_PROCESSING = 3
-TAB_OFFSET_CALCULATION = 4
-TAB_TRAINING = 5
-TAB_FEATURE_THRESHOLD = 6
-TAB_SAVE_RECIPE = 7
+TAB_R_RECIPE_CREATION = 4
+TAB_OFFSET_CALCULATION = 5
+TAB_PATCH_CREATION = 6
+TAB_AUGMENTATION = 7
+TAB_TRAINING = 8
+TAB_FEATURE_THRESHOLD = 9
+TAB_SAVE_RECIPE = 10
 
 # Backward-compatible alias used by older helper names.
 TAB_TEMPLATE_EXTRACTOR = TAB_IMAGE_PROCESSING
@@ -544,7 +550,10 @@ class NewSKUPage(QWidget):
         self.axis_teaching_page: Optional[QWidget] = None
         self.capture_page: Optional[QWidget] = None
         self.template_extractor_page: Optional[TemplateExtractorPage] = None
+        self.r_recipe_page: Optional[RRecipeCreationPage] = None
         self.offset_page: Optional[OffsetCalculationPage] = None
+        self.patch_creation_page: Optional[PatchCreationPage] = None
+        self.augmentation_page: Optional[AugmentationPage] = None
         self.training_page: Optional[NewSKUTrainingPage] = None
         self.feature_threshold_page: Optional[FeatureThresholdPage] = None
         self.recipe_page: Optional[QWidget] = None
@@ -578,6 +587,8 @@ class NewSKUPage(QWidget):
         self._update_preview_from_latest()
         if self.template_extractor_page is not None:
             self.template_extractor_page.refresh_context()
+        if self.r_recipe_page is not None:
+            self.r_recipe_page.refresh_context()
         if self.offset_page is not None:
             self.offset_page.refresh_context()
         if self.training_page is not None:
@@ -892,6 +903,7 @@ class NewSKUPage(QWidget):
 
             for page in (
                 self.template_extractor_page,
+                self.r_recipe_page,
                 self.offset_page,
                 self.training_page,
                 self.feature_threshold_page,
@@ -914,6 +926,7 @@ class NewSKUPage(QWidget):
 
         for page in (
             self.template_extractor_page,
+            self.r_recipe_page,
             self.offset_page,
             self.training_page,
             self.feature_threshold_page,
@@ -1053,8 +1066,14 @@ class NewSKUPage(QWidget):
 
         if idx == TAB_IMAGE_PROCESSING and self.template_extractor_page is not None:
             self.template_extractor_page.refresh_context()
+        elif idx == TAB_R_RECIPE_CREATION and self.r_recipe_page is not None:
+            self.r_recipe_page.refresh_context()
         elif idx == TAB_OFFSET_CALCULATION and self.offset_page is not None:
             self.offset_page.refresh_context()
+        elif idx == TAB_PATCH_CREATION and self.patch_creation_page is not None:
+            self.patch_creation_page.refresh_context()
+        elif idx == TAB_AUGMENTATION and self.augmentation_page is not None:
+            self.augmentation_page.refresh_context()
         elif idx == TAB_TRAINING and self.training_page is not None:
             self.training_page.refresh_context()
         elif idx == TAB_FEATURE_THRESHOLD and self.feature_threshold_page is not None:
@@ -1081,9 +1100,12 @@ class NewSKUPage(QWidget):
             "Axis Teaching",
             "Capture",
             "Image Processing",
+            "R Recipe Creation",
             "Offset Calculation",
+            "Patch Creation",
+            "Augmentation",
             "Training",
-            "Feature & Threshold",
+            "Feature Threshold",
             "Save Recipe",
         ]
         for idx, name in enumerate(tab_names):
@@ -1116,6 +1138,16 @@ class NewSKUPage(QWidget):
         )
         self.template_extractor_page.templateSaved.connect(self._on_template_saved)
         self.template_extractor_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_R_RECIPE_CREATION)
+        )
+
+        self.r_recipe_page = RRecipeCreationPage(
+            media_path=self.media_path,
+            sku_name_provider=self._get_sku_name,
+            template_assets_provider=self._collect_template_assets,
+            parent=self,
+        )
+        self.r_recipe_page.continueRequested.connect(
             lambda: self._switch_tab(TAB_OFFSET_CALCULATION)
         )
 
@@ -1129,6 +1161,26 @@ class NewSKUPage(QWidget):
         )
         self.offset_page.offsetSaved.connect(self._on_offset_saved)
         self.offset_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_PATCH_CREATION)
+        )
+
+        self.patch_creation_page = PatchCreationPage(
+            media_path=self.media_path,
+            project_root=str(PROJECT_ROOT),
+            sku_name_provider=self._get_sku_name,
+            parent=self,
+        )
+        self.patch_creation_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_AUGMENTATION)
+        )
+
+        self.augmentation_page = AugmentationPage(
+            media_path=self.media_path,
+            project_root=str(PROJECT_ROOT),
+            sku_name_provider=self._get_sku_name,
+            parent=self,
+        )
+        self.augmentation_page.continueRequested.connect(
             lambda: self._switch_tab(TAB_TRAINING)
         )
 
@@ -1169,7 +1221,10 @@ class NewSKUPage(QWidget):
         self.stack.addWidget(self.axis_teaching_page)
         self.stack.addWidget(self.capture_page)
         self.stack.addWidget(self.template_extractor_page)
+        self.stack.addWidget(self.r_recipe_page)
         self.stack.addWidget(self.offset_page)
+        self.stack.addWidget(self.patch_creation_page)
+        self.stack.addWidget(self.augmentation_page)
         self.stack.addWidget(self.training_page)
         self.stack.addWidget(self.feature_threshold_page)
         self.stack.addWidget(self.recipe_page)
@@ -1422,6 +1477,7 @@ class NewSKUPage(QWidget):
 
         for page in (
             self.template_extractor_page,
+            self.r_recipe_page,
             self.offset_page,
             self.training_page,
             self.feature_threshold_page,

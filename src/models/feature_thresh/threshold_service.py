@@ -28,6 +28,9 @@ import cv2  # type: ignore
 import numpy as np
 
 from . import r_crop_utils as rc
+from . import detect_and_crop_utils as dc
+from . import detect_and_crop_fast as dcf
+from . import r_locator_fast as rlf
 from .config import (
     COVER_COMPLETE_IMAGE,
     DEFAULT_PERCENTILE,
@@ -93,7 +96,8 @@ def _validate_inputs(
     image_path: Path,
     model_path: Path,
     template_path: Optional[Path],
-) -> tuple[Path, Path, Optional[Path]]:
+    recipe_path: Optional[Path],
+) -> tuple[Path, Path, Optional[Path], Optional[Path]]:
     role = str(role).strip().lower()
     image_path = Path(image_path).expanduser().resolve()
     model_path = Path(model_path).expanduser().resolve()
@@ -106,14 +110,20 @@ def _validate_inputs(
         raise FileNotFoundError(f"PatchCore model not found: {model_path}")
 
     resolved_template: Optional[Path] = None
+    resolved_recipe: Optional[Path] = None
     if role in SIDEWALL_ROLES:
         if template_path is None or not str(template_path).strip():
             raise ValueError(f"An R template is required for {role}.")
         resolved_template = Path(template_path).expanduser().resolve()
         if not resolved_template.is_file():
             raise FileNotFoundError(f"R template not found: {resolved_template}")
+        if recipe_path is None or not str(recipe_path).strip():
+            raise ValueError(f"A fast R recipe JSON is required for {role}.")
+        resolved_recipe = Path(recipe_path).expanduser().resolve()
+        if not resolved_recipe.is_file():
+            raise FileNotFoundError(f"Fast R recipe not found: {resolved_recipe}")
 
-    return image_path, model_path, resolved_template
+    return image_path, model_path, resolved_template, resolved_recipe
 
 
 def _generate_patches(
@@ -169,78 +179,100 @@ def _prepare_sidewall_image(
     raw_image: np.ndarray,
     raw_path: Path,
     template_path: Path,
+    recipe_path: Path,
     processing_root: Path,
     save_processing_images: bool,
     status_callback: StatusCallback,
     progress_callback: ProgressCallback,
+    fast_fallback_to_tiled: bool = True,
 ) -> tuple[Path, dict]:
-    _emit_progress(progress_callback, 4, "Loading the selected R template")
-    template_gray = rc.load_r_template(template_path)
+    """Prepare a sidewall R-to-R crop using the taught fast recipe.
 
+    The tiled detector is retained only as a safety fallback and uses the same
+    R template and matching settings as training/inference.
+    """
+    _emit_progress(progress_callback, 4, "Loading fast R recipe and R template")
+    recipe = rlf.Recipe.load(recipe_path)
+    template_gray = dc.load_r_template(template_path, blur_kernel=(5, 5))
+
+    detection_method = "fast"
+    fallback_reason = ""
+    _emit_status(status_callback, f"Running fast R detection using {recipe_path.name}...")
     try:
-        from rembg import new_session  # type: ignore
-    except Exception as error:
-        raise RuntimeError(
-            "Sidewall R-crop processing requires rembg. Install a compatible "
-            "version in the active environment."
-        ) from error
-
-    _emit_status(status_callback, "Loading the tyre-boundary model for sidewall R detection...")
-    rembg_session = new_session("isnet-general-use")
-
-    _emit_progress(progress_callback, 8, "Detecting tyre boundaries and the two R marks")
-    tyre_left, tyre_right, visible_left, visible_right = rc.detect_tyre_boundaries(
-        raw_image,
-        rembg_session,
-    )
-    working = rc.create_background_removed_image(raw_image, visible_left, visible_right)
-    tyre_center_x = rc.draw_tyre_center_line(working, tyre_left, tyre_right)
-    detections = rc.detect_r_in_tyre(
-        working,
-        tyre_left,
-        tyre_center_x,
-        template_gray,
-    )
-
-    if len(detections) < 2:
-        raise RuntimeError(
-            f"Only {len(detections)} valid R detection(s) were found in {raw_path.name}."
+        boxes, bands, metadata = dcf.detect_r_bands_fast(
+            raw_image=raw_image,
+            recipe=recipe,
+            verbose=False,
         )
+        if len(bands) < 2:
+            raise RuntimeError(f"Fast recipe found only {len(bands)} R band(s)")
+    except Exception as exc:
+        if not fast_fallback_to_tiled:
+            raise
+        detection_method = "tiled_fallback"
+        fallback_reason = f"{type(exc).__name__}: {exc}"
+        _emit_status(status_callback, "Fast R detection failed; running tiled template fallback...")
+        boxes, bands, metadata = dc.detect_r_bands(
+            raw_image=raw_image,
+            template_blurred=template_gray,
+            patch_height=4200,
+            patch_width=4096,
+            match_threshold=0.70,
+            minimum_band_height=20,
+            row_gap=5,
+            blur_kernel=(5, 5),
+        )
+        if len(bands) < 2:
+            raise RuntimeError(
+                f"Fast and tiled R detection both failed for {raw_path.name}; "
+                f"tiled detector found {len(bands)} R band(s)."
+            )
 
-    mapping_preview, raw_r_crop, raw_y_start, raw_y_end = rc.map_r_y_to_raw_image(
-        raw_image,
-        detections,
-    )
-    if raw_r_crop is None or raw_y_start is None or raw_y_end is None:
+    _emit_progress(progress_callback, 12, "Cropping between the first two R bands")
+    crop_result = dc.crop_between_first_two_r_bands(raw_image, bands)
+    if isinstance(crop_result, tuple):
+        raw_r_crop = crop_result[0]
+        raw_y_start = int(crop_result[1]) if len(crop_result) > 1 else int(sorted(bands, key=lambda x: x["top_y"])[0]["top_y"])
+        raw_y_end = int(crop_result[2]) if len(crop_result) > 2 else int(sorted(bands, key=lambda x: x["top_y"])[1]["top_y"])
+    else:
+        raw_r_crop = crop_result
+        ordered = sorted(bands, key=lambda x: x["top_y"])
+        raw_y_start = int(ordered[0]["top_y"])
+        raw_y_end = int(ordered[1]["top_y"])
+    if raw_r_crop is None or raw_r_crop.size == 0:
         raise RuntimeError(f"R-to-R crop creation failed for {raw_path.name}.")
 
-    _emit_progress(progress_callback, 14, "Resizing the R-to-R crop")
+    _emit_progress(progress_callback, 15, "Resizing the R-to-R crop")
     resized_r_crop = cv2.resize(raw_r_crop, (RESIZED_R_WIDTH, RESIZED_R_HEIGHT))
     prepared_path = processing_root / "prepared_R_crop_4036x17920.png"
-    if not cv2.imwrite(
-        str(prepared_path),
-        resized_r_crop,
-        [cv2.IMWRITE_PNG_COMPRESSION, 0],
-    ):
+    if not cv2.imwrite(str(prepared_path), resized_r_crop, [cv2.IMWRITE_PNG_COMPRESSION, 0]):
         raise OSError(f"Unable to save prepared R crop: {prepared_path}")
 
     if save_processing_images:
-        if mapping_preview is not None:
-            _save_scaled_preview(mapping_preview, processing_root / "R_mapping_preview.png")
         _save_scaled_preview(raw_r_crop, processing_root / "raw_R_crop_preview.png")
+        preview = dc.stretch_gray(raw_image)
+        if preview.ndim == 2:
+            preview = cv2.cvtColor(preview, cv2.COLOR_GRAY2BGR)
+        for item in boxes:
+            x1, y1, x2, y2 = [int(v) for v in item["box"]]
+            cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        _save_scaled_preview(preview, processing_root / "R_mapping_preview.png")
 
-    top_r, bottom_r = sorted(detections, key=lambda item: item["center_y"])
+    ordered = sorted(bands, key=lambda item: item["top_y"])[:2]
     summary = {
-        "preparation_mode": "R_TO_R_CROP_RESIZED",
+        "preparation_mode": "FAST_RECIPE_R_TO_R_CROP_RESIZED",
         "raw_image": str(raw_path),
         "raw_width": int(raw_image.shape[1]),
         "raw_height": int(raw_image.shape[0]),
         "R_template_path": str(template_path),
-        "tyre_left": int(tyre_left),
-        "tyre_right": int(tyre_right),
-        "tyre_center_x": int(tyre_center_x),
-        "top_R": top_r,
-        "bottom_R": bottom_r,
+        "R_recipe_path": str(recipe_path),
+        "R_detection_method_requested": "fast",
+        "R_detection_method_used": detection_method,
+        "R_fast_fallback_to_tiled": bool(fast_fallback_to_tiled),
+        "R_fast_fallback_reason": fallback_reason,
+        "R_detection_metadata": metadata,
+        "top_R": ordered[0],
+        "bottom_R": ordered[1],
         "R_crop_y_start": int(raw_y_start),
         "R_crop_y_end_exclusive": int(raw_y_end),
         "R_crop_width": int(raw_r_crop.shape[1]),
@@ -249,7 +281,6 @@ def _prepare_sidewall_image(
         "prepared_height": int(resized_r_crop.shape[0]),
     }
     return prepared_path, summary
-
 
 def _prepare_direct_view_image(
     *,
@@ -355,6 +386,8 @@ def calculate_threshold_for_image(
     output_root: Path,
     percentile: float = DEFAULT_PERCENTILE,
     template_path: Optional[Path] = None,
+    recipe_path: Optional[Path] = None,
+    fast_fallback_to_tiled: bool = True,
     status_callback: StatusCallback = None,
     progress_callback: ProgressCallback = None,
     save_processing_images: bool = True,
@@ -362,11 +395,12 @@ def calculate_threshold_for_image(
 ) -> dict:
     """Calculate one role-specific threshold from one GOOD captured image."""
     role = str(role).strip().lower()
-    image_path, model_path, template_path = _validate_inputs(
+    image_path, model_path, template_path, recipe_path = _validate_inputs(
         role=role,
         image_path=Path(image_path),
         model_path=Path(model_path),
         template_path=template_path,
+        recipe_path=recipe_path,
     )
 
     percentile = float(percentile)
@@ -392,10 +426,12 @@ def calculate_threshold_for_image(
             raw_image=raw_image,
             raw_path=image_path,
             template_path=template_path,
+            recipe_path=recipe_path,
             processing_root=processing_root,
             save_processing_images=save_processing_images,
             status_callback=status_callback,
             progress_callback=progress_callback,
+            fast_fallback_to_tiled=fast_fallback_to_tiled,
         )
     else:
         prepared_path, processing_summary = _prepare_direct_view_image(
@@ -463,7 +499,11 @@ def calculate_threshold_for_image(
         "model_path": str(model_path),
         "model_file": model_path.name,
         "R_template_path": str(template_path) if template_path else "",
+        "R_recipe_path": str(recipe_path) if recipe_path else "",
+        "R_detection_method": processing_summary.get("R_detection_method_used", "direct"),
+        "R_fast_fallback_to_tiled": bool(fast_fallback_to_tiled),
         "requires_R_template": role in SIDEWALL_ROLES,
+        "requires_R_recipe": role in SIDEWALL_ROLES,
         "preparation_mode": processing_summary.get("preparation_mode"),
         "score_method": "maximum_nearest_memory_euclidean_distance",
         "input_size": [INPUT_HEIGHT, INPUT_WIDTH],
