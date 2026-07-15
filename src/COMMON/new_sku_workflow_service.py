@@ -18,6 +18,7 @@ STEP_ORDER: Tuple[Tuple[str, str], ...] = (
     ("augmentation", "Augmentation"),
     ("training", "Training"),
     ("feature_threshold", "Threshold"),
+    ("production_validation", "Validation"),
     ("save_recipe", "Save Recipe"),
 )
 
@@ -34,6 +35,7 @@ DEPENDENCY_MAP: Dict[str, Tuple[str, ...]] = {
     "augmentation": ("patch_creation",),
     "training": ("augmentation",),
     "feature_threshold": ("training",),
+    "production_validation": ("feature_threshold",),
     "save_recipe": (
         "axis_teaching",
         "capture",
@@ -44,6 +46,7 @@ DEPENDENCY_MAP: Dict[str, Tuple[str, ...]] = {
         "augmentation",
         "training",
         "feature_threshold",
+        "production_validation",
     ),
 }
 
@@ -346,6 +349,18 @@ class NewSKUWorkflowService:
                 self._parse_datetime(saved_recipe.get("updated_at")),
                 self._parse_datetime(saved_recipe.get("created_at")),
             )
+        validation_report = dict(recipe_doc.get("validation_report") or {})
+        validation_path = self.media_path / "new_sku_validation" / sku / "latest_validation_report.json"
+        validation_time = max(
+            self._mtime(validation_path),
+            self._parse_datetime(validation_report.get("validated_at")),
+        )
+        outputs["production_validation"] = {
+            "complete": bool(validation_report.get("valid")),
+            "items": [str(validation_path)] if validation_path.exists() else [],
+            "timestamp": validation_time,
+        }
+
         outputs["save_recipe"] = {
             "complete": recipe_saved,
             "items": [],
@@ -620,6 +635,19 @@ class NewSKUWorkflowService:
             missing=threshold_missing,
             message="Train all models and ensure reference images are available.",
             reason=(downstream.get("feature_threshold") or {}).get("reason", ""),
+        )
+
+        validation_missing = (
+            missing_output("feature_threshold", "Five valid threshold outputs")
+            + outdated_missing("production_validation")
+        )
+        report["production_validation"] = self._result(
+            ready=not validation_missing,
+            status="ready" if not validation_missing else "blocked",
+            title="Production Validation",
+            missing=validation_missing,
+            message="Complete current thresholds before running the deep production audit.",
+            reason=(downstream.get("production_validation") or {}).get("reason", ""),
         )
 
         save_missing: List[str] = []

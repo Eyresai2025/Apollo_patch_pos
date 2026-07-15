@@ -33,6 +33,7 @@ from src.models.new_sku_offset.offset_page import OffsetCalculationPage
 from src.models.patch_creation.patch_creation_page import PatchCreationPage
 from src.models.augmentation.augmentation_page import AugmentationPage
 from src.models.feature_thresh.threshold_page import FeatureThresholdPage
+from src.models.new_sku_validation.production_validation_page import ProductionValidationPage
 
 try:
     from src.camera.new_sku_software_capture import capture_new_sku_images # type: ignore
@@ -52,7 +53,8 @@ TAB_PATCH_CREATION = 6
 TAB_AUGMENTATION = 7
 TAB_TRAINING = 8
 TAB_FEATURE_THRESHOLD = 9
-TAB_SAVE_RECIPE = 10
+TAB_PRODUCTION_VALIDATION = 10
+TAB_SAVE_RECIPE = 11
 
 # Backward-compatible alias used by older helper names.
 TAB_TEMPLATE_EXTRACTOR = TAB_IMAGE_PROCESSING
@@ -68,6 +70,7 @@ WORKFLOW_STEPS = [
     ("augmentation", "Augmentation"),
     ("training", "Training"),
     ("feature_threshold", "Threshold"),
+    ("production_validation", "Validation"),
     ("save_recipe", "Save Recipe"),
 ]
 
@@ -734,6 +737,8 @@ class NewSKUPage(QWidget):
         self.augmentation_page: Optional[AugmentationPage] = None
         self.training_page: Optional[NewSKUTrainingPage] = None
         self.feature_threshold_page: Optional[FeatureThresholdPage] = None
+        self.production_validation_page: Optional[ProductionValidationPage] = None
+        self.latest_validation_report: Dict[str, Any] = {}
         self.recipe_page: Optional[QWidget] = None
         self.axis_entry_mode = "capture"
         self.axis_entry_mode_combo = None
@@ -1105,6 +1110,7 @@ class NewSKUPage(QWidget):
             self.latest_offset_assets.clear()
             self.latest_training_assets.clear()
             self.latest_threshold_assets.clear()
+            self.latest_validation_report.clear()
             self.latest_preview_paths.clear()
 
             current_meta = dict(self.sku_meta or {})
@@ -1123,6 +1129,7 @@ class NewSKUPage(QWidget):
                 self.augmentation_page,
                 self.training_page,
                 self.feature_threshold_page,
+                self.production_validation_page,
             ):
                 if page is None:
                     continue
@@ -1146,6 +1153,7 @@ class NewSKUPage(QWidget):
             self.offset_page,
             self.training_page,
             self.feature_threshold_page,
+            self.production_validation_page,
         ):
             refresh = getattr(page, "refresh_context", None)
             if callable(refresh):
@@ -1400,7 +1408,14 @@ class NewSKUPage(QWidget):
         elif threshold_roles:
             statuses["feature_threshold"] = "partial"
 
-        # 11. Saved recipe
+        # 11. Production validation
+        validation = dict(self.latest_validation_report or {})
+        if validation.get("valid") and _safe_name(validation.get("sku")) == sku:
+            statuses["production_validation"] = "completed"
+        elif validation:
+            statuses["production_validation"] = "failed"
+
+        # 12. Saved recipe
         if self.saved_recipe_doc or self.saved_recipe_result:
             statuses["save_recipe"] = "completed"
 
@@ -1640,6 +1655,8 @@ class NewSKUPage(QWidget):
             self.training_page.refresh_context()
         elif idx == TAB_FEATURE_THRESHOLD and self.feature_threshold_page is not None:
             self.feature_threshold_page.refresh_context()
+        elif idx == TAB_PRODUCTION_VALIDATION and self.production_validation_page is not None:
+            self.production_validation_page.refresh_context()
 
     def _build_ui(self):
         self.setStyleSheet(self._page_stylesheet())
@@ -1659,7 +1676,7 @@ class NewSKUPage(QWidget):
         summary_row.setSpacing(12)
         self.workflow_summary_sku = QLabel("SKU  •  unknown_sku")
         self.workflow_summary_sku.setObjectName("WorkflowSku")
-        self.workflow_summary_count = QLabel("0 of 11 steps completed  •  0%")
+        self.workflow_summary_count = QLabel("0 of 12 steps completed  •  0%")
         self.workflow_summary_count.setObjectName("WorkflowMeta")
         self.workflow_summary_status = QLabel("Current step  •  SKU Setup")
         self.workflow_summary_status.setObjectName("WorkflowMeta")
@@ -1802,7 +1819,29 @@ class NewSKUPage(QWidget):
         )
         self.feature_threshold_page.thresholdSaved.connect(self._on_threshold_saved)
         self.feature_threshold_page.continueRequested.connect(
-            lambda: self._switch_tab(TAB_SAVE_RECIPE)
+            lambda: self._switch_tab(TAB_PRODUCTION_VALIDATION)
+        )
+
+        self.production_validation_page = ProductionValidationPage(
+            media_path=self.media_path,
+            sku_name_provider=self._get_sku_name,
+            recipe_doc_provider=lambda: dict(self.recipe_doc or {}),
+            workflow_status_provider=lambda: dict(self._compute_workflow_statuses() or {}),
+            axis_target_keys_provider=lambda: [
+                cfg.get("target_key")
+                for cfg in self.recipe_service.get_recipe_target_configs()
+                if cfg.get("target_key")
+            ],
+            parent=self,
+        )
+        self.production_validation_page.validationChanged.connect(
+            self._on_production_validation_changed
+        )
+        self.production_validation_page.goToStepRequested.connect(
+            lambda idx: self._switch_tab(idx, check_readiness=False)
+        )
+        self.production_validation_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_SAVE_RECIPE, check_readiness=False)
         )
         self.recipe_page = QWidget()
 
@@ -1821,11 +1860,25 @@ class NewSKUPage(QWidget):
         self.stack.addWidget(self.augmentation_page)
         self.stack.addWidget(self.training_page)
         self.stack.addWidget(self.feature_threshold_page)
+        self.stack.addWidget(self.production_validation_page)
         self.stack.addWidget(self.recipe_page)
 
         root.addWidget(self.stack, 1)
         self._sync_workflow_sku(force=True)
         self._switch_tab(TAB_SKU_SETUP)
+
+    def _on_production_validation_changed(self, report: dict):
+        if _safe_name((report or {}).get("sku")) != _safe_name(self._get_sku_name()):
+            return
+        self.latest_validation_report = dict(report or {})
+        self.recipe_doc["validation_report"] = dict(self.latest_validation_report)
+        self._refresh_workflow_header()
+        if self.status_lbl is not None:
+            self.status_lbl.setText(
+                f"Production validation: {self.latest_validation_report.get('overall_status', 'UNKNOWN')} | "
+                f"{self.latest_validation_report.get('passed_checks', 0)}/"
+                f"{self.latest_validation_report.get('total_checks', 0)} checks passed"
+            )
 
     def _on_offset_saved(self, role: str, payload: dict):
         if not self._payload_matches_current_sku(payload):
@@ -2055,6 +2108,12 @@ class NewSKUPage(QWidget):
         self.latest_threshold_assets = self._filter_assets_for_current_sku(
             dict(recipe.get("threshold_assets") or {})
         )
+        restored_validation = dict(recipe.get("validation_report") or {})
+        self.latest_validation_report = (
+            restored_validation
+            if _safe_name(restored_validation.get("sku")) == _safe_name(sku_name)
+            else {}
+        )
 
         self.recipe_doc["template_assets"] = dict(self.latest_template_assets)
         self.recipe_doc["offset_assets"] = dict(self.latest_offset_assets)
@@ -2079,6 +2138,7 @@ class NewSKUPage(QWidget):
             self.offset_page,
             self.training_page,
             self.feature_threshold_page,
+            self.production_validation_page,
         ):
             refresh = getattr(page, "refresh_context", None) if page is not None else None
             if callable(refresh):
@@ -3319,6 +3379,29 @@ class NewSKUPage(QWidget):
         recipe_doc["training_assets"] = self._collect_training_assets()
         recipe_doc["template_assets"] = self._collect_template_assets()
         recipe_doc["threshold_assets"] = self._collect_threshold_assets()
+
+        validation_report = dict(self.latest_validation_report or {})
+        if not validation_report.get("valid"):
+            if self.production_validation_page is not None:
+                validation_report = self.production_validation_page.run_validation(silent=True)
+        if not validation_report.get("valid"):
+            failed = list(validation_report.get("missing_or_invalid") or [])
+            lines = [
+                f"{item.get('stage', '').replace('_', ' ').title()} / "
+                f"{item.get('role_label', 'All')}: {item.get('detail', 'Action required')}"
+                for item in failed[:12]
+            ]
+            extra = "" if len(failed) <= 12 else f"\n... and {len(failed) - 12} more"
+            raise ValueError(
+                "Production Validation must pass before saving the recipe.\n\n"
+                + ("\n".join(lines) or "Run Production Validation first.")
+                + extra
+            )
+
+        recipe_doc["validation_report"] = validation_report
+        recipe_doc["validation_status"] = "VALID"
+        recipe_doc["validated_at"] = validation_report.get("validated_at")
+        recipe_doc["status"] = "VALIDATED"
         return recipe_doc
 
     def _preview_recipe(self):

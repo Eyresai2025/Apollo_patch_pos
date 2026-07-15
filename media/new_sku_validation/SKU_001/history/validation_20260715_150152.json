@@ -1,0 +1,1984 @@
+{
+  "schema_version": 1,
+  "sku": "SKU_001",
+  "validated_at": "2026-07-15T15:01:52",
+  "overall_status": "INVALID",
+  "valid": false,
+  "total_checks": 40,
+  "passed_checks": 28,
+  "failed_checks": 12,
+  "checks": [
+    {
+      "stage": "sku_setup",
+      "role": "",
+      "role_label": "All",
+      "status": "valid",
+      "valid": true,
+      "detail": "SKU setup is available",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "sku_setup",
+      "step_index": 0,
+      "metadata": {}
+    },
+    {
+      "stage": "axis_teaching",
+      "role": "",
+      "role_label": "All",
+      "status": "missing",
+      "valid": false,
+      "detail": "0 of 37 required axis targets available",
+      "paths": [],
+      "expected": 37,
+      "found": 0,
+      "step_key": "axis_teaching",
+      "step_index": 1,
+      "metadata": {
+        "missing_target_keys": [
+          "sd1_bead_locking_lh_home",
+          "sd2_bead_locking_rh_home",
+          "sd3_sw2_camera_up_down_home",
+          "sd4_inner_camera_fwd_rev_home",
+          "sd5_sw1_camera_in_out_home",
+          "sd6_sw1_camera_up_down_home",
+          "sd7_sw2_camera_in_out_home",
+          "sd8_inner_camera_in_out_home",
+          "sd9_tread_camera_up_down_home",
+          "sd10_tyre_centering_home",
+          "sd11_inner_camera_up_down_home",
+          "sd1_bead_locking_lh_work1",
+          "sd2_bead_locking_rh_work1",
+          "sd3_sw2_camera_up_down_work1",
+          "sd4_inner_camera_fwd_rev_work1",
+          "sd5_sw1_camera_in_out_work1",
+          "sd6_sw1_camera_up_down_work1",
+          "sd7_sw2_camera_in_out_work1",
+          "sd8_inner_camera_in_out_work1",
+          "sd9_tread_camera_up_down_work1",
+          "sd10_tyre_centering_work1",
+          "sd11_inner_camera_up_down_work1",
+          "sd1_bead_locking_lh_work2",
+          "sd2_bead_locking_rh_work2",
+          "sd3_sw2_camera_up_down_work2",
+          "sd4_inner_camera_fwd_rev_work2",
+          "sd5_sw1_camera_in_out_work2",
+          "sd6_sw1_camera_up_down_work2",
+          "sd7_sw2_camera_in_out_work2",
+          "sd8_inner_camera_in_out_work2",
+          "sd9_tread_camera_up_down_work2",
+          "sd10_tyre_centering_work2",
+          "sd11_inner_camera_up_down_work2",
+          "sd12_tyre_rotation_work2",
+          "sd4_inner_camera_fwd_rev_work3",
+          "sd12_tyre_rotation_diameter",
+          "sd12_tyre_rotation"
+        ]
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "sidewall1",
+      "role_label": "Sidewall 1",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "sidewall2",
+      "role_label": "Sidewall 2",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "innerwall",
+      "role_label": "Innerwall",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\innerwall\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "tread",
+      "role_label": "Tread",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "bead",
+      "role_label": "Bead",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\bead\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "image_processing",
+      "role": "sidewall1",
+      "role_label": "Sidewall 1",
+      "status": "valid",
+      "valid": true,
+      "detail": "Template image exists and is non-empty",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "image_processing",
+      "step_index": 3,
+      "metadata": {}
+    },
+    {
+      "stage": "image_processing",
+      "role": "sidewall2",
+      "role_label": "Sidewall 2",
+      "status": "valid",
+      "valid": true,
+      "detail": "Template image exists and is non-empty",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall2\\SKU_001_sidewall2_template.png"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "image_processing",
+      "step_index": 3,
+      "metadata": {}
+    },
+    {
+      "stage": "r_recipe",
+      "role": "sidewall1",
+      "role_label": "Sidewall 1",
+      "status": "valid",
+      "valid": true,
+      "detail": "Fast R recipe JSON is readable",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall1\\SKU_001_sidewall1_fast_recipe.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "r_recipe",
+      "step_index": 4,
+      "metadata": {
+        "model": "SKU_001_sidewall1_FAST_R",
+        "template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall1\\SKU_001_sidewall1_FAST_R_R_template.png",
+        "band_cols": [
+          1323,
+          1827
+        ],
+        "expected_center": [
+          1575,
+          6969
+        ],
+        "roi_side": "left",
+        "search_margin_y": 120,
+        "use_gradient": false,
+        "score_threshold": 0.5,
+        "method": 5,
+        "auto_first_half": true,
+        "first_half_thr": 0.18,
+        "circumference_px": 11720,
+        "blur_kernel": [
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "stage": "r_recipe",
+      "role": "sidewall2",
+      "role_label": "Sidewall 2",
+      "status": "valid",
+      "valid": true,
+      "detail": "Fast R recipe JSON is readable",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\SKU_001_sidewall2_fast_recipe.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "r_recipe",
+      "step_index": 4,
+      "metadata": {
+        "model": "SKU_001_sidewall2_FAST_R",
+        "template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\SKU_001_sidewall2_FAST_R_R_template.png",
+        "band_cols": [
+          1327,
+          1824
+        ],
+        "expected_center": [
+          1575,
+          6969
+        ],
+        "roi_side": "left",
+        "search_margin_y": 120,
+        "use_gradient": false,
+        "score_threshold": 0.5,
+        "method": 5,
+        "auto_first_half": true,
+        "first_half_thr": 0.18,
+        "circumference_px": 11720,
+        "blur_kernel": [
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "stage": "offset",
+      "role": "innerwall",
+      "role_label": "Innerwall",
+      "status": "valid",
+      "valid": true,
+      "detail": "Calibration JSON is readable",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\innerwall\\SKU_001_innerwall_calibration.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "offset",
+      "step_index": 5,
+      "metadata": {
+        "sku_name": "SKU_001",
+        "target_role": "innerwall",
+        "target_display_name": "Inner Side",
+        "source_sidewall_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1",
+        "source_target_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\innerwall",
+        "sidewall_r_template": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png",
+        "target_marker_template": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\innerwall\\SKU_001_innerwall_marker_template.png",
+        "r_match_threshold": 0.7,
+        "target_match_threshold": 0.7,
+        "resize_width": 4032,
+        "resize_height": 23296,
+        "patch_width": 448,
+        "patch_height": 448,
+        "patch_stride_x": 448,
+        "patch_stride_y": 448,
+        "cover_complete": true,
+        "percentile": 99.0,
+        "processing_settings": {
+          "resize_width": 4032,
+          "resize_height": 23296,
+          "patch_width": 448,
+          "patch_height": 448,
+          "patch_stride_x": 448,
+          "patch_stride_y": 448,
+          "cover_complete": true,
+          "percentile": 99.0
+        },
+        "one_rev_sidewall_px": 11720,
+        "sw_r1_top_y": 6916,
+        "sw_images_averaged": 1,
+        "one_rev_target_px": 11722,
+        "target_marker1_center_y": 11113,
+        "target_images_averaged": 1,
+        "one_rev_tread_px": 11722,
+        "tread_tape1_center_y": 11113,
+        "tread_images_averaged": 1,
+        "raw_offset_px": 4197,
+        "offset_ratio": 0.3581058020477816,
+        "scale_factor": 1.000170648464164,
+        "successful_sidewall_images": [
+          {
+            "image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\1.png",
+            "r1_top_y": 6916,
+            "r2_top_y": 18636,
+            "one_rev_sidewall": 11720,
+            "crop_start_y": 6916,
+            "crop_end_y_exclusive": 18636,
+            "cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1\\1_R1_to_R2_crop.png",
+            "cropped_width": 4096,
+            "cropped_height": 11720
+          }
+        ],
+        "failed_sidewall_images": [],
+        "successful_target_images": [
+          {
+            "image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\innerwall\\1.png",
+            "marker1_center_y": 11113,
+            "marker2_center_y": 22835,
+            "one_rev_target": 11722,
+            "crop_start_y": 11113,
+            "crop_end_y_exclusive": 22835,
+            "cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\innerwall\\cropped_images\\innerwall\\1_marker1_to_marker2_crop.png",
+            "cropped_width": 4096,
+            "cropped_height": 11722
+          }
+        ],
+        "failed_target_images": [],
+        "diagnostic_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\innerwall\\diagnostics",
+        "cropped_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\innerwall\\cropped_images",
+        "shared_sidewall_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1",
+        "sidewall_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1",
+        "target_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\innerwall\\cropped_images\\innerwall",
+        "sidewall_cropped_image_count": 1,
+        "target_cropped_image_count": 1
+      }
+    },
+    {
+      "stage": "offset",
+      "role": "tread",
+      "role_label": "Tread",
+      "status": "valid",
+      "valid": true,
+      "detail": "Calibration JSON is readable",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\tread\\SKU_001_tread_calibration.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "offset",
+      "step_index": 5,
+      "metadata": {
+        "sku_name": "SKU_001",
+        "target_role": "tread",
+        "target_display_name": "Tread",
+        "source_sidewall_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1",
+        "source_target_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread",
+        "sidewall_r_template": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png",
+        "target_marker_template": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\tread\\SKU_001_tread_marker_template.png",
+        "r_match_threshold": 0.7,
+        "target_match_threshold": 0.7,
+        "resize_width": 4032,
+        "resize_height": 23296,
+        "patch_width": 448,
+        "patch_height": 448,
+        "patch_stride_x": 448,
+        "patch_stride_y": 448,
+        "cover_complete": true,
+        "percentile": 99.0,
+        "processing_settings": {
+          "resize_width": 4032,
+          "resize_height": 23296,
+          "patch_width": 448,
+          "patch_height": 448,
+          "patch_stride_x": 448,
+          "patch_stride_y": 448,
+          "cover_complete": true,
+          "percentile": 99.0
+        },
+        "one_rev_sidewall_px": 11720,
+        "sw_r1_top_y": 6916,
+        "sw_images_averaged": 1,
+        "one_rev_target_px": 11722,
+        "target_marker1_center_y": 11118,
+        "target_images_averaged": 1,
+        "one_rev_tread_px": 11722,
+        "tread_tape1_center_y": 11118,
+        "tread_images_averaged": 1,
+        "raw_offset_px": 4202,
+        "offset_ratio": 0.3585324232081911,
+        "scale_factor": 1.000170648464164,
+        "successful_sidewall_images": [
+          {
+            "image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\1.png",
+            "r1_top_y": 6916,
+            "r2_top_y": 18636,
+            "one_rev_sidewall": 11720,
+            "crop_start_y": 6916,
+            "crop_end_y_exclusive": 18636,
+            "cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1\\1_R1_to_R2_crop.png",
+            "cropped_width": 4096,
+            "cropped_height": 11720
+          }
+        ],
+        "failed_sidewall_images": [],
+        "successful_target_images": [
+          {
+            "image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread\\1.png",
+            "marker1_center_y": 11118,
+            "marker2_center_y": 22840,
+            "one_rev_target": 11722,
+            "crop_start_y": 11118,
+            "crop_end_y_exclusive": 22840,
+            "cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\tread\\cropped_images\\tread\\1_marker1_to_marker2_crop.png",
+            "cropped_width": 4096,
+            "cropped_height": 11722
+          }
+        ],
+        "failed_target_images": [],
+        "diagnostic_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\tread\\diagnostics",
+        "cropped_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\tread\\cropped_images",
+        "shared_sidewall_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1",
+        "sidewall_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1",
+        "target_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\tread\\cropped_images\\tread",
+        "sidewall_cropped_image_count": 1,
+        "target_cropped_image_count": 1
+      }
+    },
+    {
+      "stage": "offset",
+      "role": "bead",
+      "role_label": "Bead",
+      "status": "valid",
+      "valid": true,
+      "detail": "Calibration JSON is readable",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\bead\\SKU_001_bead_calibration.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "offset",
+      "step_index": 5,
+      "metadata": {
+        "sku_name": "SKU_001",
+        "target_role": "bead",
+        "target_display_name": "Bead",
+        "source_sidewall_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1",
+        "source_target_input": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\bead",
+        "sidewall_r_template": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png",
+        "target_marker_template": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\bead\\SKU_001_bead_marker_template.png",
+        "r_match_threshold": 0.7,
+        "target_match_threshold": 0.7,
+        "resize_width": 4032,
+        "resize_height": 23296,
+        "patch_width": 448,
+        "patch_height": 448,
+        "patch_stride_x": 448,
+        "patch_stride_y": 448,
+        "cover_complete": true,
+        "percentile": 99.0,
+        "processing_settings": {
+          "resize_width": 4032,
+          "resize_height": 23296,
+          "patch_width": 448,
+          "patch_height": 448,
+          "patch_stride_x": 448,
+          "patch_stride_y": 448,
+          "cover_complete": true,
+          "percentile": 99.0
+        },
+        "one_rev_sidewall_px": 11720,
+        "sw_r1_top_y": 6916,
+        "sw_images_averaged": 1,
+        "one_rev_target_px": 11722,
+        "target_marker1_center_y": 11115,
+        "target_images_averaged": 1,
+        "one_rev_tread_px": 11722,
+        "tread_tape1_center_y": 11115,
+        "tread_images_averaged": 1,
+        "raw_offset_px": 4199,
+        "offset_ratio": 0.3582764505119454,
+        "scale_factor": 1.000170648464164,
+        "successful_sidewall_images": [
+          {
+            "image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\1.png",
+            "r1_top_y": 6916,
+            "r2_top_y": 18636,
+            "one_rev_sidewall": 11720,
+            "crop_start_y": 6916,
+            "crop_end_y_exclusive": 18636,
+            "cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1\\1_R1_to_R2_crop.png",
+            "cropped_width": 4096,
+            "cropped_height": 11720
+          }
+        ],
+        "failed_sidewall_images": [],
+        "successful_target_images": [
+          {
+            "image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\bead\\1.png",
+            "marker1_center_y": 11115,
+            "marker2_center_y": 22837,
+            "one_rev_target": 11722,
+            "crop_start_y": 11115,
+            "crop_end_y_exclusive": 22837,
+            "cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\bead\\cropped_images\\bead\\1_marker1_to_marker2_crop.png",
+            "cropped_width": 4096,
+            "cropped_height": 11722
+          }
+        ],
+        "failed_target_images": [],
+        "diagnostic_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\bead\\diagnostics",
+        "cropped_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\bead\\cropped_images",
+        "shared_sidewall_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1",
+        "sidewall_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1",
+        "target_cropped_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\bead\\cropped_images\\bead",
+        "sidewall_cropped_image_count": 1,
+        "target_cropped_image_count": 1
+      }
+    },
+    {
+      "stage": "patch_creation",
+      "role": "sidewall1",
+      "role_label": "Sidewall 1",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 400 patch image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall1\\patch_creation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall1\\patches_rtor1"
+      ],
+      "expected": 1,
+      "found": 400,
+      "step_key": "patch_creation",
+      "step_index": 6,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "sidewall1",
+        "input_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall1",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall1\\prepared_images",
+        "patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall1\\patches_rtor1",
+        "image_count": 1,
+        "total_patch_count": 400,
+        "total_time_s": 8.479427800048143,
+        "items": [
+          {
+            "source_cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\cropped_images\\sidewall1\\1_R1_to_R2_crop.png",
+            "prepared_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall1\\prepared_images\\1_R1_to_R2_crop_prepared_4036x17920.png",
+            "patch_count": 400
+          }
+        ]
+      }
+    },
+    {
+      "stage": "patch_creation",
+      "role": "sidewall2",
+      "role_label": "Sidewall 2",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 400 patch image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall2\\patch_creation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall2\\patches_rtor1"
+      ],
+      "expected": 1,
+      "found": 400,
+      "step_key": "patch_creation",
+      "step_index": 6,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "sidewall2",
+        "input_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall2",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall2\\prepared_images",
+        "patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall2\\patches_rtor1",
+        "image_count": 1,
+        "total_patch_count": 400,
+        "total_time_s": 19.70833979989402,
+        "items": [
+          {
+            "raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2\\1.png",
+            "r_detection_method": "fast",
+            "fallback_reason": "",
+            "crop_y_start": 6916,
+            "crop_y_end": 18636,
+            "top_R_band": {
+              "top_y": 6916,
+              "bottom_y_inclusive": 7021,
+              "center_y": 6969,
+              "height": 106
+            },
+            "bottom_R_band": {
+              "top_y": 18636,
+              "bottom_y_inclusive": 18741,
+              "center_y": 18689,
+              "height": 106
+            },
+            "prepared_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall2\\prepared_images\\1_prepared_4036x17920.png",
+            "patch_count": 400
+          }
+        ]
+      }
+    },
+    {
+      "stage": "patch_creation",
+      "role": "innerwall",
+      "role_label": "Innerwall",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 400 patch image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\innerwall\\patch_creation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\innerwall\\patches_rtor1"
+      ],
+      "expected": 1,
+      "found": 400,
+      "step_key": "patch_creation",
+      "step_index": 6,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "innerwall",
+        "input_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\innerwall\\cropped_images\\innerwall",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\innerwall",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\innerwall\\prepared_images",
+        "patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\innerwall\\patches_rtor1",
+        "image_count": 1,
+        "total_patch_count": 400,
+        "total_time_s": 8.322330700000748,
+        "items": [
+          {
+            "source_cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\innerwall\\cropped_images\\innerwall\\1_marker1_to_marker2_crop.png",
+            "prepared_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\innerwall\\prepared_images\\1_marker1_to_marker2_crop_prepared_4036x17920.png",
+            "patch_count": 400
+          }
+        ]
+      }
+    },
+    {
+      "stage": "patch_creation",
+      "role": "tread",
+      "role_label": "Tread",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 400 patch image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\tread\\patch_creation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\tread\\patches_rtor1"
+      ],
+      "expected": 1,
+      "found": 400,
+      "step_key": "patch_creation",
+      "step_index": 6,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "tread",
+        "input_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\tread\\cropped_images\\tread",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\tread",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\tread\\prepared_images",
+        "patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\tread\\patches_rtor1",
+        "image_count": 1,
+        "total_patch_count": 400,
+        "total_time_s": 8.354270100127906,
+        "items": [
+          {
+            "source_cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\tread\\cropped_images\\tread\\1_marker1_to_marker2_crop.png",
+            "prepared_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\tread\\prepared_images\\1_marker1_to_marker2_crop_prepared_4036x17920.png",
+            "patch_count": 400
+          }
+        ]
+      }
+    },
+    {
+      "stage": "patch_creation",
+      "role": "bead",
+      "role_label": "Bead",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 400 patch image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\bead\\patch_creation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\bead\\patches_rtor1"
+      ],
+      "expected": 1,
+      "found": 400,
+      "step_key": "patch_creation",
+      "step_index": 6,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "bead",
+        "input_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\bead\\cropped_images\\bead",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\bead",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\bead\\prepared_images",
+        "patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\bead\\patches_rtor1",
+        "image_count": 1,
+        "total_patch_count": 400,
+        "total_time_s": 8.018114400096238,
+        "items": [
+          {
+            "source_cropped_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\offset_calibration\\SKU_001\\bead\\cropped_images\\bead\\1_marker1_to_marker2_crop.png",
+            "prepared_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\bead\\prepared_images\\1_marker1_to_marker2_crop_prepared_4036x17920.png",
+            "patch_count": 400
+          }
+        ]
+      }
+    },
+    {
+      "stage": "augmentation",
+      "role": "sidewall1",
+      "role_label": "Sidewall 1",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 2000 augmented image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall1\\augmentation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall1\\04_augmented_patches"
+      ],
+      "expected": 1,
+      "found": 2000,
+      "step_key": "augmentation",
+      "step_index": 7,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "sidewall1",
+        "input_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall1\\patches_rtor1",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall1",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall1\\02c_resized_for_clean_patchify",
+        "patches_output_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall1\\03_patches",
+        "patch_manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall1\\03_patches\\_combined_patch_manifest.csv",
+        "augmented_patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall1\\04_augmented_patches",
+        "manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall1\\augmentation_manifest.csv",
+        "source_image_count": 400,
+        "source_patch_count": 400,
+        "selected_augmentations": [
+          "brightness_plus_4",
+          "brightness_minus_4",
+          "horizontal_flip",
+          "vertical_flip"
+        ],
+        "include_originals": true,
+        "output_image_count": 2000,
+        "duration_s": 11.125075899995863,
+        "planner": {
+          "patch_w": 300,
+          "patch_h": 300,
+          "resize_w": 300,
+          "resize_h": 300,
+          "shift_a": 50,
+          "shift_b": 30,
+          "passes": [
+            {
+              "folder": "00_base_grid",
+              "label": "Patchify (base grid)",
+              "ox": 0,
+              "oy": 0
+            },
+            {
+              "folder": "01_horizontal_50",
+              "label": "Phase shift — horizontal 50%",
+              "ox": 150,
+              "oy": 0
+            },
+            {
+              "folder": "02_horizontal_30",
+              "label": "Phase shift — horizontal 30%",
+              "ox": 90,
+              "oy": 0
+            },
+            {
+              "folder": "03_vertical_50",
+              "label": "Phase shift — vertical 50%",
+              "ox": 0,
+              "oy": 150
+            },
+            {
+              "folder": "04_vertical_30",
+              "label": "Phase shift — vertical 30%",
+              "ox": 0,
+              "oy": 90
+            }
+          ]
+        }
+      }
+    },
+    {
+      "stage": "augmentation",
+      "role": "sidewall2",
+      "role_label": "Sidewall 2",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 2000 augmented image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall2\\augmentation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall2\\04_augmented_patches"
+      ],
+      "expected": 1,
+      "found": 2000,
+      "step_key": "augmentation",
+      "step_index": 7,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "sidewall2",
+        "input_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\sidewall2\\patches_rtor1",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall2",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall2\\02c_resized_for_clean_patchify",
+        "patches_output_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall2\\03_patches",
+        "patch_manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall2\\03_patches\\_combined_patch_manifest.csv",
+        "augmented_patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall2\\04_augmented_patches",
+        "manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\sidewall2\\augmentation_manifest.csv",
+        "source_image_count": 400,
+        "source_patch_count": 400,
+        "selected_augmentations": [
+          "brightness_plus_4",
+          "brightness_minus_4",
+          "horizontal_flip",
+          "vertical_flip"
+        ],
+        "include_originals": true,
+        "output_image_count": 2000,
+        "duration_s": 12.245771100046113,
+        "planner": {
+          "patch_w": 300,
+          "patch_h": 300,
+          "resize_w": 300,
+          "resize_h": 300,
+          "shift_a": 50,
+          "shift_b": 30,
+          "passes": [
+            {
+              "folder": "00_base_grid",
+              "label": "Patchify (base grid)",
+              "ox": 0,
+              "oy": 0
+            },
+            {
+              "folder": "01_horizontal_50",
+              "label": "Phase shift — horizontal 50%",
+              "ox": 150,
+              "oy": 0
+            },
+            {
+              "folder": "02_horizontal_30",
+              "label": "Phase shift — horizontal 30%",
+              "ox": 90,
+              "oy": 0
+            },
+            {
+              "folder": "03_vertical_50",
+              "label": "Phase shift — vertical 50%",
+              "ox": 0,
+              "oy": 150
+            },
+            {
+              "folder": "04_vertical_30",
+              "label": "Phase shift — vertical 30%",
+              "ox": 0,
+              "oy": 90
+            }
+          ]
+        }
+      }
+    },
+    {
+      "stage": "augmentation",
+      "role": "innerwall",
+      "role_label": "Innerwall",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 2000 augmented image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\innerwall\\augmentation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\innerwall\\04_augmented_patches"
+      ],
+      "expected": 1,
+      "found": 2000,
+      "step_key": "augmentation",
+      "step_index": 7,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "innerwall",
+        "input_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\innerwall\\patches_rtor1",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\innerwall",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\innerwall\\02c_resized_for_clean_patchify",
+        "patches_output_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\innerwall\\03_patches",
+        "patch_manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\innerwall\\03_patches\\_combined_patch_manifest.csv",
+        "augmented_patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\innerwall\\04_augmented_patches",
+        "manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\innerwall\\augmentation_manifest.csv",
+        "source_image_count": 400,
+        "source_patch_count": 400,
+        "selected_augmentations": [
+          "brightness_plus_4",
+          "brightness_minus_4",
+          "horizontal_flip",
+          "vertical_flip"
+        ],
+        "include_originals": true,
+        "output_image_count": 2000,
+        "duration_s": 12.506700300145894,
+        "planner": {
+          "patch_w": 300,
+          "patch_h": 300,
+          "resize_w": 300,
+          "resize_h": 300,
+          "shift_a": 50,
+          "shift_b": 30,
+          "passes": [
+            {
+              "folder": "00_base_grid",
+              "label": "Patchify (base grid)",
+              "ox": 0,
+              "oy": 0
+            },
+            {
+              "folder": "01_horizontal_50",
+              "label": "Phase shift — horizontal 50%",
+              "ox": 150,
+              "oy": 0
+            },
+            {
+              "folder": "02_horizontal_30",
+              "label": "Phase shift — horizontal 30%",
+              "ox": 90,
+              "oy": 0
+            },
+            {
+              "folder": "03_vertical_50",
+              "label": "Phase shift — vertical 50%",
+              "ox": 0,
+              "oy": 150
+            },
+            {
+              "folder": "04_vertical_30",
+              "label": "Phase shift — vertical 30%",
+              "ox": 0,
+              "oy": 90
+            }
+          ]
+        }
+      }
+    },
+    {
+      "stage": "augmentation",
+      "role": "tread",
+      "role_label": "Tread",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 2000 augmented image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\tread\\augmentation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\tread\\04_augmented_patches"
+      ],
+      "expected": 1,
+      "found": 2000,
+      "step_key": "augmentation",
+      "step_index": 7,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "tread",
+        "input_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\tread\\patches_rtor1",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\tread",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\tread\\02c_resized_for_clean_patchify",
+        "patches_output_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\tread\\03_patches",
+        "patch_manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\tread\\03_patches\\_combined_patch_manifest.csv",
+        "augmented_patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\tread\\04_augmented_patches",
+        "manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\tread\\augmentation_manifest.csv",
+        "source_image_count": 400,
+        "source_patch_count": 400,
+        "selected_augmentations": [
+          "brightness_plus_4",
+          "brightness_minus_4",
+          "horizontal_flip",
+          "vertical_flip"
+        ],
+        "include_originals": true,
+        "output_image_count": 2000,
+        "duration_s": 13.404317900072783,
+        "planner": {
+          "patch_w": 300,
+          "patch_h": 300,
+          "resize_w": 300,
+          "resize_h": 300,
+          "shift_a": 50,
+          "shift_b": 30,
+          "passes": [
+            {
+              "folder": "00_base_grid",
+              "label": "Patchify (base grid)",
+              "ox": 0,
+              "oy": 0
+            },
+            {
+              "folder": "01_horizontal_50",
+              "label": "Phase shift — horizontal 50%",
+              "ox": 150,
+              "oy": 0
+            },
+            {
+              "folder": "02_horizontal_30",
+              "label": "Phase shift — horizontal 30%",
+              "ox": 90,
+              "oy": 0
+            },
+            {
+              "folder": "03_vertical_50",
+              "label": "Phase shift — vertical 50%",
+              "ox": 0,
+              "oy": 150
+            },
+            {
+              "folder": "04_vertical_30",
+              "label": "Phase shift — vertical 30%",
+              "ox": 0,
+              "oy": 90
+            }
+          ]
+        }
+      }
+    },
+    {
+      "stage": "augmentation",
+      "role": "bead",
+      "role_label": "Bead",
+      "status": "valid",
+      "valid": true,
+      "detail": "Summary readable; 2000 augmented image(s) found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\bead\\augmentation_summary.json",
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\bead\\04_augmented_patches"
+      ],
+      "expected": 1,
+      "found": 2000,
+      "step_key": "augmentation",
+      "step_index": 7,
+      "metadata": {
+        "status": "success",
+        "sku_name": "SKU_001",
+        "role": "bead",
+        "input_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\patch_creation\\SKU_001\\bead\\patches_rtor1",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\bead",
+        "prepared_images_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\bead\\02c_resized_for_clean_patchify",
+        "patches_output_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\bead\\03_patches",
+        "patch_manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\bead\\03_patches\\_combined_patch_manifest.csv",
+        "augmented_patch_folder": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\bead\\04_augmented_patches",
+        "manifest_csv": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\augmentation\\SKU_001\\bead\\augmentation_manifest.csv",
+        "source_image_count": 400,
+        "source_patch_count": 400,
+        "selected_augmentations": [
+          "brightness_plus_4",
+          "brightness_minus_4",
+          "horizontal_flip",
+          "vertical_flip"
+        ],
+        "include_originals": true,
+        "output_image_count": 2000,
+        "duration_s": 13.046862500021234,
+        "planner": {
+          "patch_w": 300,
+          "patch_h": 300,
+          "resize_w": 300,
+          "resize_h": 300,
+          "shift_a": 50,
+          "shift_b": 30,
+          "passes": [
+            {
+              "folder": "00_base_grid",
+              "label": "Patchify (base grid)",
+              "ox": 0,
+              "oy": 0
+            },
+            {
+              "folder": "01_horizontal_50",
+              "label": "Phase shift — horizontal 50%",
+              "ox": 150,
+              "oy": 0
+            },
+            {
+              "folder": "02_horizontal_30",
+              "label": "Phase shift — horizontal 30%",
+              "ox": 90,
+              "oy": 0
+            },
+            {
+              "folder": "03_vertical_50",
+              "label": "Phase shift — vertical 50%",
+              "ox": 0,
+              "oy": 150
+            },
+            {
+              "folder": "04_vertical_30",
+              "label": "Phase shift — vertical 30%",
+              "ox": 0,
+              "oy": 90
+            }
+          ]
+        }
+      }
+    },
+    {
+      "stage": "training",
+      "role": "sidewall1",
+      "role_label": "Sidewall 1",
+      "status": "valid",
+      "valid": true,
+      "detail": "PatchCore model exists and is current",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall1\\SKU_001_sidewall1_patchcore_model.pth"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "training",
+      "step_index": 8,
+      "metadata": {
+        "model_size_bytes": 117966687
+      }
+    },
+    {
+      "stage": "training",
+      "role": "sidewall2",
+      "role_label": "Sidewall 2",
+      "status": "valid",
+      "valid": true,
+      "detail": "PatchCore model exists and is current",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\SKU_001_sidewall2_patchcore_model.pth"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "training",
+      "step_index": 8,
+      "metadata": {
+        "model_size_bytes": 117966687
+      }
+    },
+    {
+      "stage": "training",
+      "role": "innerwall",
+      "role_label": "Innerwall",
+      "status": "valid",
+      "valid": true,
+      "detail": "PatchCore model exists and is current",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\innerwall\\SKU_001_innerwall_patchcore_model.pth"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "training",
+      "step_index": 8,
+      "metadata": {
+        "model_size_bytes": 117966687
+      }
+    },
+    {
+      "stage": "training",
+      "role": "tread",
+      "role_label": "Tread",
+      "status": "valid",
+      "valid": true,
+      "detail": "PatchCore model exists and is current",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\SKU_001_tread_patchcore_model.pth"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "training",
+      "step_index": 8,
+      "metadata": {
+        "model_size_bytes": 117966659
+      }
+    },
+    {
+      "stage": "training",
+      "role": "bead",
+      "role_label": "Bead",
+      "status": "valid",
+      "valid": true,
+      "detail": "PatchCore model exists and is current",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\bead\\SKU_001_bead_patchcore_model.pth"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "training",
+      "step_index": 8,
+      "metadata": {
+        "model_size_bytes": 117966652
+      }
+    },
+    {
+      "stage": "feature_threshold",
+      "role": "sidewall1",
+      "role_label": "Sidewall 1",
+      "status": "valid",
+      "valid": true,
+      "detail": "Threshold is valid: 1.0142707228660583",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\sidewall1\\threshold.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "feature_threshold",
+      "step_index": 9,
+      "metadata": {
+        "sku_name": "SKU_001",
+        "role": "sidewall1",
+        "created_at": "2026-07-14T14:59:08",
+        "threshold": 1.0142707228660583,
+        "percentile": 99.0,
+        "good_raw_image_count": 1,
+        "good_raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\1.png",
+        "good_raw_images": [
+          "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\1.png"
+        ],
+        "good_patch_count": 400,
+        "minimum_good_score": 0.44381651282310486,
+        "maximum_good_score": 1.0600560903549194,
+        "mean_good_score": 0.7206528089940548,
+        "model_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall1\\SKU_001_sidewall1_patchcore_model.pth",
+        "model_file": "SKU_001_sidewall1_patchcore_model.pth",
+        "R_template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png",
+        "R_recipe_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall1\\SKU_001_sidewall1_fast_recipe.json",
+        "R_detection_method": "fast",
+        "R_fast_fallback_to_tiled": true,
+        "requires_R_template": true,
+        "requires_R_recipe": true,
+        "preparation_mode": "FAST_RECIPE_R_TO_R_CROP_RESIZED",
+        "score_method": "maximum_nearest_memory_euclidean_distance",
+        "input_size": [
+          224,
+          224
+        ],
+        "feature_patch_size": 3,
+        "feature_patch_stride": 3,
+        "memory_bank_patch_count": 3200,
+        "memory_bank_feature_dimension": 9216,
+        "patch_configuration": {
+          "patch_width": 448,
+          "patch_height": 448,
+          "patch_stride_x": 448,
+          "patch_stride_y": 448,
+          "cover_complete_image": true
+        },
+        "processing": {
+          "preparation_mode": "FAST_RECIPE_R_TO_R_CROP_RESIZED",
+          "raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\1.png",
+          "raw_width": 4096,
+          "raw_height": 30000,
+          "R_template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall1\\SKU_001_sidewall1_template.png",
+          "R_recipe_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall1\\SKU_001_sidewall1_fast_recipe.json",
+          "R_detection_method_requested": "fast",
+          "R_detection_method_used": "fast",
+          "R_fast_fallback_to_tiled": true,
+          "R_fast_fallback_reason": "",
+          "R_detection_metadata": {
+            "method": "taught_recipe_two_revolution",
+            "image_width": 4096,
+            "image_height": 30000,
+            "template_width": 224,
+            "template_height": 106,
+            "tile_height": 106,
+            "tile_width": 224,
+            "tile_count": 1,
+            "matched_tile_count": 2,
+            "match_box_count": 2,
+            "R_band_count": 2,
+            "match_threshold": 0.5,
+            "search_x_start_ratio": 0.322998046875,
+            "search_x_end_ratio": 0.446044921875,
+            "search_x_start": 1323,
+            "search_x_end_exclusive": 1827,
+            "search_width": 504,
+            "minimum_band_height": null,
+            "row_gap": null,
+            "detection_time": 3.406797599978745,
+            "recipe_model": "SKU_001_sidewall1_FAST_R",
+            "scale": 1,
+            "circumference_px_used": 11720,
+            "second_via": "expected_window",
+            "measured_gap": 11720
+          },
+          "top_R": {
+            "top_y": 6916,
+            "bottom_y_inclusive": 7021,
+            "center_y": 6969,
+            "height": 106
+          },
+          "bottom_R": {
+            "top_y": 18636,
+            "bottom_y_inclusive": 18741,
+            "center_y": 18689,
+            "height": 106
+          },
+          "R_crop_y_start": 6916,
+          "R_crop_y_end_exclusive": 18636,
+          "R_crop_width": 4096,
+          "R_crop_height": 11720,
+          "prepared_width": 4036,
+          "prepared_height": 17920,
+          "patch_count": 400
+        },
+        "scores_csv_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\sidewall1\\good_patch_scores.csv",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\sidewall1",
+        "threshold_json_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\sidewall1\\threshold.json"
+      }
+    },
+    {
+      "stage": "feature_threshold",
+      "role": "sidewall2",
+      "role_label": "Sidewall 2",
+      "status": "valid",
+      "valid": true,
+      "detail": "Threshold is valid: 1.0142707228660583",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\sidewall2\\threshold.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "feature_threshold",
+      "step_index": 9,
+      "metadata": {
+        "sku_name": "SKU_001",
+        "role": "sidewall2",
+        "created_at": "2026-07-14T14:59:47",
+        "threshold": 1.0142707228660583,
+        "percentile": 99.0,
+        "good_raw_image_count": 1,
+        "good_raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2\\1.png",
+        "good_raw_images": [
+          "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2\\1.png"
+        ],
+        "good_patch_count": 400,
+        "minimum_good_score": 0.44381651282310486,
+        "maximum_good_score": 1.0600560903549194,
+        "mean_good_score": 0.7206528089940548,
+        "model_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\SKU_001_sidewall2_patchcore_model.pth",
+        "model_file": "SKU_001_sidewall2_patchcore_model.pth",
+        "R_template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall2\\SKU_001_sidewall2_template.png",
+        "R_recipe_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\SKU_001_sidewall2_fast_recipe.json",
+        "R_detection_method": "fast",
+        "R_fast_fallback_to_tiled": true,
+        "requires_R_template": true,
+        "requires_R_recipe": true,
+        "preparation_mode": "FAST_RECIPE_R_TO_R_CROP_RESIZED",
+        "score_method": "maximum_nearest_memory_euclidean_distance",
+        "input_size": [
+          224,
+          224
+        ],
+        "feature_patch_size": 3,
+        "feature_patch_stride": 3,
+        "memory_bank_patch_count": 3200,
+        "memory_bank_feature_dimension": 9216,
+        "patch_configuration": {
+          "patch_width": 448,
+          "patch_height": 448,
+          "patch_stride_x": 448,
+          "patch_stride_y": 448,
+          "cover_complete_image": true
+        },
+        "processing": {
+          "preparation_mode": "FAST_RECIPE_R_TO_R_CROP_RESIZED",
+          "raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2\\1.png",
+          "raw_width": 4096,
+          "raw_height": 30000,
+          "R_template_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\template_extractor\\SKU_001\\sidewall2\\SKU_001_sidewall2_template.png",
+          "R_recipe_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\sidewall2\\SKU_001_sidewall2_fast_recipe.json",
+          "R_detection_method_requested": "fast",
+          "R_detection_method_used": "fast",
+          "R_fast_fallback_to_tiled": true,
+          "R_fast_fallback_reason": "",
+          "R_detection_metadata": {
+            "method": "taught_recipe_two_revolution",
+            "image_width": 4096,
+            "image_height": 30000,
+            "template_width": 217,
+            "template_height": 106,
+            "tile_height": 106,
+            "tile_width": 217,
+            "tile_count": 1,
+            "matched_tile_count": 2,
+            "match_box_count": 2,
+            "R_band_count": 2,
+            "match_threshold": 0.5,
+            "search_x_start_ratio": 0.323974609375,
+            "search_x_end_ratio": 0.4453125,
+            "search_x_start": 1327,
+            "search_x_end_exclusive": 1824,
+            "search_width": 497,
+            "minimum_band_height": null,
+            "row_gap": null,
+            "detection_time": 3.3985919998958707,
+            "recipe_model": "SKU_001_sidewall2_FAST_R",
+            "scale": 1,
+            "circumference_px_used": 11720,
+            "second_via": "expected_window",
+            "measured_gap": 11720
+          },
+          "top_R": {
+            "top_y": 6916,
+            "bottom_y_inclusive": 7021,
+            "center_y": 6969,
+            "height": 106
+          },
+          "bottom_R": {
+            "top_y": 18636,
+            "bottom_y_inclusive": 18741,
+            "center_y": 18689,
+            "height": 106
+          },
+          "R_crop_y_start": 6916,
+          "R_crop_y_end_exclusive": 18636,
+          "R_crop_width": 4096,
+          "R_crop_height": 11720,
+          "prepared_width": 4036,
+          "prepared_height": 17920,
+          "patch_count": 400
+        },
+        "scores_csv_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\sidewall2\\good_patch_scores.csv",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\sidewall2",
+        "threshold_json_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\sidewall2\\threshold.json"
+      }
+    },
+    {
+      "stage": "feature_threshold",
+      "role": "innerwall",
+      "role_label": "Innerwall",
+      "status": "valid",
+      "valid": true,
+      "detail": "Threshold is valid: 1.0231126797199246",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\innerwall\\threshold.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "feature_threshold",
+      "step_index": 9,
+      "metadata": {
+        "sku_name": "SKU_001",
+        "role": "innerwall",
+        "created_at": "2026-07-14T15:00:25",
+        "threshold": 1.0231126797199246,
+        "percentile": 99.0,
+        "good_raw_image_count": 1,
+        "good_raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\innerwall\\1.png",
+        "good_raw_images": [
+          "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\innerwall\\1.png"
+        ],
+        "good_patch_count": 670,
+        "minimum_good_score": 0.5090386271476746,
+        "maximum_good_score": 1.0544229745864868,
+        "mean_good_score": 0.7943937983975482,
+        "model_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\innerwall\\SKU_001_innerwall_patchcore_model.pth",
+        "model_file": "SKU_001_innerwall_patchcore_model.pth",
+        "R_template_path": "",
+        "R_recipe_path": "",
+        "R_detection_method": "direct",
+        "R_fast_fallback_to_tiled": true,
+        "requires_R_template": false,
+        "requires_R_recipe": false,
+        "preparation_mode": "FULL_RAW_IMAGE_DIRECT_PATCHIFY",
+        "score_method": "maximum_nearest_memory_euclidean_distance",
+        "input_size": [
+          224,
+          224
+        ],
+        "feature_patch_size": 3,
+        "feature_patch_stride": 3,
+        "memory_bank_patch_count": 3200,
+        "memory_bank_feature_dimension": 9216,
+        "patch_configuration": {
+          "patch_width": 448,
+          "patch_height": 448,
+          "patch_stride_x": 448,
+          "patch_stride_y": 448,
+          "cover_complete_image": true
+        },
+        "processing": {
+          "preparation_mode": "FULL_RAW_IMAGE_DIRECT_PATCHIFY",
+          "raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\innerwall\\1.png",
+          "raw_width": 4096,
+          "raw_height": 30000,
+          "prepared_width": 4096,
+          "prepared_height": 30000,
+          "R_template_path": "",
+          "patch_count": 670
+        },
+        "scores_csv_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\innerwall\\good_patch_scores.csv",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\innerwall",
+        "threshold_json_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\innerwall\\threshold.json"
+      }
+    },
+    {
+      "stage": "feature_threshold",
+      "role": "tread",
+      "role_label": "Tread",
+      "status": "valid",
+      "valid": true,
+      "detail": "Threshold is valid: 1.023080139160156",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\tread\\threshold.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "feature_threshold",
+      "step_index": 9,
+      "metadata": {
+        "sku_name": "SKU_001",
+        "role": "tread",
+        "created_at": "2026-07-14T15:01:13",
+        "threshold": 1.023080139160156,
+        "percentile": 99.0,
+        "good_raw_image_count": 1,
+        "good_raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread\\1.png",
+        "good_raw_images": [
+          "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread\\1.png"
+        ],
+        "good_patch_count": 670,
+        "minimum_good_score": 0.5265958905220032,
+        "maximum_good_score": 1.0549523830413818,
+        "mean_good_score": 0.7953530380085333,
+        "model_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\tread\\SKU_001_tread_patchcore_model.pth",
+        "model_file": "SKU_001_tread_patchcore_model.pth",
+        "R_template_path": "",
+        "R_recipe_path": "",
+        "R_detection_method": "direct",
+        "R_fast_fallback_to_tiled": true,
+        "requires_R_template": false,
+        "requires_R_recipe": false,
+        "preparation_mode": "FULL_RAW_IMAGE_DIRECT_PATCHIFY",
+        "score_method": "maximum_nearest_memory_euclidean_distance",
+        "input_size": [
+          224,
+          224
+        ],
+        "feature_patch_size": 3,
+        "feature_patch_stride": 3,
+        "memory_bank_patch_count": 3200,
+        "memory_bank_feature_dimension": 9216,
+        "patch_configuration": {
+          "patch_width": 448,
+          "patch_height": 448,
+          "patch_stride_x": 448,
+          "patch_stride_y": 448,
+          "cover_complete_image": true
+        },
+        "processing": {
+          "preparation_mode": "FULL_RAW_IMAGE_DIRECT_PATCHIFY",
+          "raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread\\1.png",
+          "raw_width": 4096,
+          "raw_height": 30000,
+          "prepared_width": 4096,
+          "prepared_height": 30000,
+          "R_template_path": "",
+          "patch_count": 670
+        },
+        "scores_csv_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\tread\\good_patch_scores.csv",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\tread",
+        "threshold_json_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\tread\\threshold.json"
+      }
+    },
+    {
+      "stage": "feature_threshold",
+      "role": "bead",
+      "role_label": "Bead",
+      "status": "valid",
+      "valid": true,
+      "detail": "Threshold is valid: 1.0160446715354916",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\bead\\threshold.json"
+      ],
+      "expected": 1,
+      "found": 1,
+      "step_key": "feature_threshold",
+      "step_index": 9,
+      "metadata": {
+        "sku_name": "SKU_001",
+        "role": "bead",
+        "created_at": "2026-07-14T15:01:52",
+        "threshold": 1.0160446715354916,
+        "percentile": 99.0,
+        "good_raw_image_count": 1,
+        "good_raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\bead\\1.png",
+        "good_raw_images": [
+          "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\bead\\1.png"
+        ],
+        "good_patch_count": 670,
+        "minimum_good_score": 0.523874819278717,
+        "maximum_good_score": 1.049676775932312,
+        "mean_good_score": 0.7948266180593576,
+        "model_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\training\\SKU_001\\bead\\SKU_001_bead_patchcore_model.pth",
+        "model_file": "SKU_001_bead_patchcore_model.pth",
+        "R_template_path": "",
+        "R_recipe_path": "",
+        "R_detection_method": "direct",
+        "R_fast_fallback_to_tiled": true,
+        "requires_R_template": false,
+        "requires_R_recipe": false,
+        "preparation_mode": "FULL_RAW_IMAGE_DIRECT_PATCHIFY",
+        "score_method": "maximum_nearest_memory_euclidean_distance",
+        "input_size": [
+          224,
+          224
+        ],
+        "feature_patch_size": 3,
+        "feature_patch_stride": 3,
+        "memory_bank_patch_count": 3200,
+        "memory_bank_feature_dimension": 9216,
+        "patch_configuration": {
+          "patch_width": 448,
+          "patch_height": 448,
+          "patch_stride_x": 448,
+          "patch_stride_y": 448,
+          "cover_complete_image": true
+        },
+        "processing": {
+          "preparation_mode": "FULL_RAW_IMAGE_DIRECT_PATCHIFY",
+          "raw_image": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\bead\\1.png",
+          "raw_width": 4096,
+          "raw_height": 30000,
+          "prepared_width": 4096,
+          "prepared_height": 30000,
+          "R_template_path": "",
+          "patch_count": 670
+        },
+        "scores_csv_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\bead\\good_patch_scores.csv",
+        "output_root": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\bead",
+        "threshold_json_path": "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\feature_threshold\\SKU_001\\bead\\threshold.json"
+      }
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'r_recipe' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "r_recipe",
+      "step_index": 4,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'offset' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "offset",
+      "step_index": 5,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'patch_creation' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "patch_creation",
+      "step_index": 6,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'augmentation' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "augmentation",
+      "step_index": 7,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'training' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "training",
+      "step_index": 8,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'feature_threshold' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "feature_threshold",
+      "step_index": 9,
+      "metadata": {}
+    }
+  ],
+  "missing_or_invalid": [
+    {
+      "stage": "axis_teaching",
+      "role": "",
+      "role_label": "All",
+      "status": "missing",
+      "valid": false,
+      "detail": "0 of 37 required axis targets available",
+      "paths": [],
+      "expected": 37,
+      "found": 0,
+      "step_key": "axis_teaching",
+      "step_index": 1,
+      "metadata": {
+        "missing_target_keys": [
+          "sd1_bead_locking_lh_home",
+          "sd2_bead_locking_rh_home",
+          "sd3_sw2_camera_up_down_home",
+          "sd4_inner_camera_fwd_rev_home",
+          "sd5_sw1_camera_in_out_home",
+          "sd6_sw1_camera_up_down_home",
+          "sd7_sw2_camera_in_out_home",
+          "sd8_inner_camera_in_out_home",
+          "sd9_tread_camera_up_down_home",
+          "sd10_tyre_centering_home",
+          "sd11_inner_camera_up_down_home",
+          "sd1_bead_locking_lh_work1",
+          "sd2_bead_locking_rh_work1",
+          "sd3_sw2_camera_up_down_work1",
+          "sd4_inner_camera_fwd_rev_work1",
+          "sd5_sw1_camera_in_out_work1",
+          "sd6_sw1_camera_up_down_work1",
+          "sd7_sw2_camera_in_out_work1",
+          "sd8_inner_camera_in_out_work1",
+          "sd9_tread_camera_up_down_work1",
+          "sd10_tyre_centering_work1",
+          "sd11_inner_camera_up_down_work1",
+          "sd1_bead_locking_lh_work2",
+          "sd2_bead_locking_rh_work2",
+          "sd3_sw2_camera_up_down_work2",
+          "sd4_inner_camera_fwd_rev_work2",
+          "sd5_sw1_camera_in_out_work2",
+          "sd6_sw1_camera_up_down_work2",
+          "sd7_sw2_camera_in_out_work2",
+          "sd8_inner_camera_in_out_work2",
+          "sd9_tread_camera_up_down_work2",
+          "sd10_tyre_centering_work2",
+          "sd11_inner_camera_up_down_work2",
+          "sd12_tyre_rotation_work2",
+          "sd4_inner_camera_fwd_rev_work3",
+          "sd12_tyre_rotation_diameter",
+          "sd12_tyre_rotation"
+        ]
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "sidewall1",
+      "role_label": "Sidewall 1",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall1\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "sidewall2",
+      "role_label": "Sidewall 2",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\sidewall2\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "innerwall",
+      "role_label": "Innerwall",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\innerwall\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "tread",
+      "role_label": "Tread",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\tread\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "capture",
+      "role": "bead",
+      "role_label": "Bead",
+      "status": "partial",
+      "valid": false,
+      "detail": "Only 1 of 2 required images found",
+      "paths": [
+        "C:\\Users\\Hi\\OneDrive - radometech.com\\Desktop\\Apollo_patch_pos\\media\\new_sku_images\\SKU_001\\bead\\1.png"
+      ],
+      "expected": 2,
+      "found": 1,
+      "step_key": "capture",
+      "step_index": 2,
+      "metadata": {
+        "cycle": "SKU_001"
+      }
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'r_recipe' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "r_recipe",
+      "step_index": 4,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'offset' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "offset",
+      "step_index": 5,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'patch_creation' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "patch_creation",
+      "step_index": 6,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'augmentation' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "augmentation",
+      "step_index": 7,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'training' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "training",
+      "step_index": 8,
+      "metadata": {}
+    },
+    {
+      "stage": "downstream_validation",
+      "role": "",
+      "role_label": "All",
+      "status": "outdated",
+      "valid": false,
+      "detail": "Workflow step 'feature_threshold' has status 'needs_update'",
+      "paths": [],
+      "expected": null,
+      "found": null,
+      "step_key": "feature_threshold",
+      "step_index": 9,
+      "metadata": {}
+    }
+  ]
+}
