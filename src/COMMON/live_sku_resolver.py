@@ -30,12 +30,12 @@ def recipe_number_to_sku(recipe_number: int, prefix: str = "SKU", digits: int = 
 
 def resolve_live_sku_from_plc(plc_client, media_path: str, env_path: str):
     """
-    Reads active recipe from PLC and maps it to AI calibration SKU folder.
+    Reads the active recipe from PLC and maps it to the runtime SKU name.
 
     Example:
         DB74.DBW78 = 1
         -> SKU_001
-        -> media/AI_Calibration_Files/SKU_001
+        -> modern per-SKU PatchCore asset folders
     """
     env = load_env(env_path)
 
@@ -57,17 +57,11 @@ def resolve_live_sku_from_plc(plc_client, media_path: str, env_path: str):
         digits=sku_digits,
     )
 
-    sku_dir = os.path.join(
-        media_path,
-        "AI_Calibration_Files",
-        sku_name,
-    )
-
-    if not os.path.isdir(sku_dir):
-        raise FileNotFoundError(
-            f"PLC active recipe is {recipe_number}, mapped SKU is {sku_name}, "
-            f"but folder not found:\n{sku_dir}"
-        )
+    # Compatibility field retained for callers that read ``sku_dir``.
+    # The obsolete media/AI_Calibration_Files/<SKU> dependency is removed.
+    # Complete modern artifact validation is performed by the GUI immediately
+    # after this function returns.
+    sku_dir = os.path.join(media_path, "training", sku_name)
 
     return {
         "recipe_number": recipe_number,

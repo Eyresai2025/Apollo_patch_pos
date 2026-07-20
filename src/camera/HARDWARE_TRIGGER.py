@@ -3,15 +3,16 @@
 # Apollo Live Camera Manager - PLC SOFTWARE TRIGGER VERSION
 #
 # Final standalone logic merged into application style:
-#   - Main group waits PLC DB74.DBX0.3
+#   - Strict PLC sequence: BEAD first, MAIN second
 #   - Bead group waits PLC DB74.DBX86.0
+#   - Main group accepts only a fresh DB74.DBX0.3 LOW->HIGH edge after bead completes
 #   - Camera trigger is Software trigger:
 #       TriggerSelector = AcquisitionStart
 #       TriggerSource   = Software
 #       TriggerMode     = On
 #   - Python executes TriggerSoftware after PLC rising edge
 #   - Same physical camera can have multiple roles
-#       Example: serial 250500042 -> innerwall(main) + bead(bead)
+#       Example: serial 254901431 -> innerwall(main) + bead(bead)
 #   - One CameraActor per physical camera, so duplicate serial is never opened twice
 #   - SKU camera settings are applied through apply_camera_profile() before streams start
 #   - Software FFC is applied after stitching and before images are returned to the app
@@ -166,6 +167,15 @@ TRIGGER_SELECTOR = _env_str("CAM_TRIGGER_SELECTOR", "AcquisitionStart")
 TRIGGER_SOURCE = _env_str("CAM_TRIGGER_SOURCE", "Software")
 TRIGGER_ACTIVATION = _env_str("CAM_TRIGGER_ACTIVATION", "RisingEdge")
 
+# Production flow: BEAD group first, INNERWALL second. MAIN is pre-armed
+# while LOW and may latch only after the valid BEAD edge. Shared serial
+# Shared 4K serial 254901431 uses AcquisitionStart/software triggering and is
+# fully re-armed between its bead and innerwall roles.
+PLC_TRIGGER_SEQUENCE = "BEAD_GROUP_THEN_LATCHED_MAIN_INNER_ONLY"
+MAIN_TRIGGER_POLICY = "LATCH_AFTER_BEAD_EDGE_RELEASE_AFTER_GROUP_READY"
+MAIN_TRIGGER_LATCH_ENABLED = _env_bool("CAM_MAIN_TRIGGER_LATCH_ENABLED", True)
+OVERLAP_SHARED_REARM = _env_bool("CAM_OVERLAP_SHARED_REARM", True)
+
 PLC_IP = _env_str("PLC_IP", "192.168.10.1")
 PLC_RACK = _env_int("PLC_RACK", 0)
 PLC_SLOT = _env_int("PLC_SLOT", 1)
@@ -178,8 +188,10 @@ BEAD_TRIGGER_DB = _env_int("LIVE_BEAD_TRIGGER_DB", 74)
 BEAD_TRIGGER_BYTE = _env_int("LIVE_BEAD_TRIGGER_BYTE", 86)
 BEAD_TRIGGER_BIT = _env_int("LIVE_BEAD_TRIGGER_BIT", 0)
 
-# Final standalone uses 0.005 so bead edge is caught quickly.
-PLC_POLL_DELAY_SEC = _env_float("LIVE_PLC_POLL_DELAY_SEC", _env_float("NEW_SKU_CAPTURE_POLL_DELAY_SEC", 0.005))
+# Fast PLC polling; MAIN is also latched so capture/reset work cannot hide its edge.
+PLC_POLL_DELAY_SEC = _env_float("LIVE_PLC_POLL_DELAY_SEC", _env_float("NEW_SKU_CAPTURE_POLL_DELAY_SEC", 0.002))
+PLC_CONFIRM_HIGH_READS = max(1, _env_int("LIVE_PLC_CONFIRM_HIGH_READS", 1))
+PLC_CONFIRM_HIGH_DELAY_SEC = max(0.0, _env_float("LIVE_PLC_CONFIRM_HIGH_DELAY_SEC", 0.0))
 PLC_HIGH_LOG_EVERY_SEC = _env_float("LIVE_PLC_HIGH_LOG_EVERY_SEC", 1.0)
 
 BUFFER_TIMEOUT_MS = _env_int("CAM_BUFFER_TIMEOUT_MS", 300000)
@@ -187,24 +199,70 @@ FLUSH_COUNT = _env_int("CAM_FLUSH_COUNT", 16)
 PACKET_SIZE = _env_int("CAM_PACKET_SIZE", 9000)
 PACKET_DELAY = _env_int("CAM_PACKET_DELAY", 1000)
 
-AFTER_TRIGGER_DELAY_SEC = _env_float("CAM_AFTER_TRIGGER_DELAY_SEC", 0.02)
-AFTER_ACQ_STOP_DELAY_SEC = _env_float("CAM_AFTER_ACQ_STOP_DELAY_SEC", 0.15)
-AFTER_STOP_STREAM_DELAY_SEC = _env_float("CAM_AFTER_STOP_STREAM_DELAY_SEC", 0.20)
-AFTER_START_STREAM_DELAY_SEC = _env_float("CAM_AFTER_START_STREAM_DELAY_SEC", 0.25)
+AFTER_TRIGGER_DELAY_SEC = _env_float("CAM_AFTER_TRIGGER_DELAY_SEC", 0.0)
+AFTER_ACQ_STOP_DELAY_SEC = _env_float("CAM_AFTER_ACQ_STOP_DELAY_SEC", 0.10)
+ACQUISITION_STOP_RETRIES = max(1, _env_int("CAM_ACQUISITION_STOP_RETRIES", 3))
+ACQUISITION_STOP_RETRY_DELAY_SEC = _env_float("CAM_ACQUISITION_STOP_RETRY_DELAY_SEC", 0.10)
+
+# Full stop/start reset for shared 4K serial 254901431 between BEAD and INNERWALL.
+SHARED_FULL_REARM_STOP_DELAY_SEC = _env_float(
+    "CAM_SHARED_FULL_REARM_STOP_DELAY_SEC", 0.20
+)
+SHARED_FULL_REARM_START_DELAY_SEC = _env_float(
+    "CAM_SHARED_FULL_REARM_START_DELAY_SEC", 0.30
+)
+SHARED_FULL_REARM_FLUSH_TIMEOUT_MS = max(1, _env_int(
+    "CAM_SHARED_FULL_REARM_FLUSH_TIMEOUT_MS", 50
+))
+SHARED_FULL_REARM_VERIFY_RETRIES = max(1, _env_int(
+    "CAM_SHARED_FULL_REARM_VERIFY_RETRIES", 3
+))
+SHARED_FULL_REARM_VERIFY_DELAY_SEC = _env_float(
+    "CAM_SHARED_FULL_REARM_VERIFY_DELAY_SEC", 0.10
+)
 
 PARALLEL = _env_bool("CAM_PARALLEL_CAPTURE", True)
 
 # Shared inner/bead behavior from final standalone.
-# True = bead role uses CAM_INNERWALL_SERIAL, so 250500042 opens only once.
+# True = bead and innerwall share serial 254901431, opened only once.
 SHARED_INNER_BEAD = _env_bool("CAM_SHARED_INNER_BEAD", True)
-SHARED_INNER_BEAD_SERIAL = _env_str("CAM_INNERWALL_SERIAL", "250500042")
+_configured_shared_serial = _env_str("CAM_INNERWALL_SERIAL", "254901431")
+# Automatic migration: older .env files may still contain the removed 2K serial.
+SHARED_INNER_BEAD_SERIAL = (
+    "254901431"
+    if _configured_shared_serial in ("", "250500042")
+    else str(_configured_shared_serial)
+)
 
-FAST_RESET_SHARED_CAMERA = _env_bool("CAM_FAST_RESET_SHARED_CAMERA", False)
-FAST_RESET_SLEEP_SEC = _env_float("CAM_FAST_RESET_SLEEP_SEC", 0.05)
-FAST_FLUSH_COUNT = _env_int("CAM_FAST_FLUSH_COUNT", 32)
-FAST_FLUSH_TIMEOUT_MS = _env_int("CAM_FAST_FLUSH_TIMEOUT_MS", 2)
+# Shared 254901431 is now a normal 4K AcquisitionStart camera. It uses the
+# same chunk stitching as all other cameras and a full stream re-arm between roles.
+SHARED_FRAME_START_MODE = False
+SHARED_CAMERA_HEIGHT = _env_int("CAM_SHARED_CAMERA_HEIGHT", 15000)
+SHARED_SINGLE_FRAME_MODE = False
+SHARED_CAMERA_CONTINUOUS_STREAM = False
+CONTINUOUS_IDLE_DRAIN_TIMEOUT_MS = max(1, _env_int(
+    "CAM_CONTINUOUS_IDLE_DRAIN_TIMEOUT_MS", 1
+))
+CONTINUOUS_PRE_CAPTURE_FLUSH_COUNT = max(0, _env_int(
+    "CAM_CONTINUOUS_PRE_CAPTURE_FLUSH_COUNT", 16
+))
+CONTINUOUS_PRE_CAPTURE_FLUSH_TIMEOUT_MS = max(1, _env_int(
+    "CAM_CONTINUOUS_PRE_CAPTURE_FLUSH_TIMEOUT_MS", 1
+))
+
+# Serialize GigE camera-control writes so multiple main cameras do not issue
+# AcquisitionStop commands simultaneously. Streams remain open.
+CAMERA_CONTROL_LOCK = threading.RLock()
 MAX_ALLOWED_BEAD_TRIGGER_DELAY_MS = _env_float("CAM_MAX_ALLOWED_BEAD_TRIGGER_DELAY_MS", 75.0)
 VERBOSE_CONFIG_LOGS = _env_bool("CAM_VERBOSE_CONFIG_LOGS", False)
+DETAILED_CONFIG_LOGS = _env_bool("CAM_DETAILED_CONFIG_LOGS", False)
+
+# Connection/startup and shutdown robustness. These retries handle brief camera
+# discovery/connection interruptions without requiring an application restart.
+CAMERA_CONNECT_RETRIES = max(1, _env_int("CAM_CONNECT_RETRIES", 3))
+CAMERA_CONNECT_RETRY_DELAY_SEC = max(0.1, _env_float("CAM_CONNECT_RETRY_DELAY_SEC", 1.0))
+CAMERA_ACTOR_START_TIMEOUT_SEC = max(5.0, _env_float("CAM_ACTOR_START_TIMEOUT_SEC", 30.0))
+CAMERA_ACTOR_STOP_TIMEOUT_SEC = max(1.0, _env_float("CAM_ACTOR_STOP_TIMEOUT_SEC", 5.0))
 
 # =========================================================
 # SOFTWARE FFC CONFIG
@@ -520,9 +578,19 @@ def correct_image_with_software_ffc(
 # CAMERA ROLE CONFIG FROM .env
 # =========================================================
 
+CAPTURE_GROUP_BY_SIDE = {
+    "sidewall1": "bead",
+    "sidewall2": "bead",
+    "tread": "bead",
+    "bead": "bead",
+    "innerwall": "main",
+}
+
+
 def _side_group(side_name: str) -> str:
-    default_group = "bead" if side_name == "bead" else "main"
-    return _side_or_global_str(side_name, "GROUP", "CAM_GROUP", default_group).strip().lower()
+    """Fixed production flow: BEAD group first, INNERWALL-only MAIN second."""
+    side_name = _normalise_side_name(side_name)
+    return CAPTURE_GROUP_BY_SIDE.get(side_name, "main")
 
 
 def _role_enabled(side_name: str) -> bool:
@@ -530,8 +598,8 @@ def _role_enabled(side_name: str) -> bool:
 
 
 def _serial_for_side(side_name: str, serial_key: str) -> str:
-    if side_name == "bead" and SHARED_INNER_BEAD:
-        return _env_str("CAM_INNERWALL_SERIAL", "")
+    if side_name in ("innerwall", "bead") and SHARED_INNER_BEAD:
+        return str(SHARED_INNER_BEAD_SERIAL)
     return _env_str(serial_key, "")
 
 
@@ -556,9 +624,24 @@ def get_camera_role_config() -> List[Dict[str, Any]]:
             "group": _side_group(side_name),
 
             "width": _side_or_global_int(side_name, "WIDTH", "CAM_WIDTH", 4096),
-            "camera_height": _side_or_global_int(side_name, "CAMERA_HEIGHT", "CAM_CAMERA_HEIGHT", 14000),
-            "final_height": _side_or_global_int(side_name, "FINAL_HEIGHT", "CAM_FINAL_HEIGHT", 42000),
-            "pixel_format": _side_or_global_str(side_name, "PIXEL_FORMAT", "CAM_PIXEL_FORMAT", "Mono16"),
+            "camera_height": _side_or_global_int(
+                side_name,
+                "CAMERA_HEIGHT",
+                "CAM_CAMERA_HEIGHT",
+                15000,
+            ),
+            "final_height": _side_or_global_int(
+                side_name,
+                "FINAL_HEIGHT",
+                "CAM_FINAL_HEIGHT",
+                60000,
+            ),
+            "pixel_format": _side_or_global_str(
+                side_name,
+                "PIXEL_FORMAT",
+                "CAM_PIXEL_FORMAT",
+                "Mono8",
+            ),
             "num_stream_buffers": _side_or_global_int(side_name, "STREAM_BUFFERS", "CAM_STREAM_BUFFERS", 16),
 
             "exposure_auto_limit_auto": _side_or_global_str(side_name, "EXPOSURE_AUTO_LIMIT_AUTO", "CAM_EXPOSURE_AUTO_LIMIT_AUTO", "Off"),
@@ -602,6 +685,27 @@ def get_camera_role_config() -> List[Dict[str, Any]]:
             ),
         }
 
+        # Migrate old 2K .env defaults automatically. This is applied only when
+        # CAM_INNERWALL_SERIAL still contains the removed serial, so new 4K
+        # profiles with user-entered values are not overwritten.
+        if (
+            side_name in ("innerwall", "bead")
+            and SHARED_INNER_BEAD
+            and str(_configured_shared_serial) == "250500042"
+        ):
+            cfg.update({
+                "serial": str(SHARED_INNER_BEAD_SERIAL),
+                "width": 4096,
+                "camera_height": 15000,
+                "final_height": 60000,
+                "pixel_format": "Mono8",
+                "exposure_time": 61.0,
+                "gain": 24.0,
+                "acquisition_line_rate_enable": True,
+                "acquisition_line_rate": 11575.0,
+                "acquisition_mode": "Continuous",
+            })
+
         configs.append(cfg)
 
     return configs
@@ -632,8 +736,9 @@ def get_camera_roles_by_serial() -> Dict[str, List[Dict[str, Any]]]:
 def get_physical_camera_config() -> List[Dict[str, Any]]:
     """
     One entry per physical camera serial.
-    The first role in CAMERA_ROLE_ORDER decides camera node settings.
-    This prevents duplicate opening of shared serial 250500042.
+    The first role in CAMERA_ROLE_ORDER decides physical camera node settings.
+    Therefore the shared innerwall/bead camera uses the INNERWALL pixel format.
+    This prevents duplicate opening of shared 4K serial 254901431.
     """
     role_configs = get_camera_role_config()
     physical: Dict[str, Dict[str, Any]] = {}
@@ -817,22 +922,21 @@ def wait_plc_fresh_rising_edge(
                 continue
 
             if state:
-                stable = True
-
-                for _ in range(2):
-                    time.sleep(0.02)
+                confirmed = True
+                for _ in range(1, PLC_CONFIRM_HIGH_READS):
+                    if PLC_CONFIRM_HIGH_DELAY_SEC > 0:
+                        time.sleep(PLC_CONFIRM_HIGH_DELAY_SEC)
                     state2 = safe_read_state()
-
                     if state2 is None or not state2:
-                        stable = False
+                        confirmed = False
                         break
 
-                if not stable:
+                if not confirmed:
                     log(f"[{label}] PLC {tag} HIGH_GLITCH_IGNORED")
                     continue
 
                 edge_ts = time.perf_counter()
-                log(f"[{label}] PLC {tag} HIGH_EDGE_STABLE")
+                log(f"[{label}] PLC {tag} HIGH_EDGE")
                 return edge_ts
 
             time.sleep(PLC_POLL_DELAY_SEC)
@@ -840,6 +944,234 @@ def wait_plc_fresh_rising_edge(
     finally:
         _disconnect_client(plc_client)
         log(f"[{label} PLC] dedicated PLC disconnected")
+
+
+def wait_plc_rising_edge_after_gate(
+    db: int,
+    byte: int,
+    bit: int,
+    label: str,
+    gate_event: threading.Event,
+    armed_event: threading.Event,
+    cancel_event: threading.Event,
+    stop_event: Optional[threading.Event] = None,
+) -> Optional[float]:
+    """
+    Pre-arm a PLC trigger while LOW, then accept HIGH only after gate_event.
+
+    For Apollo, MAIN is pre-armed before BEAD. The gate opens immediately after
+    the BEAD edge. Therefore a short MAIN pulse occurring during bead capture or
+    shared-camera bead capture is stored, but the four main cameras are not released
+    until bead capture has completed.
+    """
+    tag = f"DB{db}.DBX{byte}.{bit}"
+    plc_client = None
+
+    def should_stop() -> bool:
+        return (
+            cancel_event.is_set()
+            or (stop_event is not None and stop_event.is_set())
+        )
+
+    def disconnect() -> None:
+        nonlocal plc_client
+        try:
+            if plc_client is not None:
+                plc_client.disconnect()
+        except Exception:
+            pass
+        plc_client = None
+
+    def connect() -> None:
+        nonlocal plc_client
+        plc_client = _create_temp_plc_client()
+        log(f"[{label}_LATCH PLC] dedicated PLC connected: {PLC_IP}")
+
+    def safe_read_state() -> Optional[bool]:
+        nonlocal plc_client
+        last_error = None
+
+        for attempt in range(3):
+            if should_stop():
+                return None
+            try:
+                if plc_client is None:
+                    connect()
+                return _read_plc_bool(plc_client, db, byte, bit)
+            except Exception as error:
+                last_error = error
+                log(
+                    f"[{label}_LATCH PLC][WARN] read failed {tag} "
+                    f"attempt={attempt + 1}/3 | {error}"
+                )
+                disconnect()
+                time.sleep(0.25)
+
+        log(f"[{label}_LATCH PLC][ERROR] read failed: {last_error}")
+        return None
+
+    try:
+        connect()
+        log(f"[{label}_LATCH] PLC {tag} WAIT_LOW_TO_ARM")
+
+        while not should_stop():
+            state = safe_read_state()
+            if state is None:
+                if should_stop():
+                    return None
+                time.sleep(0.25)
+                continue
+            if not state:
+                log(f"[{label}_LATCH] PLC {tag} LOW_ARMED")
+                armed_event.set()
+                break
+            time.sleep(PLC_POLL_DELAY_SEC)
+
+        if not armed_event.is_set() or should_stop():
+            return None
+
+        while not should_stop():
+            if gate_event.wait(timeout=0.05):
+                break
+
+        if should_stop():
+            return None
+
+        log(
+            f"[{label}_LATCH] GATE_OPEN after BEAD edge; "
+            f"PLC {tag} WAIT_HIGH"
+        )
+
+        while not should_stop():
+            state = safe_read_state()
+            if state is None:
+                if should_stop():
+                    return None
+                time.sleep(0.25)
+                continue
+
+            if state:
+                confirmed = True
+                for _ in range(1, PLC_CONFIRM_HIGH_READS):
+                    if PLC_CONFIRM_HIGH_DELAY_SEC > 0:
+                        time.sleep(PLC_CONFIRM_HIGH_DELAY_SEC)
+                    state2 = safe_read_state()
+                    if state2 is None or not state2:
+                        confirmed = False
+                        break
+
+                if not confirmed:
+                    log(f"[{label}_LATCH] PLC {tag} HIGH_GLITCH_IGNORED")
+                    continue
+
+                edge_ts = time.perf_counter()
+                log(f"[{label}_LATCH] PLC {tag} HIGH_EDGE_LATCHED")
+                return edge_ts
+
+            time.sleep(PLC_POLL_DELAY_SEC)
+
+        return None
+
+    finally:
+        armed_event.set()
+        disconnect()
+        log(f"[{label}_LATCH PLC] dedicated PLC disconnected")
+
+
+@dataclass
+class PLCTriggerLatch:
+    label: str
+    gate_event: threading.Event
+    armed_event: threading.Event
+    done_event: threading.Event
+    cancel_event: threading.Event
+    edge_ts: Optional[float] = None
+    error: Optional[str] = None
+    thread: Optional[threading.Thread] = None
+
+
+def start_plc_trigger_latch(
+    label: str,
+    db: int,
+    byte: int,
+    bit: int,
+    stop_event: Optional[threading.Event] = None,
+) -> PLCTriggerLatch:
+    """Pre-arm one PLC edge watcher and store the first edge after gate open."""
+    latch = PLCTriggerLatch(
+        label=label,
+        gate_event=threading.Event(),
+        armed_event=threading.Event(),
+        done_event=threading.Event(),
+        cancel_event=threading.Event(),
+    )
+
+    def worker() -> None:
+        try:
+            latch.edge_ts = wait_plc_rising_edge_after_gate(
+                db=db,
+                byte=byte,
+                bit=bit,
+                label=label,
+                gate_event=latch.gate_event,
+                armed_event=latch.armed_event,
+                cancel_event=latch.cancel_event,
+                stop_event=stop_event,
+            )
+        except Exception as error:
+            latch.error = str(error)
+            log(f"[{label}_LATCH][ERROR] {error}")
+        finally:
+            latch.armed_event.set()
+            latch.done_event.set()
+
+    latch.thread = threading.Thread(
+        target=worker,
+        name=f"{label.lower()}-trigger-latch",
+        daemon=True,
+    )
+    latch.thread.start()
+    return latch
+
+
+def cancel_plc_trigger_latch(latch: Optional[PLCTriggerLatch]) -> None:
+    if latch is None:
+        return
+    latch.cancel_event.set()
+    latch.gate_event.set()
+    if latch.thread is not None:
+        latch.thread.join(timeout=2.0)
+
+
+def wait_plc_trigger_latch_armed(
+    latch: PLCTriggerLatch,
+    stop_event: Optional[threading.Event] = None,
+) -> bool:
+    while not latch.armed_event.wait(timeout=0.05):
+        if stop_event is not None and stop_event.is_set():
+            cancel_plc_trigger_latch(latch)
+            return False
+    return latch.error is None and not latch.cancel_event.is_set()
+
+
+def wait_plc_trigger_latch_result(
+    latch: PLCTriggerLatch,
+    stop_event: Optional[threading.Event] = None,
+) -> Optional[float]:
+    if latch.done_event.is_set() and latch.edge_ts is not None:
+        log(f"[{latch.label}_LATCH] EDGE_ALREADY_STORED")
+    else:
+        log(f"[{latch.label}_LATCH] WAITING_FOR_EDGE")
+
+    while not latch.done_event.wait(timeout=0.05):
+        if stop_event is not None and stop_event.is_set():
+            cancel_plc_trigger_latch(latch)
+            return None
+
+    if latch.error:
+        log(f"[{latch.label}_LATCH] RESULT_ERROR {latch.error}")
+        return None
+    return latch.edge_ts
 
 
 # =========================================================
@@ -853,9 +1185,9 @@ class LineScanCamera:
         camera_name: str,
         roles: List[Dict[str, Any]],
         width: int = 4096,
-        camera_height: int = 14000,
-        final_height: int = 42000,
-        pixel_format: str = "Mono16",
+        camera_height: int = 15000,
+        final_height: int = 60000,
+        pixel_format: str = "Mono8",
         num_stream_buffers: int = 16,
         exposure_auto_limit_auto: str = "Off",
         exposure_time: float = 120.0,
@@ -863,6 +1195,8 @@ class LineScanCamera:
         acquisition_line_rate_enable: bool = True,
         acquisition_line_rate: float = 8169.0,
         acquisition_mode: str = "Continuous",
+        continuous_stream: bool = False,
+        frame_trigger_stream: bool = False,
     ):
         self.serial_number = str(serial_number)
         self.camera_name = camera_name
@@ -881,6 +1215,8 @@ class LineScanCamera:
         self.acquisition_line_rate_enable = bool(acquisition_line_rate_enable)
         self.acquisition_line_rate = float(acquisition_line_rate) if acquisition_line_rate not in (None, "") else 0.0
         self.acquisition_mode = acquisition_mode
+        self.continuous_stream = bool(continuous_stream)
+        self.frame_trigger_stream = bool(frame_trigger_stream)
 
         self.device = None
         self.nodemap = None
@@ -939,6 +1275,20 @@ class LineScanCamera:
             log(f"  [{self.serial_number}] EXEC_FAIL {name}: {e}")
         return False
 
+    def _execute_node_quiet(self, name: str) -> Tuple[bool, str]:
+        """Execute a node without printing a full Arena exception during retries."""
+        try:
+            if self.nodemap is None:
+                return False, "nodemap not ready"
+            node = self.nodemap.get_node(name)
+            if node:
+                node.execute()
+                return True, ""
+            return False, "node not found"
+        except Exception as e:
+            first_line = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+            return False, first_line
+
     # -----------------------------------------------------
     # BUFFER HELPERS
     # -----------------------------------------------------
@@ -979,11 +1329,19 @@ class LineScanCamera:
         return flushed
 
     def _get_buffer_interruptible(self, role_tag: str, timeout_ms: int = 500):
+        started = time.perf_counter()
+        last_error = None
         while not self._stop_event.is_set():
             try:
                 return self.device.get_buffer(timeout=timeout_ms)
-            except Exception:
-                continue
+            except Exception as error:
+                last_error = error
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                if elapsed_ms >= BUFFER_TIMEOUT_MS:
+                    raise RuntimeError(
+                        f"[{role_tag}] camera buffer timeout/disconnection after "
+                        f"{elapsed_ms:.0f} ms: {last_error}"
+                    )
         raise RuntimeError(f"[{role_tag}] stop requested while waiting for buffer")
 
     # -----------------------------------------------------
@@ -991,34 +1349,74 @@ class LineScanCamera:
     # -----------------------------------------------------
     def connect_only(self) -> None:
         if self.is_connected and self.device is not None and self.nodemap is not None:
-            log(f"[{self.serial_number}] Already connected")
-            return
+            # Verify that the existing handle is still readable. A disconnected
+            # GigE camera can leave a stale Python object behind.
+            actual_serial = self._get_node_value("DeviceSerialNumber", None)
+            if actual_serial is not None:
+                log(f"[{self.serial_number}] Already connected")
+                return
+            self.is_connected = False
+            self.device = None
+            self.nodemap = None
 
-        target_info = None
-        for info in system.device_infos:
-            if str(info.get("serial")) == str(self.serial_number):
-                target_info = info
-                break
+        last_error = None
+        for attempt in range(1, CAMERA_CONNECT_RETRIES + 1):
+            try:
+                target_info = None
+                for info in system.device_infos:
+                    if str(info.get("serial")) == str(self.serial_number):
+                        target_info = info
+                        break
 
-        if target_info is None:
-            raise RuntimeError(f"Camera serial {self.serial_number} not found in Arena device list")
+                if target_info is None:
+                    raise RuntimeError(
+                        f"Camera serial {self.serial_number} not found in Arena device list"
+                    )
 
-        devices = system.create_device([target_info])
-        self.device = devices[0]
-        self.nodemap = self.device.nodemap
+                devices = system.create_device([target_info])
+                if not devices:
+                    raise RuntimeError(
+                        f"Arena returned no device for serial {self.serial_number}"
+                    )
 
-        actual_serial = self._get_node_value("DeviceSerialNumber", self.serial_number)
-        self.is_streaming = False
-        self.is_connected = True
+                self.device = devices[0]
+                self.nodemap = self.device.nodemap
+                actual_serial = self._get_node_value(
+                    "DeviceSerialNumber", self.serial_number
+                )
+                self.is_streaming = False
+                self.is_connected = True
 
-        role_txt = ", ".join([f"{r['name']}:{r['group']}" for r in self.roles])
-        log("--------------------------------------------------")
-        log(f"[{self.serial_number}] Camera connected ONLY")
-        log(f"Camera name : {self.camera_name}")
-        log(f"Roles       : {role_txt}")
-        log(f"Actual serial: {actual_serial}")
-        log("No camera configuration applied in Test Mode.")
-        log("--------------------------------------------------")
+                role_txt = ", ".join(
+                    [f"{r['name']}:{r['group']}" for r in self.roles]
+                )
+                log("--------------------------------------------------")
+                log(f"[{self.serial_number}] Camera connected ONLY")
+                log(f"Camera name : {self.camera_name}")
+                log(f"Roles       : {role_txt}")
+                log(f"Actual serial: {actual_serial}")
+                log(f"Connection attempt: {attempt}/{CAMERA_CONNECT_RETRIES}")
+                log("No camera configuration applied in Test Mode.")
+                log("--------------------------------------------------")
+                return
+
+            except Exception as error:
+                last_error = error
+                self.is_connected = False
+                self.is_streaming = False
+                self.device = None
+                self.nodemap = None
+                log(
+                    f"[CAMERA_CONNECT_RETRY] serial={self.serial_number} "
+                    f"attempt={attempt}/{CAMERA_CONNECT_RETRIES} error={error}"
+                )
+                if attempt < CAMERA_CONNECT_RETRIES:
+                    time.sleep(CAMERA_CONNECT_RETRY_DELAY_SEC)
+
+        raise RuntimeError(
+            f"Camera serial {self.serial_number} connection failed after "
+            f"{CAMERA_CONNECT_RETRIES} attempts: {last_error}"
+        )
 
     # -----------------------------------------------------
     # CONFIGURATION
@@ -1044,10 +1442,38 @@ class LineScanCamera:
 
         set_tl("StreamAutoNegotiatePacketSize", True)
         set_tl("StreamPacketResendEnable", True)
-        set_tl("StreamBufferHandlingMode", "OldestFirst")
+        set_tl(
+            "StreamBufferHandlingMode",
+            "NewestOnly" if self.continuous_stream else "OldestFirst",
+        )
 
     def _configure_trigger(self) -> None:
         mode = TRIGGER_MODE
+
+        if self.frame_trigger_stream:
+            self._set_node("TriggerMode", "Off")
+            selector_ok = self._set_node("TriggerSelector", "FrameStart")
+            source_ok = self._set_node("TriggerSource", "Software")
+            activation_ok = self._set_node("TriggerActivation", TRIGGER_ACTIVATION)
+            mode_ok = self._set_node("TriggerMode", "On")
+            if not (selector_ok and source_ok and activation_ok and mode_ok):
+                raise RuntimeError(
+                    f"Shared camera {self.serial_number} does not accept "
+                    "FrameStart/Software/On trigger configuration"
+                )
+            log(
+                f"  [{self.serial_number}] SHARED_FRAMESTART_STREAM=True; "
+                "stream remains open and one complete frame is software-triggered"
+            )
+            return
+
+        if self.continuous_stream:
+            self._set_node("TriggerMode", "Off")
+            log(
+                f"  [{self.serial_number}] CONTINUOUS_SHARED_STREAM=True; "
+                "PLC edges select capture windows"
+            )
+            return
 
         if mode in ("software", "plc_software"):
             self._set_node("TriggerMode", "Off")
@@ -1088,23 +1514,53 @@ class LineScanCamera:
         self._set_node("PixelFormat", self.pixel_format)
         self._set_node("AcquisitionMode", self.acquisition_mode)
 
-        if self.acquisition_line_rate_enable:
-            ok_enable = self._set_node("AcquisitionLineRateEnable", True)
-            ok_rate = self._set_node("AcquisitionLineRate", self.acquisition_line_rate)
-            if ok_enable or ok_rate:
-                safe_exposure = min(
+        # Apply exposure before line rate. With the previous/longer exposure
+        # still active, Arena can temporarily report a lower maximum line rate
+        # and reject a valid requested value such as tread=20496 lines/s.
+        self._set_node("ExposureAutoLimitAuto", self.exposure_auto_limit_auto)
+        time.sleep(0.02)
+
+        if self.acquisition_line_rate_enable and self.acquisition_line_rate > 0:
+            requested_rate = float(self.acquisition_line_rate)
+            safe_exposure = min(
+                self.exposure_time,
+                0.99 * (1_000_000.0 / max(requested_rate, 1.0)),
+            )
+
+            self._set_node("ExposureTime", safe_exposure)
+            time.sleep(0.05)
+            self._set_node("AcquisitionLineRateEnable", True)
+            rate_ok = self._set_node("AcquisitionLineRate", requested_rate)
+
+            # Retry once after the dependency refresh completes.
+            if not rate_ok:
+                time.sleep(0.10)
+                rate_ok = self._set_node("AcquisitionLineRate", requested_rate)
+
+            actual_rate = self._get_node_value(
+                "AcquisitionLineRate",
+                requested_rate,
+            )
+            try:
+                final_safe_exposure = min(
                     self.exposure_time,
-                    0.90 * (1_000_000.0 / max(float(self.acquisition_line_rate), 1.0)),
+                    0.99 * (1_000_000.0 / max(float(actual_rate), 1.0)),
                 )
-            else:
-                safe_exposure = self.exposure_time
+            except Exception:
+                final_safe_exposure = safe_exposure
+
+            self._set_node("ExposureTime", final_safe_exposure)
+
+            if not rate_ok:
+                log(
+                    f"  [{self.serial_number}] LINE_RATE_WARNING "
+                    f"requested={requested_rate} actual={actual_rate}"
+                )
         else:
             log(f"  [{self.serial_number}] AcquisitionLineRate skipped")
             safe_exposure = self.exposure_time
+            self._set_node("ExposureTime", safe_exposure)
 
-        self._set_node("ExposureAutoLimitAuto", self.exposure_auto_limit_auto)
-        time.sleep(0.02)
-        self._set_node("ExposureTime", safe_exposure)
         self._set_node("Gain", self.gain)
 
         self._set_node("GevSCPSPacketSize", getattr(self, "packet_size", PACKET_SIZE))
@@ -1112,14 +1568,47 @@ class LineScanCamera:
 
         self._configure_trigger()
 
-        log(f"[{self.serial_number}] FINAL SETTINGS")
-        for node_name in [
-            "DeviceSerialNumber", "Width", "Height", "PixelFormat", "AcquisitionMode",
-            "AcquisitionLineRateEnable", "AcquisitionLineRate", "ExposureTime", "Gain",
-            "TriggerSelector", "TriggerSource", "TriggerActivation", "TriggerMode",
-            "LineStatus", "GevSCPSPacketSize", "GevSCPD",
-        ]:
-            log(f"  {node_name}: {self._get_node_value(node_name, '-')}")
+        if self.frame_trigger_stream and SHARED_SINGLE_FRAME_MODE:
+            actual_height = self._get_node_value("Height", None)
+            try:
+                actual_height_int = int(actual_height)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Shared camera {self.serial_number} returned invalid Height={actual_height!r}"
+                ) from exc
+
+            if self.final_height != self.camera_height:
+                raise RuntimeError(
+                    "Shared direct-full-frame mode requires final_height == "
+                    f"camera_height, got {self.final_height} != {self.camera_height}"
+                )
+            if actual_height_int != self.camera_height:
+                raise RuntimeError(
+                    f"Shared camera {self.serial_number} did not accept Height="
+                    f"{self.camera_height}; actual={actual_height_int}"
+                )
+
+        if DETAILED_CONFIG_LOGS:
+            log(f"[{self.serial_number}] FINAL SETTINGS")
+            for node_name in [
+                "DeviceSerialNumber", "Width", "Height", "PixelFormat", "AcquisitionMode",
+                "AcquisitionLineRateEnable", "AcquisitionLineRate", "ExposureTime", "Gain",
+                "TriggerSelector", "TriggerSource", "TriggerActivation", "TriggerMode",
+                "LineStatus", "GevSCPSPacketSize", "GevSCPD",
+            ]:
+                log(f"  {node_name}: {self._get_node_value(node_name, '-')}")
+        else:
+            role_txt = ",".join(
+                f"{r.get('name')}:{r.get('group')}" for r in self.roles
+            )
+            log(
+                f"[CONFIG] OK serial={self.serial_number} roles={role_txt} "
+                f"size={self.width}x{self.camera_height} final={self.final_height} "
+                f"pixel={self.pixel_format} rate={self._get_node_value('AcquisitionLineRate', '-')} "
+                f"trigger={self._get_node_value('TriggerSelector', '-')}/"
+                f"{self._get_node_value('TriggerSource', '-')}/"
+                f"{self._get_node_value('TriggerMode', '-')}"
+            )
 
     # -----------------------------------------------------
     # STREAM CONTROL
@@ -1147,70 +1636,163 @@ class LineScanCamera:
             finally:
                 self.is_streaming = False
 
-    def reset_acquisition_for_next_cycle(self, role_name: str) -> None:
-        if TRIGGER_MODE not in ("software", "plc_software"):
-            return
+    def drain_idle_continuous_buffer(self) -> int:
+        """Drain at most one completed idle buffer from the shared camera."""
+        if not self.continuous_stream or not self.is_streaming or self.device is None:
+            return 0
+        try:
+            buf = self.device.get_buffer(timeout=CONTINUOUS_IDLE_DRAIN_TIMEOUT_MS)
+            self.device.requeue_buffer(buf)
+            return 1
+        except Exception:
+            return 0
+
+    def rearm_trigger_for_next_cycle(self, role_name: str) -> bool:
+        """
+        Re-arm this AcquisitionStart/software-triggered camera.
+
+        Shared 4K serial 254901431 uses a complete Arena stream stop/start reset
+        between BEAD and INNERWALL. Other cameras retain the faster
+        AcquisitionStop-only re-arm used for repeated main cycles.
+        """
+        if (
+            self.continuous_stream
+            or self.frame_trigger_stream
+            or TRIGGER_MODE not in ("software", "plc_software")
+        ):
+            return True
 
         role_tag = role_name.upper()
-        reset_start = time.perf_counter()
+        started = time.perf_counter()
+        is_shared = str(self.serial_number) == str(SHARED_INNER_BEAD_SERIAL)
 
-        self._execute_node("AcquisitionStop")
-
-        # Optional fast reset only for shared inner/bead camera.
-        if FAST_RESET_SHARED_CAMERA and self.serial_number == SHARED_INNER_BEAD_SERIAL:
-            time.sleep(FAST_RESET_SLEEP_SEC)
-
-            flushed = 0
-            empty_hits = 0
-            max_reset_ms = 1200.0
-
-            while True:
-                elapsed_ms = (time.perf_counter() - reset_start) * 1000.0
-                if elapsed_ms > max_reset_ms:
+        with CAMERA_CONTROL_LOCK:
+            stopped = False
+            for attempt in range(1, ACQUISITION_STOP_RETRIES + 1):
+                stop_ok, stop_error = self._execute_node_quiet("AcquisitionStop")
+                if stop_ok:
+                    stopped = True
                     break
+                log(
+                    f"[{role_tag}] REARM_RETRY serial={self.serial_number} "
+                    f"attempt={attempt}/{ACQUISITION_STOP_RETRIES} "
+                    f"reason={stop_error}"
+                )
+                time.sleep(ACQUISITION_STOP_RETRY_DELAY_SEC)
+
+            if not stopped:
+                log(
+                    f"[{role_tag}] REARM_ERROR serial={self.serial_number} "
+                    "AcquisitionStop not acknowledged"
+                )
+                return False
+
+            time.sleep(AFTER_ACQ_STOP_DELAY_SEC)
+
+            if is_shared:
+                log(
+                    f"[{role_tag}] FULL_STREAM_REARM_START "
+                    f"serial={self.serial_number} reason=shared_bead_to_innerwall"
+                )
 
                 try:
-                    buf = self.device.get_buffer(timeout=FAST_FLUSH_TIMEOUT_MS)
-                    self.device.requeue_buffer(buf)
-                    flushed += 1
-                    empty_hits = 0
-                except Exception:
-                    empty_hits += 1
-                    if empty_hits >= 3:
+                    self.stop_stream()
+                except Exception as error:
+                    log(
+                        f"[{role_tag}] FULL_STREAM_REARM_ERROR "
+                        f"serial={self.serial_number} stage=stop_stream "
+                        f"error={error}"
+                    )
+                    return False
+
+                time.sleep(SHARED_FULL_REARM_STOP_DELAY_SEC)
+
+                self._set_node("TriggerMode", "Off")
+                selector_ok = self._set_node(
+                    "TriggerSelector", TRIGGER_SELECTOR or "AcquisitionStart"
+                )
+                source_ok = self._set_node(
+                    "TriggerSource", TRIGGER_SOURCE or "Software"
+                )
+                activation_ok = self._set_node(
+                    "TriggerActivation", TRIGGER_ACTIVATION
+                )
+                mode_ok = self._set_node("TriggerMode", "On")
+
+                if not (selector_ok and source_ok and activation_ok and mode_ok):
+                    log(
+                        f"[{role_tag}] FULL_STREAM_REARM_ERROR "
+                        f"serial={self.serial_number} stage=trigger_configuration"
+                    )
+                    return False
+
+                try:
+                    self.start_stream()
+                except Exception as error:
+                    log(
+                        f"[{role_tag}] FULL_STREAM_REARM_ERROR "
+                        f"serial={self.serial_number} stage=start_stream "
+                        f"error={error}"
+                    )
+                    return False
+
+                time.sleep(SHARED_FULL_REARM_START_DELAY_SEC)
+
+                flushed = self.flush_buffers(
+                    max_count=FLUSH_COUNT,
+                    timeout_ms=SHARED_FULL_REARM_FLUSH_TIMEOUT_MS,
+                    log_it=False,
+                )
+
+                verified = False
+                actual_selector = "-"
+                actual_source = "-"
+                actual_mode = "-"
+                for _ in range(SHARED_FULL_REARM_VERIFY_RETRIES):
+                    actual_selector = self._get_node_value("TriggerSelector", "-")
+                    actual_source = self._get_node_value("TriggerSource", "-")
+                    actual_mode = self._get_node_value("TriggerMode", "-")
+                    if (
+                        str(actual_selector) == "AcquisitionStart"
+                        and str(actual_source) == "Software"
+                        and str(actual_mode) == "On"
+                        and self.is_streaming
+                    ):
+                        verified = True
                         break
+                    time.sleep(SHARED_FULL_REARM_VERIFY_DELAY_SEC)
 
-                if flushed >= FAST_FLUSH_COUNT:
-                    break
+                if not verified:
+                    log(
+                        f"[{role_tag}] FULL_STREAM_REARM_ERROR "
+                        f"serial={self.serial_number} stage=verify "
+                        f"streaming={self.is_streaming} "
+                        f"selector={actual_selector} source={actual_source} "
+                        f"mode={actual_mode}"
+                    )
+                    return False
 
-            reset_ms = (time.perf_counter() - reset_start) * 1000.0
-            log(
-                f"[{role_tag}] CAMERA_READY serial={self.serial_number} "
-                f"fast_reset_ms={reset_ms:.1f} flushed={flushed}"
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                log(
+                    f"[{role_tag}] FULL_STREAM_REARM_OK "
+                    f"serial={self.serial_number} stream_restarted=True "
+                    f"time_ms={elapsed_ms:.1f} flushed={flushed} "
+                    f"trigger={actual_selector}/{actual_source}/{actual_mode}"
+                )
+                return True
+
+            flushed = self.flush_buffers(
+                max_count=FLUSH_COUNT,
+                timeout_ms=2,
+                log_it=False,
             )
-            return
 
-        time.sleep(AFTER_ACQ_STOP_DELAY_SEC)
-
-        try:
-            self.stop_stream()
-        except Exception as e:
-            log(f"[{role_tag}] stop_stream warning: {e}")
-
-        time.sleep(AFTER_STOP_STREAM_DELAY_SEC)
-
-        try:
-            self.start_stream()
-        except Exception as e:
-            log(f"[{role_tag}] start_stream warning: {e}")
-
-        time.sleep(AFTER_START_STREAM_DELAY_SEC)
-
-        flushed = self.flush_buffers(log_it=False)
-        reset_ms = (time.perf_counter() - reset_start) * 1000.0
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         log(
-            f"[{role_tag}] CAMERA_READY serial={self.serial_number} "
-            f"normal_reset_ms={reset_ms:.1f} flushed={flushed}"
+            f"[{role_tag}] REARM_OK serial={self.serial_number} "
+            f"stream_kept_open=True time_ms={elapsed_ms:.1f} flushed={flushed}"
         )
+        return True
 
     # -----------------------------------------------------
     # CAPTURE
@@ -1224,12 +1806,23 @@ class LineScanCamera:
             role_tag = role_name.upper()
             image_index = task.image_index
 
-            if TRIGGER_MODE in ("software", "plc_software"):
-                if role_name == "bead":
-                    pre_flushed = self.flush_buffers(max_count=8, timeout_ms=2, log_it=False)
-                    if pre_flushed > 0:
-                        log(f"[BEAD] PRE_TRIGGER_FLUSH serial={self.serial_number} flushed={pre_flushed}")
+            if self.frame_trigger_stream:
+                delay_ms = (time.perf_counter() - task.plc_edge_ts) * 1000.0
+                log(
+                    f"[{role_tag}] FRAMESTART_CAPTURE_BEGIN serial={self.serial_number} "
+                    f"img={image_index} plc_to_capture_ms={delay_ms:.1f} "
+                    f"chunk_height={self.camera_height} final_height={self.final_height}"
+                )
 
+            elif self.continuous_stream:
+                delay_ms = (time.perf_counter() - task.plc_edge_ts) * 1000.0
+                log(
+                    f"[{role_tag}] CONTINUOUS_WINDOW_START serial={self.serial_number} "
+                    f"img={image_index} plc_to_capture_ms={delay_ms:.1f} "
+                    "idle_buffer_drain_active=True"
+                )
+
+            elif TRIGGER_MODE in ("software", "plc_software"):
                 trigger_before = time.perf_counter()
                 delay_from_plc_ms = (trigger_before - task.plc_edge_ts) * 1000.0
 
@@ -1242,8 +1835,13 @@ class LineScanCamera:
                     f"img={image_index} plc_to_trigger_ms={delay_from_plc_ms:.1f}{late_msg}"
                 )
 
-                self._execute_node("TriggerSoftware")
-                time.sleep(AFTER_TRIGGER_DELAY_SEC)
+                if not self._execute_node("TriggerSoftware"):
+                    raise RuntimeError(
+                        f"[{role_tag}] TriggerSoftware execution failed "
+                        f"for serial={self.serial_number}"
+                    )
+                if AFTER_TRIGGER_DELAY_SEC > 0:
+                    time.sleep(AFTER_TRIGGER_DELAY_SEC)
 
             elif TRIGGER_MODE == "free":
                 log(f"[{role_tag}] FREE_CAPTURE serial={self.serial_number} img={image_index}")
@@ -1251,49 +1849,120 @@ class LineScanCamera:
             else:
                 raise RuntimeError(f"Unsupported CAM_TRIGGER_MODE for this file: {TRIGGER_MODE}")
 
-            full_img = np.zeros((self.final_height, self.width), dtype=np.uint16)
+            capture_dtype = (
+                np.uint8
+                if str(self.pixel_format).strip().lower() == "mono8"
+                else np.uint16
+            )
+
+            # Shared bead/inner camera: one FrameStart trigger returns the
+            # complete full-height image directly. No chunk stitching.
+            if self.frame_trigger_stream and SHARED_SINGLE_FRAME_MODE:
+                if self.final_height != self.camera_height:
+                    raise RuntimeError(
+                        f"[{role_tag}] Shared direct-full-frame mode requires "
+                        f"final_height == camera_height, got "
+                        f"{self.final_height} != {self.camera_height}"
+                    )
+
+                start_time = time.perf_counter()
+                trigger_delay_ms = (start_time - task.plc_edge_ts) * 1000.0
+                log(
+                    f"[{role_tag}] FULL_FRAME_TRIGGER serial={self.serial_number} "
+                    f"img={image_index} plc_to_trigger_ms={trigger_delay_ms:.1f} "
+                    f"expected={self.width}x{self.final_height}"
+                )
+                if not self._execute_node("TriggerSoftware"):
+                    raise RuntimeError(
+                        f"[{role_tag}] FrameStart TriggerSoftware failed "
+                        f"serial={self.serial_number}"
+                    )
+
+                buffer = self._get_buffer_interruptible(role_tag, timeout_ms=500)
+                try:
+                    frame = self._convert_buffer(buffer)
+                finally:
+                    self.device.requeue_buffer(buffer)
+
+                if frame.ndim != 2:
+                    raise RuntimeError(
+                        f"[{role_tag}] Expected 2D full frame, got {frame.shape}"
+                    )
+                expected_shape = (self.final_height, self.width)
+                if frame.shape != expected_shape:
+                    raise RuntimeError(
+                        f"[{role_tag}] Full frame size mismatch: got={frame.shape}, "
+                        f"expected={expected_shape}"
+                    )
+
+                full_img = frame.astype(capture_dtype, copy=False)
+                elapsed = time.perf_counter() - start_time
+                log(
+                    f"[{role_tag}] FULL_FRAME_DONE serial={self.serial_number} "
+                    f"img={image_index} shape={full_img.shape} "
+                    f"dtype={full_img.dtype} time={elapsed:.2f}s"
+                )
+                return full_img
+
+            full_img = np.zeros(
+                (self.final_height, self.width),
+                dtype=capture_dtype,
+            )
             current_row = 0
             chunk_id = 0
             expected_chunks = int(np.ceil(self.final_height / max(self.camera_height, 1)))
             start_time = time.perf_counter()
 
-            try:
-                while current_row < self.final_height:
-                    if self._stop_event.is_set():
-                        raise RuntimeError(f"[{role_tag}] stop requested during capture")
+            while current_row < self.final_height:
+                if self._stop_event.is_set():
+                    raise RuntimeError(f"[{role_tag}] stop requested during capture")
 
-                    buffer = self._get_buffer_interruptible(role_tag, timeout_ms=500)
-                    try:
-                        frame = self._convert_buffer(buffer)
-                    finally:
-                        self.device.requeue_buffer(buffer)
-
-                    if frame.ndim != 2:
-                        raise RuntimeError(f"Unexpected frame shape: {frame.shape}")
-
-                    h, w = frame.shape
-                    if w != self.width:
-                        log(f"[{role_tag}] WIDTH_WARNING got={w} expected={self.width}")
-
-                    copy_h = min(h, self.final_height - current_row)
-                    full_img[current_row:current_row + copy_h, :] = frame[:copy_h, :]
-                    current_row += copy_h
-                    chunk_id += 1
-
+                if self.frame_trigger_stream:
+                    next_chunk = chunk_id + 1
+                    trigger_delay_ms = (time.perf_counter() - task.plc_edge_ts) * 1000.0
                     log(
-                        f"[{role_tag}] CHUNK {chunk_id}/{expected_chunks} "
-                        f"rows={current_row}/{self.final_height}"
+                        f"[{role_tag}] FRAME_TRIGGER chunk={next_chunk}/{expected_chunks} "
+                        f"serial={self.serial_number} plc_to_trigger_ms={trigger_delay_ms:.1f}"
                     )
+                    if not self._execute_node("TriggerSoftware"):
+                        raise RuntimeError(
+                            f"[{role_tag}] FrameStart TriggerSoftware failed "
+                            f"serial={self.serial_number} chunk={next_chunk}"
+                        )
 
-                elapsed = time.perf_counter() - start_time
+                buffer = self._get_buffer_interruptible(role_tag, timeout_ms=500)
+                try:
+                    frame = self._convert_buffer(buffer)
+                finally:
+                    self.device.requeue_buffer(buffer)
+
+                if frame.ndim != 2:
+                    raise RuntimeError(f"Unexpected frame shape: {frame.shape}")
+
+                h, w = frame.shape
+                if w != self.width:
+                    log(f"[{role_tag}] WIDTH_WARNING got={w} expected={self.width}")
+
+                copy_h = min(h, self.final_height - current_row)
+                copy_w = min(w, self.width)
+                full_img[
+                    current_row:current_row + copy_h,
+                    0:copy_w,
+                ] = frame[:copy_h, :copy_w].astype(capture_dtype, copy=False)
+                current_row += copy_h
+                chunk_id += 1
+
                 log(
-                    f"[{role_tag}] STITCH_DONE serial={self.serial_number} "
-                    f"img={image_index} rows={current_row}/{self.final_height} time={elapsed:.2f}s"
+                    f"[{role_tag}] CHUNK {chunk_id}/{expected_chunks} "
+                    f"rows={current_row}/{self.final_height}"
                 )
-                return full_img
 
-            finally:
-                self.reset_acquisition_for_next_cycle(role_name)
+            elapsed = time.perf_counter() - start_time
+            log(
+                f"[{role_tag}] STITCH_DONE serial={self.serial_number} "
+                f"img={image_index} rows={current_row}/{self.final_height} time={elapsed:.2f}s"
+            )
+            return full_img
 
     # -----------------------------------------------------
     # CLOSE
@@ -1350,10 +2019,22 @@ class CameraActor:
             return
 
         self.ready_event.clear()
-        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"camera-actor-{self.serial}",
+            daemon=True,
+        )
         self.thread.start()
 
-        self.ready_event.wait()
+        if not self.ready_event.wait(timeout=CAMERA_ACTOR_START_TIMEOUT_SEC):
+            try:
+                self.camera.stop_stream()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"[{self.serial}] camera actor startup timed out after "
+                f"{CAMERA_ACTOR_START_TIMEOUT_SEC:.1f}s"
+            )
 
         if self.error is not None:
             raise RuntimeError(f"[{self.serial}] camera actor failed: {self.error}")
@@ -1380,16 +2061,26 @@ class CameraActor:
         return task
 
     def stop(self) -> None:
+        # Stop the Arena stream before joining. This interrupts an actor blocked
+        # in get_buffer after a camera/network disconnection.
+        try:
+            self.camera._stop_event.set()
+        except Exception:
+            pass
+        try:
+            self.camera.stop_stream()
+        except Exception as error:
+            log(f"[STOP_WARNING] stream stop serial={self.serial}: {error}")
         try:
             self.q.put_nowait(None)
         except Exception:
             pass
 
         if self.thread is not None:
-            self.thread.join(timeout=2.0)
+            self.thread.join(timeout=CAMERA_ACTOR_STOP_TIMEOUT_SEC)
 
         if self.thread is not None and self.thread.is_alive():
-            log(f"[STOP] camera actor still alive serial={self.serial}")
+            log(f"[STOP_WARNING] camera actor still alive serial={self.serial}")
 
     def _run(self) -> None:
         try:
@@ -1405,6 +2096,7 @@ class CameraActor:
                 try:
                     task = self.q.get(timeout=0.1)
                 except queue.Empty:
+                    self.camera.drain_idle_continuous_buffer()
                     continue
 
                 if task is None:
@@ -1486,6 +2178,7 @@ class MultiCameraManager:
         self._streams_started = False
         self._stop_event = threading.Event()
         self._capture_index = 0
+        self._last_bead_rearm_ok = True
 
         self.role_config = get_camera_role_config()
         self.physical_config = get_physical_camera_config()
@@ -1531,6 +2224,11 @@ class MultiCameraManager:
                 acquisition_line_rate_enable=item["acquisition_line_rate_enable"],
                 acquisition_line_rate=item["acquisition_line_rate"],
                 acquisition_mode=item["acquisition_mode"],
+                continuous_stream=False,
+                frame_trigger_stream=(
+                    SHARED_FRAME_START_MODE
+                    and str(item["serial"]) == str(SHARED_INNER_BEAD_SERIAL)
+                ),
             )
             self.cameras.append(cam)
 
@@ -1552,10 +2250,35 @@ class MultiCameraManager:
 
         sku_name = profile.get("sku_name", profile.get("sku", "-"))
         cameras_cfg_raw = profile.get("cameras", {}) or {}
-        cameras_cfg = {
-            _normalise_side_name(side_name): cfg
-            for side_name, cfg in cameras_cfg_raw.items()
-        }
+        cameras_cfg: Dict[str, Dict[str, Any]] = {}
+        for raw_side_name, raw_cfg in cameras_cfg_raw.items():
+            side_name = _normalise_side_name(raw_side_name)
+            if not isinstance(raw_cfg, dict):
+                continue
+            cfg = dict(raw_cfg)
+
+            # Migrate saved SKU profiles that still point to the removed 2K
+            # camera. New profiles using serial 254901431 keep all user values.
+            if side_name in ("innerwall", "bead") and SHARED_INNER_BEAD:
+                old_serial = str(cfg.get("serial", "")).strip()
+                cfg["serial"] = str(SHARED_INNER_BEAD_SERIAL)
+                if old_serial == "250500042":
+                    cfg.update({
+                        "width": 4096,
+                        "camera_height": 15000,
+                        "height": 15000,
+                        "final_height": 60000,
+                        "pixel_format": "Mono8",
+                        "acquisition_line_rate_enable": True,
+                        "acquisition_line_rate": 11575.0,
+                        "exposure_time": 61.0,
+                        "gain": 24.0,
+                    })
+                    log(
+                        f"[CAMERA PROFILE] Migrated legacy shared 2K profile "
+                        f"for side={side_name} to 4K serial={SHARED_INNER_BEAD_SERIAL}"
+                    )
+            cameras_cfg[side_name] = cfg
 
         if not cameras_cfg:
             raise ValueError(f"No cameras found in camera profile for SKU={sku_name}")
@@ -1616,7 +2339,10 @@ class MultiCameraManager:
                     )
 
                 role["enabled"] = _profile_bool(cfg.get("enabled", True), True)
-                role["group"] = str(cfg.get("group", role.get("group", "main"))).strip().lower()
+                role["group"] = CAPTURE_GROUP_BY_SIDE.get(
+                    role_name,
+                    str(cfg.get("group", role.get("group", "main"))).strip().lower(),
+                )
 
                 if selected_cfg is None and role["enabled"]:
                     selected_cfg = cfg
@@ -1673,7 +2399,8 @@ class MultiCameraManager:
                 f"width={cam.width} | height={cam.camera_height} | final_height={cam.final_height} | "
                 f"pixel={cam.pixel_format} | exposure={cam.exposure_time} | gain={cam.gain} | "
                 f"line_rate_enable={cam.acquisition_line_rate_enable} | "
-                f"line_rate={cam.acquisition_line_rate} | packet={cam.packet_size}/{cam.packet_delay}"
+                f"line_rate={cam.acquisition_line_rate} | packet={cam.packet_size}/{cam.packet_delay} | "
+                f"continuous_stream={cam.continuous_stream}"
             )
 
         log("[CAMERA PROFILE] Apply completed")
@@ -1681,7 +2408,10 @@ class MultiCameraManager:
         log("=" * 60)
         log(f"Connecting {len(self.cameras)} unique Lucid camera(s)")
         log(f"Trigger Mode: {TRIGGER_MODE.upper()}")
-        log(f"Shared inner/bead: {SHARED_INNER_BEAD} | serial={SHARED_INNER_BEAD_SERIAL}")
+        log(
+            f"Shared inner/bead: {SHARED_INNER_BEAD} | serial={SHARED_INNER_BEAD_SERIAL} "
+            f"| shared_4k_frame_start={SHARED_FRAME_START_MODE} | direct_full_frame={SHARED_SINGLE_FRAME_MODE} | height={SHARED_CAMERA_HEIGHT}"
+        )
         log("Camera Role Mapping:")
         for serial, roles in self.camera_roles_by_serial.items():
             role_txt = ", ".join([f"{r['side']}:{r['group']}" for r in roles])
@@ -1714,6 +2444,7 @@ class MultiCameraManager:
         log("=" * 60)
         log("Configuring and starting all camera streams for LIVE")
         log(f"Trigger Mode: {TRIGGER_MODE.upper()}")
+        log(f"PLC sequence: {PLC_TRIGGER_SEQUENCE}")
         log(f"Main PLC tag: DB{MAIN_TRIGGER_DB}.DBX{MAIN_TRIGGER_BYTE}.{MAIN_TRIGGER_BIT}")
         log(f"Bead PLC tag: DB{BEAD_TRIGGER_DB}.DBX{BEAD_TRIGGER_BYTE}.{BEAD_TRIGGER_BIT}")
         log(f"PLC poll delay: {PLC_POLL_DELAY_SEC}s")
@@ -1742,9 +2473,18 @@ class MultiCameraManager:
         log(f"[CAMERA] Streams failed : {failed}")
 
         if not started:
+            self.stop_all_streams()
             raise RuntimeError("No camera streams started")
 
-        return len(failed) == 0
+        if failed:
+            log(
+                "[CAMERA][ERROR] Not all configured streams started; "
+                "releasing partial camera resources so Start can be retried"
+            )
+            self.stop_all_streams()
+            return False
+
+        return True
 
     def stop_all_streams(self) -> None:
         log("=" * 60)
@@ -1752,19 +2492,24 @@ class MultiCameraManager:
         log("=" * 60)
         self._stop_event.set()
 
-        for actor in self.actors:
+        for actor in list(self.actors):
             try:
                 actor.stop()
-            except Exception:
-                pass
+            except Exception as error:
+                log(f"[STOP_WARNING] actor serial={actor.serial}: {error}")
 
         self.actors = []
 
         for cam in self.cameras:
-            cam.stop_stream()
+            try:
+                cam.stop_stream()
+            except Exception as error:
+                log(
+                    f"[STOP_WARNING] camera stream serial={cam.serial_number}: {error}"
+                )
 
         self._streams_started = False
-        log("All camera streams stopped")
+        log("All camera streams stopped and capture waits released")
 
     def _apply_ffc_one(
         self,
@@ -1940,12 +2685,32 @@ class MultiCameraManager:
 
         return results
 
+    def _rearm_triggered_targets(
+        self,
+        targets: List[Tuple[CameraActor, str]],
+        label: str,
+    ) -> bool:
+        """Re-arm each dedicated physical camera once, serially."""
+        ok = True
+        seen = set()
+        for actor, role_name in targets:
+            if actor.serial in seen:
+                continue
+            seen.add(actor.serial)
+            if actor.camera.continuous_stream or actor.camera.frame_trigger_stream:
+                continue
+            if not actor.camera.rearm_trigger_for_next_cycle(role_name):
+                ok = False
+        log(f"[{label}] REARM_GROUP_DONE status={'OK' if ok else 'ERROR'}")
+        return ok
+
     def _capture_group_after_edge(
         self,
         group_name: str,
         targets: List[Tuple[CameraActor, str]],
         plc_edge_ts: float,
         cycle: int,
+        rearm_main_after: bool = True,
     ) -> Dict[str, Optional[np.ndarray]]:
         if not targets:
             return {}
@@ -1953,6 +2718,7 @@ class MultiCameraManager:
         log(f"[{group_name.upper()}] RELEASE cycle={cycle}")
 
         tasks: List[CaptureTask] = []
+        paired: List[Tuple[Tuple[CameraActor, str], CaptureTask]] = []
 
         for actor, role_name in targets:
             if group_name == "bead":
@@ -1969,8 +2735,106 @@ class MultiCameraManager:
                 plc_edge_ts=plc_edge_ts,
             )
             tasks.append(task)
+            paired.append(((actor, role_name), task))
 
-        return self._wait_all_tasks(tasks, group_name.upper(), cycle)
+        rearm_thread = None
+        rearm_state = {"ok": True}
+
+        if group_name == "bead":
+            self._last_bead_rearm_ok = True
+            shared_pair = next(
+                (
+                    (target, task)
+                    for target, task in paired
+                    if str(target[0].serial) == str(SHARED_INNER_BEAD_SERIAL)
+                    and str(target[1]).strip().lower() == "bead"
+                ),
+                None,
+            )
+
+            if shared_pair is None:
+                self._last_bead_rearm_ok = False
+                log(
+                    f"[BEAD_TO_MAIN] shared bead task not found for "
+                    f"serial={SHARED_INNER_BEAD_SERIAL}"
+                )
+            else:
+                (shared_target, shared_task) = shared_pair
+                while not shared_task.done_event.wait(timeout=0.05):
+                    if self._stop_event.is_set():
+                        break
+
+                if shared_task.error or self._stop_event.is_set():
+                    self._last_bead_rearm_ok = False
+                elif shared_target[0].camera.frame_trigger_stream:
+                    self._last_bead_rearm_ok = True
+                    rearm_state["ok"] = True
+                    log(
+                        "[BEAD_TO_MAIN] shared FrameStart stream kept open; "
+                        "reset skipped and innerwall camera is ready"
+                    )
+                else:
+                    shared_targets = [shared_target]
+
+                    def rearm_worker() -> None:
+                        rearm_state["ok"] = self._rearm_triggered_targets(
+                            shared_targets,
+                            "BEAD_TO_MAIN",
+                        )
+
+                    if OVERLAP_SHARED_REARM:
+                        log(
+                            "[BEAD_TO_MAIN] shared re-arm started while remaining "
+                            "BEAD-group cameras finish"
+                        )
+                        rearm_thread = threading.Thread(
+                            target=rearm_worker,
+                            name="live-shared-bead-to-main-rearm",
+                            daemon=True,
+                        )
+                        rearm_thread.start()
+                    else:
+                        rearm_worker()
+
+        results = self._wait_all_tasks(tasks, group_name.upper(), cycle)
+
+        if group_name == "bead":
+            if rearm_thread is not None:
+                while rearm_thread.is_alive():
+                    if self._stop_event.is_set():
+                        break
+                    rearm_thread.join(timeout=0.05)
+            self._last_bead_rearm_ok = bool(
+                self._last_bead_rearm_ok and rearm_state["ok"]
+            )
+
+            # Sidewall1, sidewall2 and tread also use AcquisitionStart. Stop
+            # their completed acquisition now so the next capture cycle starts
+            # from a fresh PLC/software trigger instead of consuming continuing
+            # frames from the previous cycle. The shared camera is excluded here
+            # because it was already re-armed specifically for INNERWALL.
+            dedicated_bead_targets = [
+                (actor, role_name)
+                for actor, role_name in targets
+                if str(actor.serial) != str(SHARED_INNER_BEAD_SERIAL)
+            ]
+            if dedicated_bead_targets and not self._stop_event.is_set():
+                dedicated_ok = self._rearm_triggered_targets(
+                    dedicated_bead_targets,
+                    "BEAD_NEXT_CYCLE",
+                )
+                self._last_bead_rearm_ok = bool(
+                    self._last_bead_rearm_ok and dedicated_ok
+                )
+
+            log(
+                f"[BEAD_TO_MAIN] READY status="
+                f"{'OK' if self._last_bead_rearm_ok else 'ERROR'}"
+            )
+        elif rearm_main_after:
+            self._rearm_triggered_targets(targets, group_name.upper())
+
+        return results
 
     def _wait_then_capture_group(
         self,
@@ -2040,12 +2904,7 @@ class MultiCameraManager:
         self,
         sides_to_capture: Optional[List[str]] = None,
     ) -> Dict[str, Optional[np.ndarray]]:
-        """
-        Returns side/role keyed images.
-
-        sides_to_capture controls camera capture only.
-        AI sides are controlled separately by cycle_engine.py.
-        """
+        """Capture one production cycle and return side/role keyed images."""
         if not self._streams_started:
             raise RuntimeError("Camera streams are not started. Call start_all_streams() first")
 
@@ -2059,12 +2918,10 @@ class MultiCameraManager:
             ]
 
         active_capture_sides = set(sides_to_capture)
-
         log(f"[CAPTURE] active capture sides: {sorted(active_capture_sides)}")
 
         self._capture_index += 1
         cycle = self._capture_index
-
         results: Dict[str, Optional[np.ndarray]] = {}
 
         if TRIGGER_MODE == "plc_software":
@@ -2072,97 +2929,225 @@ class MultiCameraManager:
                 "main",
                 sides_to_capture=sides_to_capture,
             )
-
             bead_targets = self._build_role_targets(
                 "bead",
                 sides_to_capture=sides_to_capture,
             )
 
             log(
-                f"[CAPTURE] PLC_SOFTWARE cycle={cycle} started | "
-                f"main_targets={[name for _, name in main_targets]} | "
-                f"bead_targets={[name for _, name in bead_targets]}"
+                f"[CAPTURE] PLC_SOFTWARE cycle={cycle} sequence={PLC_TRIGGER_SEQUENCE} "
+                f"bead_targets={[name for _, name in bead_targets]} "
+                f"main_targets={[name for _, name in main_targets]}"
             )
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                futures = []
+            main_latch: Optional[PLCTriggerLatch] = None
+            end_rearm_thread = None
+            end_rearm_state = {"ok": True}
 
-                if main_targets:
-                    futures.append(
-                        pool.submit(
-                            self._wait_then_capture_group,
-                            "main",
-                            main_targets,
-                            MAIN_TRIGGER_DB,
-                            MAIN_TRIGGER_BYTE,
-                            MAIN_TRIGGER_BIT,
-                            cycle,
-                        )
+            try:
+                if main_targets and MAIN_TRIGGER_LATCH_ENABLED:
+                    main_latch = start_plc_trigger_latch(
+                        label="MAIN",
+                        db=MAIN_TRIGGER_DB,
+                        byte=MAIN_TRIGGER_BYTE,
+                        bit=MAIN_TRIGGER_BIT,
+                        stop_event=self._stop_event,
                     )
-                else:
-                    log("[MAIN] skipped because no main-side capture requested")
+                    if not wait_plc_trigger_latch_armed(
+                        main_latch,
+                        self._stop_event,
+                    ):
+                        raise RuntimeError(
+                            f"MAIN latch could not arm on "
+                            f"DB{MAIN_TRIGGER_DB}.DBX{MAIN_TRIGGER_BYTE}.{MAIN_TRIGGER_BIT}"
+                        )
+                    log(
+                        f"[MAIN_LATCH] ARMED cycle={cycle}; gate opens after BEAD edge"
+                    )
 
                 if bead_targets:
-                    futures.append(
-                        pool.submit(
-                            self._wait_then_capture_group,
-                            "bead",
-                            bead_targets,
-                            BEAD_TRIGGER_DB,
-                            BEAD_TRIGGER_BYTE,
-                            BEAD_TRIGGER_BIT,
-                            cycle,
+                    log(f"[BEAD] WAIT_TRIGGER cycle={cycle}")
+                    bead_edge_ts = wait_plc_fresh_rising_edge(
+                        plc_interface=self.plc_interface,
+                        db=BEAD_TRIGGER_DB,
+                        byte=BEAD_TRIGGER_BYTE,
+                        bit=BEAD_TRIGGER_BIT,
+                        label="BEAD",
+                        stop_event=self._stop_event,
+                    )
+
+                    if bead_edge_ts is None:
+                        results.update({
+                            role_name: None
+                            for _, role_name in bead_targets + main_targets
+                        })
+                        return self._apply_ffc_to_results(results, cycle)
+
+                    if main_latch is not None:
+                        main_latch.gate_event.set()
+                        log(
+                            f"[MAIN_LATCH] GATE_OPEN cycle={cycle}; "
+                            "MAIN edge may now be stored"
                         )
+
+                    bead_results = self._capture_group_after_edge(
+                        "bead",
+                        bead_targets,
+                        bead_edge_ts,
+                        cycle,
+                    )
+                    results.update(bead_results)
+
+                    bead_failed = (
+                        not self._last_bead_rearm_ok
+                        or any(
+                            bead_results.get(role_name) is None
+                            for _, role_name in bead_targets
+                        )
+                    )
+                    if bead_failed:
+                        log(
+                            f"[CAPTURE] cycle={cycle} BEAD group/re-arm failed; "
+                            "MAIN skipped"
+                        )
+                        results.update({
+                            role_name: None
+                            for _, role_name in main_targets
+                        })
+                        return self._apply_ffc_to_results(results, cycle)
+
+                    log(
+                        f"[SEQUENCE] BEAD_GROUP_READY cycle={cycle}; "
+                        "shared camera ready for innerwall"
                     )
                 else:
                     log("[BEAD] skipped because bead capture is not requested")
+                    if main_latch is not None:
+                        main_latch.gate_event.set()
 
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        results.update(future.result())
-                    except Exception:
-                        traceback.print_exc()
+                if main_targets:
+                    if main_latch is not None:
+                        main_edge_ts = wait_plc_trigger_latch_result(
+                            main_latch,
+                            self._stop_event,
+                        )
+                    else:
+                        log(f"[MAIN] WAIT_TRIGGER cycle={cycle}")
+                        main_edge_ts = wait_plc_fresh_rising_edge(
+                            plc_interface=self.plc_interface,
+                            db=MAIN_TRIGGER_DB,
+                            byte=MAIN_TRIGGER_BYTE,
+                            bit=MAIN_TRIGGER_BIT,
+                            label="MAIN",
+                            stop_event=self._stop_event,
+                        )
 
-            results = self._apply_ffc_to_results(results, cycle)
+                    if main_edge_ts is None:
+                        results.update({
+                            role_name: None
+                            for _, role_name in main_targets
+                        })
+                    else:
+                        stored_ms = (time.perf_counter() - main_edge_ts) * 1000.0
+                        log(
+                            f"[MAIN] EDGE_READY cycle={cycle} "
+                            f"stored_for_ms={stored_ms:.1f}; releasing innerwall"
+                        )
+                        main_results = self._capture_group_after_edge(
+                            "main",
+                            main_targets,
+                            main_edge_ts,
+                            cycle,
+                            rearm_main_after=False,
+                        )
+                        results.update(main_results)
 
-            log(
-                f"[CAPTURE] PLC_SOFTWARE cycle={cycle} completed | "
-                f"keys={list(results.keys())}"
-            )
-            return results
+                        # Prepare the shared camera for the next production cycle
+                        # while CPU-side FFC runs on the completed images.
+                        def end_rearm_worker() -> None:
+                            end_rearm_state["ok"] = self._rearm_triggered_targets(
+                                main_targets,
+                                "MAIN_NEXT_CYCLE",
+                            )
+
+                        end_rearm_thread = threading.Thread(
+                            target=end_rearm_worker,
+                            name="main-next-cycle-rearm",
+                            daemon=True,
+                        )
+                        end_rearm_thread.start()
+                else:
+                    log("[MAIN] skipped because no main-side capture requested")
+
+                results = self._apply_ffc_to_results(results, cycle)
+
+                if end_rearm_thread is not None:
+                    while end_rearm_thread.is_alive():
+                        if self._stop_event.is_set():
+                            break
+                        end_rearm_thread.join(timeout=0.05)
+                    if not end_rearm_state["ok"]:
+                        raise RuntimeError(
+                            "Camera re-arm for the next production cycle failed"
+                        )
+
+                log(
+                    f"[CAPTURE] PLC_SOFTWARE cycle={cycle} completed | "
+                    f"keys={list(results.keys())}"
+                )
+                return results
+
+            finally:
+                cancel_plc_trigger_latch(main_latch)
 
         if TRIGGER_MODE in ("software", "free"):
             log(f"[CAPTURE] {TRIGGER_MODE.upper()} cycle={cycle} started")
-
             results.update(
                 self._software_capture_once(
                     cycle,
                     sides_to_capture=sides_to_capture,
                 )
             )
-
             results = self._apply_ffc_to_results(results, cycle)
-
             log(
                 f"[CAPTURE] {TRIGGER_MODE.upper()} cycle={cycle} completed | "
                 f"keys={list(results.keys())}"
             )
             return results
 
-        raise RuntimeError(f"Unsupported CAM_TRIGGER_MODE for this application file: {TRIGGER_MODE}")
+        raise RuntimeError(
+            f"Unsupported CAM_TRIGGER_MODE for this application file: {TRIGGER_MODE}"
+        )
 
     def close_all(self) -> None:
-        self.stop_all_streams()
+        """Idempotent full cleanup used on normal exit and every error path."""
+        self._stop_event.set()
+        try:
+            self.stop_all_streams()
+        except Exception as error:
+            log(f"[CLEANUP_WARNING] stop_all_streams: {error}")
+
         for cam in self.cameras:
-            cam.stop_and_close()
+            try:
+                cam.stop_and_close()
+            except Exception as error:
+                log(
+                    f"[CLEANUP_WARNING] close serial={cam.serial_number}: {error}"
+                )
+
         try:
             system.destroy_device()
-        except Exception as e:
-            log(f"[WARN] system.destroy_device: {e}")
+            log("[CLEANUP] Arena camera devices released")
+        except Exception as error:
+            log(f"[CLEANUP_WARNING] system.destroy_device: {error}")
+
+        self.actors = []
+        self._streams_started = False
 
 
 __all__ = [
     "TRIGGER_MODE",
+    "PLC_TRIGGER_SEQUENCE",
     "SoftwareFFCConfig",
     "build_software_ffc_config",
     "_normalise_side_name",
@@ -2177,4 +3162,7 @@ __all__ = [
     "LineScanCamera",
     "MultiCameraManager",
     "wait_plc_fresh_rising_edge",
+    "wait_plc_rising_edge_after_gate",
+    "PLCTriggerLatch",
+    "start_plc_trigger_latch",
 ]

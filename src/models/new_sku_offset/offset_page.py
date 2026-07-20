@@ -1146,7 +1146,9 @@ class OffsetCalculationPage(QWidget):
             f"{self.ROLE_INFO[role]} offset calibration saved.\n\n"
             f"Offset ratio: {float(result.get('offset_ratio', 0.0)):.8f}\n"
             f"JSON:\n{result.get('calibration_json_path', '')}\n\n"
-            f"Cropped images:\n{result.get('cropped_images_folder', '')}",
+            f"Cropped images:\n{result.get('cropped_images_folder', '')}\n\n"
+            f"Resized target images:\n{result.get('resized_target_folder', '')}\n\n"
+            f"SKU resize JSON:\n{result.get('sku_resize_configuration_path', '')}",
         )
 
     def _on_error(self, role: str, message: str) -> None:
@@ -1177,6 +1179,8 @@ class OffsetCalculationPage(QWidget):
         self.result_summary.setText(
             f"Calibration JSON: {result.get('calibration_json_path', '')}\n"
             f"Cropped images: {result.get('cropped_images_folder', '')}\n"
+            f"Resized target images: {result.get('resized_target_folder', '')}\n"
+            f"SKU resize JSON: {result.get('sku_resize_configuration_path', '')}\n"
             f"Saved crops: Sidewall={result.get('sidewall_cropped_image_count', 0)}   |   "
             f"Target={result.get('target_cropped_image_count', 0)}\n"
             f"Offset ratio: {float(result.get('offset_ratio', 0.0)):.8f}   |   "

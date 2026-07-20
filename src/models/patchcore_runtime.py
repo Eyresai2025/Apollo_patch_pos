@@ -44,6 +44,7 @@ import cv2
 import numpy as np
 
 from src.COMMON.config import get_config
+from src.COMMON.sku_resize_config import role_resize_values
 from src.COMMON.structured_logging import get_logger
 from src.models.feature_thresh.config import (
     IMAGE_BATCH_SIZE,
@@ -56,6 +57,8 @@ from src.models.feature_thresh.config import (
 )
 from src.models.feature_thresh.patchcore_scorer import PatchCoreScorer
 from src.models.five_side_patchcore import detect_and_crop_utils as dc
+from src.models.five_side_patchcore import detect_and_crop_fast as dcf
+from src.models.five_side_patchcore import r_locator_fast as rlf
 
 logger = get_logger(__name__, component="PATCHCORE")
 
@@ -113,6 +116,7 @@ class PatchCoreArtifactSet:
     threshold_path: Path
     model_path: Path
     template_path: Optional[Path]
+    r_recipe_path: Optional[Path]
     calibration_path: Optional[Path]
     threshold: float
     threshold_metadata: Mapping[str, Any]
@@ -123,6 +127,8 @@ class PatchCoreArtifactSet:
         paths = [self.threshold_path, self.model_path]
         if self.template_path is not None:
             paths.append(self.template_path)
+        if self.r_recipe_path is not None:
+            paths.append(self.r_recipe_path)
         if self.calibration_path is not None:
             paths.append(self.calibration_path)
         return tuple(
@@ -377,6 +383,86 @@ def _choose_template_path(
     raise FileNotFoundError(f"R template not found for {side_name}. Expected: {designated}")
 
 
+
+def _choose_r_recipe_path(
+    *,
+    media_root: Path,
+    sku_name: str,
+    side_name: str,
+    template_path: Optional[Path],
+) -> Optional[Path]:
+    """Resolve the AI-team fast R locator recipe for sidewall sides.
+
+    Expected default layout:
+        media/R_Recipe/<SKU>/<side>/<SKU>_<side>_fast_recipe.json
+
+    Older generic recipe names are still accepted for backward compatibility.
+
+    Side-specific and generic .env overrides are also supported:
+        PATCHCORE_SIDEWALL1_R_RECIPE=...
+        PATCHCORE_SIDEWALL2_R_RECIPE=...
+        PATCHCORE_R_RECIPE_PATH=...
+    """
+    if side_name not in SIDEWALL_SIDES:
+        return None
+
+    raw = _raw_config()
+    side_key = _safe_side_key(side_name)
+    recipe_root = str(raw.get("PATCHCORE_R_RECIPE_ROOT", "R_Recipe")).strip()
+    recipe_dir = media_root / recipe_root / sku_name
+
+    override = (
+        raw.get(f"PATCHCORE_{side_key}_R_RECIPE")
+        or raw.get(f"PATCHCORE_{side_key}_R_RECIPE_PATH")
+        or raw.get("PATCHCORE_R_RECIPE_PATH")
+    )
+    resolved_override = _resolve_candidate_path(
+        override,
+        media_root=media_root,
+        base_dir=recipe_dir,
+    )
+    if resolved_override is not None:
+        if not resolved_override.is_file():
+            raise FileNotFoundError(
+                f"Configured fast R recipe not found for {side_name}: {resolved_override}"
+            )
+        return resolved_override
+
+    candidates: list[Path] = []
+    role_recipe_dir = recipe_dir / side_name
+
+    # Current New-SKU naming convention.
+    candidates.append(
+        role_recipe_dir / f"{sku_name}_{side_name}_fast_recipe.json"
+    )
+
+    # Be tolerant of files created before the active SKU context was refreshed.
+    # Example: media/R_Recipe/SKU_007/sidewall1/SKU_001_sidewall1_fast_recipe.json
+    # When exactly one side-specific fast recipe exists in the selected SKU role
+    # folder, it is safe to use it for that role.
+    if role_recipe_dir.is_dir():
+        candidates.extend(
+            sorted(role_recipe_dir.glob(f"*_{side_name}_fast_recipe.json"))
+        )
+        candidates.extend(
+            sorted(role_recipe_dir.glob("*fast_recipe*.json"))
+        )
+
+    # Backward-compatible generic layouts.
+    candidates.append(recipe_dir / "SIDEWALL_TAUGHT_FROM_TILED_recipe.json")
+    candidates.append(recipe_dir / f"{sku_name}_{side_name}_recipe.json")
+    candidates.append(recipe_dir / f"{side_name}_recipe.json")
+
+    if recipe_dir.is_dir():
+        candidates.extend(sorted(recipe_dir.glob("*recipe*.json")))
+
+    chosen = _single_candidate(candidates, f"fast R recipe for {side_name}")
+    if chosen is not None:
+        return chosen
+
+    # No recipe is not an error unless PATCHCORE_R_DETECTION_METHOD=fast.
+    return None
+
 def _choose_calibration_path(
     *, media_root: Path, sku_name: str, side_name: str
 ) -> Optional[Path]:
@@ -452,6 +538,12 @@ def resolve_patchcore_artifacts(
         side_name=side_name,
         metadata=threshold_metadata,
     )
+    r_recipe_path = _choose_r_recipe_path(
+        media_root=media_path,
+        sku_name=sku_name,
+        side_name=side_name,
+        template_path=template_path,
+    )
     calibration_path = _choose_calibration_path(
         media_root=media_path,
         sku_name=sku_name,
@@ -462,6 +554,19 @@ def resolve_patchcore_artifacts(
         if calibration_path is not None
         else {}
     )
+
+    r_detection_method = str(raw.get("PATCHCORE_R_DETECTION_METHOD", "auto")).strip().lower()
+    if side_name in SIDEWALL_SIDES and r_detection_method == "fast" and r_recipe_path is None:
+        expected = (
+            media_path
+            / str(raw.get("PATCHCORE_R_RECIPE_ROOT", "R_Recipe")).strip()
+            / sku_name
+            / side_name
+            / f"{sku_name}_{side_name}_fast_recipe.json"
+        )
+        raise FileNotFoundError(
+            f"Fast R recipe not found for {side_name}. Expected: {expected}"
+        )
 
     if side_name in OFFSET_SIDES:
         for required in ("offset_ratio",):
@@ -485,6 +590,7 @@ def resolve_patchcore_artifacts(
         threshold_path=threshold_path.resolve(),
         model_path=model_path.resolve(),
         template_path=template_path.resolve() if template_path else None,
+        r_recipe_path=r_recipe_path.resolve() if r_recipe_path else None,
         calibration_path=calibration_path.resolve() if calibration_path else None,
         threshold=threshold,
         threshold_metadata=threshold_metadata,
@@ -525,7 +631,7 @@ def list_patchcore_skus(media_root: str | os.PathLike[str]) -> list[str]:
         media_path / str(raw.get("PATCHCORE_TRAINING_ROOT", "training")),
         media_path / str(raw.get("PATCHCORE_TEMPLATE_ROOT", "template_extractor")),
         media_path / str(raw.get("PATCHCORE_OFFSET_ROOT", "offset_calibration")),
-        media_path / "AI_Calibration_Files",
+        media_path / str(raw.get("PATCHCORE_R_RECIPE_ROOT", "R_Recipe")),
     ]
     names: set[str] = set()
     for root in roots:
@@ -608,9 +714,23 @@ def _to_preview_bgr(image: np.ndarray) -> np.ndarray:
     return image.copy()
 
 
-def _save_result_preview(path: Path, image: np.ndarray, jpeg_quality: int) -> None:
-    """Save the visual result exactly like AI-team scripts: min/max preview only at save time."""
-    preview = _to_uint8_preview(image)
+def _save_result_preview(
+    path: Path,
+    image: np.ndarray,
+    jpeg_quality: int,
+    preview_scale: float = 1.0,
+) -> None:
+    """Save visual result like AI-team scripts: optional preview scale + min/max conversion."""
+    preview = image
+    if float(preview_scale) != 1.0:
+        preview = cv2.resize(
+            preview,
+            None,
+            fx=float(preview_scale),
+            fy=float(preview_scale),
+            interpolation=cv2.INTER_AREA,
+        )
+    preview = _to_uint8_preview(preview)
     if not cv2.imwrite(
         str(path),
         preview,
@@ -729,6 +849,83 @@ def _nested_value(mapping: Mapping[str, Any], *keys: str):
     return value
 
 
+def _normalize_patch_scoring_mode(mode_value: Any) -> str:
+    """AI-team optimized scoring mode selector.
+
+    disk    : saved crop -> saved patch PNGs -> score_batch(paths), exact old path.
+    ram_png : PNG encode/decode in RAM -> patch arrays -> score_array_batch, new AI-team optimized default.
+    ram_fast: score cv2.resize output directly, fastest but can change scores.
+    """
+    mode = str(mode_value or "ram_png").strip().lower().replace("-", "_")
+    if mode in {"disk", "exact", "exact_disk", "temp", "temp_files", "disk_temp"}:
+        return "disk"
+    if mode in {"ram", "memory", "in_memory", "ram_png", "png_ram"}:
+        return "ram_png"
+    if mode in {"ram_fast", "fast", "array", "direct_array"}:
+        return "ram_fast"
+    raise ValueError(
+        "PATCHCORE_PATCH_SCORING_MODE must be one of: disk, ram_png, ram_fast. "
+        f"Got: {mode_value!r}"
+    )
+
+
+def _prepare_ram_scoring_image(prepared: np.ndarray, mode: str) -> np.ndarray:
+    """Prepare the image used for RAM patch scoring.
+
+    ram_png intentionally runs OpenCV PNG encode/decode in memory. This removes
+    hundreds of patch-file writes but keeps the same pixel conversion path as
+    AI-team Vit_patch.py: saved PNG -> cv2.imread(..., IMREAD_COLOR).
+    """
+    if mode == "ram_fast":
+        return prepared
+    if mode != "ram_png":
+        raise ValueError(f"Unsupported RAM scoring mode: {mode}")
+
+    ok, encoded = cv2.imencode(
+        ".png",
+        prepared,
+        [cv2.IMWRITE_PNG_COMPRESSION, 0],
+    )
+    if not ok:
+        raise OSError("Unable to encode prepared crop for RAM PNG scoring.")
+
+    decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if decoded is None:
+        raise OSError("Unable to decode prepared crop for RAM PNG scoring.")
+    return decoded
+
+
+def _resolve_recipe_template_path(
+    recipe_path: Path,
+    recipe_template_path: str,
+    *,
+    media_root: Path,
+    fallback_template: Optional[Path],
+) -> Path:
+    """Resolve template_path inside a fast-R recipe robustly for app deployment."""
+    raw_value = str(recipe_template_path or "").strip()
+    candidates: list[Path] = []
+    if raw_value:
+        raw_path = Path(raw_value).expanduser()
+        if raw_path.is_absolute():
+            candidates.append(raw_path)
+        else:
+            candidates.append(recipe_path.parent / raw_path)
+            candidates.append(media_root / raw_path)
+            candidates.append(get_config().paths.project_root / raw_path)
+    if fallback_template is not None:
+        candidates.append(fallback_template)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    raise FileNotFoundError(
+        "Fast R recipe template path is not valid and no fallback template exists. "
+        f"recipe={recipe_path}, template_path={recipe_template_path!r}"
+    )
+
+
 class PatchCoreSideRuntime:
     """Preloaded PatchCore runtime for one selected SKU and one tyre side."""
 
@@ -757,13 +954,21 @@ class PatchCoreSideRuntime:
         self.result_jpeg_quality = _as_int(
             raw.get("PATCHCORE_RESULT_JPEG_QUALITY", "90"), 90
         )
-        # AI-team updated inference now writes the prepared crop and generated
-        # patches to a temporary folder, then scores the patch image paths.
-        # This prevents stale in-memory patch arrays from being reused across
-        # sides/cycles and mirrors their latest maincycle pipeline.
-        self.use_temp_patch_files = _as_bool(
-            raw.get("PATCHCORE_USE_TEMP_PATCH_FILES", "True"), True
+        self.result_preview_scale = _as_float(
+            raw.get("PATCHCORE_RESULT_PREVIEW_SCALE", "0.5"), 0.5
         )
+
+        # AI-team optimized inference uses RAM PNG scoring by default:
+        # cv2.imencode(PNG) -> cv2.imdecode(IMREAD_COLOR) -> in-memory patch arrays.
+        # This keeps Vit_patch pixel parity while removing hundreds of patch PNG writes.
+        self.patch_scoring_mode = _normalize_patch_scoring_mode(
+            raw.get("PATCHCORE_PATCH_SCORING_MODE")
+            or raw.get("PATCH_SCORING_MODE")
+            or "ram_png"
+        )
+
+        # Backward-compatible controls retained for disk mode only.
+        self.use_temp_patch_files = self.patch_scoring_mode == "disk"
         self.keep_temp_patch_files = _as_bool(
             raw.get("PATCHCORE_KEEP_TEMP_PATCH_FILES", "False"), False
         )
@@ -774,9 +979,14 @@ class PatchCoreSideRuntime:
                 _as_int(raw.get("PATCHCORE_TEMP_PNG_COMPRESSION", "0"), 0, minimum=0),
             ),
         )
+        self.image_batch_size = _as_int(
+            raw.get("PATCHCORE_IMAGE_BATCH_SIZE", "128"), 128
+        )
 
         patch_cfg = dict(self.artifacts.threshold_metadata.get("patch_configuration") or {})
         processing = dict(self.artifacts.threshold_metadata.get("processing") or {})
+        sku_resize = role_resize_values(self.media_root, self.sku_name, self.side_name)
+        self.sku_resize_source = str(sku_resize.get("source", ""))
         calibration = dict(self.artifacts.calibration_metadata or {})
         calibration_processing = dict(calibration.get("processing_settings") or {})
 
@@ -806,11 +1016,11 @@ class PatchCoreSideRuntime:
 
         if self.side_name in SIDEWALL_SIDES:
             self.resize_width = _as_int(
-                processing.get("prepared_width", raw.get("PATCHCORE_SIDEWALL_RESIZE_WIDTH")),
+                sku_resize.get("resize_width", processing.get("prepared_width", raw.get("PATCHCORE_SIDEWALL_RESIZE_WIDTH"))),
                 DEFAULT_SIDEWALL_RESIZE_WIDTH,
             )
             self.resize_height = _as_int(
-                processing.get("prepared_height", raw.get("PATCHCORE_SIDEWALL_RESIZE_HEIGHT")),
+                sku_resize.get("resize_height", processing.get("prepared_height", raw.get("PATCHCORE_SIDEWALL_RESIZE_HEIGHT"))),
                 DEFAULT_SIDEWALL_RESIZE_HEIGHT,
             )
             assert self.artifacts.template_path is not None
@@ -828,15 +1038,55 @@ class PatchCoreSideRuntime:
                 raw.get("PATCHCORE_R_SEARCH_X_START_RATIO", "0.0"), 0.0
             )
             self.r_search_x_end_ratio = _as_float(
-                raw.get("PATCHCORE_R_SEARCH_X_END_RATIO", "0.6"), 0.6
+                raw.get("PATCHCORE_R_SEARCH_X_END_RATIO", "1.0"), 1.0
+            )
+            requested_method = str(
+                raw.get("PATCHCORE_R_DETECTION_METHOD", "auto")
+            ).strip().lower()
+            if requested_method not in {"auto", "tiled", "fast"}:
+                raise PatchCoreConfigurationError(
+                    "PATCHCORE_R_DETECTION_METHOD must be auto, tiled, or fast. "
+                    f"Got: {requested_method!r}"
+                )
+
+            self.fast_r_recipe: Optional[rlf.Recipe] = None
+            if self.artifacts.r_recipe_path is not None:
+                self.fast_r_recipe = rlf.Recipe.load(self.artifacts.r_recipe_path)
+                resolved_template = _resolve_recipe_template_path(
+                    self.artifacts.r_recipe_path,
+                    self.fast_r_recipe.template_path,
+                    media_root=self.media_root,
+                    fallback_template=self.artifacts.template_path,
+                )
+                # Keep all taught recipe fields, but make template path valid in the app project.
+                self.fast_r_recipe.template_path = str(resolved_template)
+
+            if requested_method == "fast" and self.fast_r_recipe is None:
+                raise PatchCoreConfigurationError(
+                    f"PATCHCORE_R_DETECTION_METHOD=fast but no R recipe was found for {self.side_name}. "
+                    "Expected media/R_Recipe/<SKU>/<side>/<SKU>_<side>_fast_recipe.json "
+                    "or configure PATCHCORE_<SIDE>_R_RECIPE."
+                )
+            self.r_detection_method = (
+                "fast" if (requested_method == "auto" and self.fast_r_recipe is not None)
+                else requested_method
+            )
+            if self.r_detection_method == "auto":
+                self.r_detection_method = "tiled"
+            self.r_fast_scale = _as_int(raw.get("PATCHCORE_R_FAST_SCALE", "1"), 1)
+            self.r_fast_second_pad = _as_int(raw.get("PATCHCORE_R_FAST_SECOND_PAD", "600"), 600, minimum=0)
+            self.r_fast_x_pad = _as_int(raw.get("PATCHCORE_R_FAST_X_PAD", "100"), 100, minimum=0)
+            self.r_fast_verbose = _as_bool(raw.get("PATCHCORE_R_FAST_VERBOSE", "False"), False)
+            self.r_fast_fallback_to_tiled = _as_bool(
+                raw.get("PATCHCORE_R_FAST_FALLBACK_TO_TILED", "False"), False
             )
         else:
             self.resize_width = _as_int(
-                calibration.get("resize_width", calibration_processing.get("resize_width")),
+                sku_resize.get("resize_width", calibration.get("resize_width", calibration_processing.get("resize_width"))),
                 4032,
             )
             self.resize_height = _as_int(
-                calibration.get("resize_height", calibration_processing.get("resize_height")),
+                sku_resize.get("resize_height", calibration.get("resize_height", calibration_processing.get("resize_height"))),
                 23296,
             )
             self.r_template = None
@@ -852,6 +1102,12 @@ class PatchCoreSideRuntime:
                     "model": str(self.artifacts.model_path),
                     "threshold": self.artifacts.threshold,
                     "template": str(self.artifacts.template_path or ""),
+                    "r_recipe": str(self.artifacts.r_recipe_path or ""),
+                    "r_detection_method": getattr(self, "r_detection_method", ""),
+                    "patch_scoring_mode": self.patch_scoring_mode,
+                    "resize_width": int(self.resize_width),
+                    "resize_height": int(self.resize_height),
+                    "resize_source": self.sku_resize_source,
                     "calibration": str(self.artifacts.calibration_path or ""),
                 },
             },
@@ -956,18 +1212,22 @@ class PatchCoreSideRuntime:
         *,
         prepared_stem: str,
     ) -> tuple[list[PatchRecord], dict[str, Any]]:
-        if not self.use_temp_patch_files:
+        """Score a prepared crop using AI-team optimized patch scoring modes."""
+        mode = self.patch_scoring_mode
+
+        if mode in {"ram_png", "ram_fast"}:
+            scoring_image = _prepare_ram_scoring_image(prepared, mode)
             records = _build_patch_records(
-                width=int(prepared.shape[1]),
-                height=int(prepared.shape[0]),
+                width=int(scoring_image.shape[1]),
+                height=int(scoring_image.shape[0]),
                 patch_width=self.patch_width,
                 patch_height=self.patch_height,
                 stride_x=self.patch_stride_x,
                 stride_y=self.patch_stride_y,
                 cover_edges=self.cover_complete,
             )
-            for batch in _batched(records, IMAGE_BATCH_SIZE):
-                arrays = [prepared[item.y : item.y2, item.x : item.x2] for item in batch]
+            for batch in _batched(records, self.image_batch_size):
+                arrays = [scoring_image[item.y : item.y2, item.x : item.x2].copy() for item in batch]
                 scores = self.scorer.score_array_batch(arrays)
                 if len(scores) != len(batch):
                     raise RuntimeError("PatchCore returned an unexpected number of scores.")
@@ -975,11 +1235,16 @@ class PatchCoreSideRuntime:
                     item.score = float(score)
                     item.is_defective = item.score > self.artifacts.threshold
             return records, {
-                "patch_io_mode": "memory_arrays",
+                "patch_io_mode": "ram_png_vit_patch_compatible" if mode == "ram_png" else "ram_fast_direct_array",
+                "patch_scoring_mode": mode,
                 "temporary_patch_files_used": False,
                 "temporary_patch_files_removed": True,
+                "ram_png_encode_decode_used": mode == "ram_png",
+                "temporary_patch_format": "png",
+                "temporary_png_compression": 0,
             }
 
+        # Disk mode: old exact path, kept for validation/comparison.
         temp_root: Optional[Path] = None
         try:
             records, temp_root = self._generate_temp_patch_files(
@@ -987,7 +1252,7 @@ class PatchCoreSideRuntime:
                 side_output,
                 prepared_stem=prepared_stem,
             )
-            for batch in _batched(records, IMAGE_BATCH_SIZE):
+            for batch in _batched(records, self.image_batch_size):
                 patch_paths = [item.path for item in batch if item.path is not None]
                 if len(patch_paths) != len(batch):
                     raise RuntimeError("A generated patch record is missing its file path.")
@@ -999,6 +1264,7 @@ class PatchCoreSideRuntime:
                     item.is_defective = item.score > self.artifacts.threshold
             return records, {
                 "patch_io_mode": "disk_temp_vit_patch_compatible",
+                "patch_scoring_mode": mode,
                 "temporary_patch_files_used": True,
                 "temporary_patch_root": str(temp_root),
                 "temporary_patch_files_removed": not self.keep_temp_patch_files,
@@ -1108,6 +1374,7 @@ class PatchCoreSideRuntime:
             "model_path": str(self.artifacts.model_path),
             "threshold_file": str(self.artifacts.threshold_path),
             "template_path": str(self.artifacts.template_path or ""),
+            "r_recipe_path": str(self.artifacts.r_recipe_path or ""),
             "calibration_path": str(self.artifacts.calibration_path or ""),
             "threshold": float(self.artifacts.threshold),
             "score": float(maximum_score),
@@ -1126,6 +1393,9 @@ class PatchCoreSideRuntime:
             "patch_height": int(self.patch_height),
             "patch_stride_x": int(self.patch_stride_x),
             "patch_stride_y": int(self.patch_stride_y),
+            "result_preview_scale": float(self.result_preview_scale),
+            "patch_scoring_mode": self.patch_scoring_mode,
+            "image_batch_size": int(self.image_batch_size),
             "inference_time": round(elapsed, 4),
             "total_time": round(elapsed, 4),
             "patch_results_csv": str(csv_path),
@@ -1142,20 +1412,106 @@ class PatchCoreSideRuntime:
         raw_path, raw_image = self._read_raw(raw_image_path)
         side_output, final_dir = self._prepare_output(output_dir)
 
-        match_boxes, r_bands, detection_metadata = dc.detect_r_bands(
-            raw_image=raw_image,
-            template_blurred=self.r_template,
-            patch_height=self.r_tile_height,
-            patch_width=self.r_tile_width,
-            match_threshold=self.r_match_threshold,
-            minimum_band_height=self.r_min_band_height,
-            row_gap=self.r_row_gap,
-            search_x_start_ratio=self.r_search_x_start_ratio,
-            search_x_end_ratio=self.r_search_x_end_ratio,
-        )
+        if self.r_detection_method == "fast":
+            assert self.fast_r_recipe is not None
+            match_boxes, r_bands, detection_metadata = dcf.detect_r_bands_fast(
+                raw_image,
+                self.fast_r_recipe,
+                scale=self.r_fast_scale,
+                second_pad=self.r_fast_second_pad,
+                x_pad=self.r_fast_x_pad,
+                verbose=self.r_fast_verbose,
+            )
+            detection_metadata = dict(detection_metadata)
+            detection_metadata["app_selected_method"] = "fast"
+            detection_metadata["recipe_path"] = str(self.artifacts.r_recipe_path or "")
+
+            if len(r_bands) < 2 and self.r_fast_fallback_to_tiled:
+                fast_metadata = dict(detection_metadata)
+                fast_boxes = list(match_boxes)
+                match_boxes, r_bands, detection_metadata = dc.detect_r_bands(
+                    raw_image=raw_image,
+                    template_blurred=self.r_template,
+                    patch_height=self.r_tile_height,
+                    patch_width=self.r_tile_width,
+                    match_threshold=self.r_match_threshold,
+                    minimum_band_height=self.r_min_band_height,
+                    row_gap=self.r_row_gap,
+                    search_x_start_ratio=self.r_search_x_start_ratio,
+                    search_x_end_ratio=self.r_search_x_end_ratio,
+                )
+                detection_metadata = dict(detection_metadata)
+                detection_metadata["fast_fallback_to_tiled_used"] = True
+                detection_metadata["fast_detector_failed"] = {
+                    "R_band_count": int(fast_metadata.get("R_band_count", len(fast_boxes))),
+                    "match_box_count": int(fast_metadata.get("match_box_count", len(fast_boxes))),
+                    "recipe_path": str(self.artifacts.r_recipe_path or ""),
+                }
+        else:
+            match_boxes, r_bands, detection_metadata = dc.detect_r_bands(
+                raw_image=raw_image,
+                template_blurred=self.r_template,
+                patch_height=self.r_tile_height,
+                patch_width=self.r_tile_width,
+                match_threshold=self.r_match_threshold,
+                minimum_band_height=self.r_min_band_height,
+                row_gap=self.r_row_gap,
+                search_x_start_ratio=self.r_search_x_start_ratio,
+                search_x_end_ratio=self.r_search_x_end_ratio,
+            )
+
+            # AI-team threshold/detect script searches the full image width. Older
+            # Apollo env files had PATCHCORE_R_SEARCH_X_END_RATIO=0.6, which can
+            # fail in lab-camera captures. Tiled mode retries once with full width.
+            if len(r_bands) < 2 and (self.r_search_x_start_ratio != 0.0 or self.r_search_x_end_ratio != 1.0):
+                first_pass_metadata = dict(detection_metadata)
+                first_pass_boxes = list(match_boxes)
+
+                match_boxes, r_bands, detection_metadata = dc.detect_r_bands(
+                    raw_image=raw_image,
+                    template_blurred=self.r_template,
+                    patch_height=self.r_tile_height,
+                    patch_width=self.r_tile_width,
+                    match_threshold=self.r_match_threshold,
+                    minimum_band_height=self.r_min_band_height,
+                    row_gap=self.r_row_gap,
+                    search_x_start_ratio=0.0,
+                    search_x_end_ratio=1.0,
+                )
+                detection_metadata = dict(detection_metadata)
+                detection_metadata["full_width_retry_used"] = True
+                detection_metadata["configured_search_failed"] = {
+                    "R_band_count": int(first_pass_metadata.get("R_band_count", len(first_pass_boxes))),
+                    "match_box_count": int(first_pass_metadata.get("match_box_count", len(first_pass_boxes))),
+                    "search_x_start_ratio": float(first_pass_metadata.get("search_x_start_ratio", self.r_search_x_start_ratio)),
+                    "search_x_end_ratio": float(first_pass_metadata.get("search_x_end_ratio", self.r_search_x_end_ratio)),
+                }
         if len(r_bands) < 2:
+            failure_preview = dc.draw_r_detection_preview(raw_image, match_boxes)
+            failure_preview_path = side_output / "00_R_MAPPING_FAILED_PREVIEW.png"
+            cv2.imwrite(str(failure_preview_path), failure_preview, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+
+            _write_json(
+                side_output / "r_detection_failure.json",
+                {
+                    "status": "failed",
+                    "reason": "fewer_than_two_R_bands",
+                    "side": self.side_name,
+                    "raw_image": str(raw_path),
+                    "detected_R_band_count": int(len(r_bands)),
+                    "R_match_boxes": match_boxes,
+                    "R_bands": r_bands,
+                    "R_detection_metadata": detection_metadata,
+                    "failure_preview": str(failure_preview_path),
+                    "configured_search_x_start_ratio": float(self.r_search_x_start_ratio),
+                    "configured_search_x_end_ratio": float(self.r_search_x_end_ratio),
+                    "ai_team_compatible_full_width_search": True,
+                },
+            )
+
             raise RuntimeError(
-                f"Only {len(r_bands)} valid R band(s) found in {raw_path.name}."
+                f"Only {len(r_bands)} valid R band(s) found in {raw_path.name}. "
+                f"Saved R detection debug: {failure_preview_path}"
             )
 
         raw_crop, y_start, y_end, top_band, bottom_band = dc.crop_between_first_two_r_bands(
@@ -1179,7 +1535,7 @@ class PatchCoreSideRuntime:
             draw_score_labels=self.draw_score_labels,
         )
         final_path = final_dir / f"{self.side_name}_crop_detection.jpg"
-        _save_result_preview(final_path, detection, self.result_jpeg_quality)
+        _save_result_preview(final_path, detection, self.result_jpeg_quality, self.result_preview_scale)
 
         r_anchor = {
             "R1_top_y": int(y_start),
@@ -1198,7 +1554,12 @@ class PatchCoreSideRuntime:
             raw_height=int(raw_image.shape[0]),
             elapsed=time.perf_counter() - started,
             extra={
-                "R_detection_method": "AI_TEAM_TILED_TEMPLATE_MATCHING",
+                "R_detection_method": (
+                    "AI_TEAM_FAST_TAUGHT_RECIPE"
+                    if self.r_detection_method == "fast"
+                    else "AI_TEAM_TILED_TEMPLATE_MATCHING"
+                ),
+                "R_recipe_path": str(self.artifacts.r_recipe_path or ""),
                 "R_match_boxes": match_boxes,
                 "R_bands": r_bands,
                 "R_detection_metadata": detection_metadata,
@@ -1272,7 +1633,7 @@ class PatchCoreSideRuntime:
             draw_score_labels=self.draw_score_labels,
         )
         final_path = final_dir / f"{self.side_name}_crop_detection.jpg"
-        _save_result_preview(final_path, detection, self.result_jpeg_quality)
+        _save_result_preview(final_path, detection, self.result_jpeg_quality, self.result_preview_scale)
 
         return self._finalize_result(
             raw_path=raw_path,

@@ -38,12 +38,25 @@ from src.camera.HARDWARE_TRIGGER import (
     get_camera_to_side_map,
     get_side_to_camera_map,
 )
-from src.device.sku_profile_runtime import load_sku_camera_profile
+from src.device.sku_profile_runtime import (
+    load_sku_camera_profile,
+    apply_sku_laser_profile_to_manager,
+)
+from src.COMMON.config import get_config
 try:
     from src.COMMON.live_inspection_state import set_live_progress
 except Exception:
     def set_live_progress(*args, **kwargs):
         pass
+
+
+def _live_env_bool(key: str, default: bool = False) -> bool:
+    try:
+        raw = get_config().raw
+        value = str(raw.get(key, str(default))).strip().lower()
+    except Exception:
+        value = str(default).lower()
+    return value in {"1", "true", "yes", "y", "on", "enabled"}
  
 # =========================================================
 # CONTINUOUS CYCLE WORKER (Runs in background thread)
@@ -79,6 +92,7 @@ class ContinuousCycleWorker(QObject):
         seg_model_b_path: str,
         r_detector_path: str,
         multi_camera_manager,
+        laser_manager=None,
         min_capture_interval: float = 2.0,
         sides_to_run: Optional[List[str]] = None,
         capture_sides: Optional[List[str]] = None,
@@ -94,6 +108,8 @@ class ContinuousCycleWorker(QObject):
         self.seg_model_b_path = seg_model_b_path
         self.r_detector_path = r_detector_path
         self.multi_camera_manager = multi_camera_manager
+        self.laser_manager = laser_manager
+        self._owned_laser_manager = None
         self.min_capture_interval = min_capture_interval
         self.sides_to_run = _resolve_sides(sides_to_run)
         self.capture_sides = capture_sides or [
@@ -169,6 +185,23 @@ class ContinuousCycleWorker(QObject):
             )
 
         self.multi_camera_manager.apply_camera_profile(camera_profile)
+
+        # Optional Live laser profile apply. Safe when disabled; useful when the
+        # machine has laser settings saved per SKU under media/Laser_Profiles/<SKU>/.
+        try:
+            self._apply_optional_laser_profile()
+        except Exception as error:
+            if _live_env_bool("REQUIRE_LASER", False):
+                raise
+            self.status_update.emit(f" Laser profile apply skipped/warn: {error}")
+            logger.warning(
+                "Live laser profile apply skipped",
+                extra={
+                    "event_code": "LIVE_LASER_PROFILE_SKIPPED",
+                    "sku_name": self.sku_name,
+                    "details": {"error": str(error)},
+                },
+            )
 
         self.status_update.emit(" Configuring cameras for Live...")
         self.multi_camera_manager.start_all_streams()
@@ -292,6 +325,49 @@ class ContinuousCycleWorker(QObject):
             return self._runtimes
         self._preload_runtimes()
         return self._runtimes
+
+    def _get_or_create_live_laser_manager(self):
+        """Return a laser manager only when Live laser profile application is enabled."""
+        if self.laser_manager is not None:
+            return self.laser_manager
+
+        try:
+            from src.device.teledyne_laser_manager import TeledyneLaserManager
+
+            manager = TeledyneLaserManager()
+            if hasattr(manager, "refresh_lasers"):
+                manager.refresh_lasers()
+            self._owned_laser_manager = manager
+            self.laser_manager = manager
+            return manager
+        except Exception as error:
+            raise RuntimeError(f"Unable to create/live-refresh Teledyne laser manager: {error}") from error
+
+    def _apply_optional_laser_profile(self) -> None:
+        """Apply selected-SKU laser profile for Live production when enabled.
+
+        Camera profiles are always applied before camera streams. Laser profiles are
+        optional because some machines/run modes do not use a Teledyne laser in the
+        inference path. Enable with LIVE_APPLY_LASER_PROFILE=True or REQUIRE_LASER=True.
+        """
+        apply_enabled = _live_env_bool("LIVE_APPLY_LASER_PROFILE", False)
+        require_laser = _live_env_bool("REQUIRE_LASER", False)
+
+        if not apply_enabled and not require_laser:
+            self.status_update.emit(" Laser profile apply skipped: LIVE_APPLY_LASER_PROFILE=False")
+            return
+
+        self.status_update.emit(f" Loading laser profile for SKU: {self.sku_name}")
+        manager = self._get_or_create_live_laser_manager()
+        profile = apply_sku_laser_profile_to_manager(
+            media_root=self.media_root,
+            sku_name=self.sku_name,
+            laser_manager=manager,
+        )
+        lasers = profile.get("lasers", {}) if isinstance(profile, dict) else {}
+        self.status_update.emit(
+            f" Laser profile applied for SKU={self.sku_name} | zones={','.join(lasers.keys())}"
+        )
     
     def _timing_log(self, msg: str):
         """
@@ -768,6 +844,12 @@ class ContinuousCycleWorker(QObject):
             self.status_update.emit(f" Camera cleanup warning: {e}")
 
         try:
+            if self._owned_laser_manager is not None and hasattr(self._owned_laser_manager, "close_all"):
+                self._owned_laser_manager.close_all()
+        except Exception as e:
+            self.status_update.emit(f" Laser cleanup warning: {e}")
+
+        try:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -820,6 +902,7 @@ def start_continuous_cycle(
     sku_name: str,
     tyre_name: str,
     multi_camera_manager,
+    laser_manager=None,
     min_capture_interval: float = 2.0,
     seg_model_a_path: Optional[str] = None,
     seg_model_b_path: Optional[str] = None,
@@ -853,6 +936,7 @@ def start_continuous_cycle(
         seg_model_b_path=seg_model_b_path,
         r_detector_path=r_detector_path,
         multi_camera_manager=multi_camera_manager,
+        laser_manager=laser_manager,
         min_capture_interval=min_capture_interval,
         sides_to_run=sides_to_run,
         capture_sides=capture_sides,

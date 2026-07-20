@@ -121,11 +121,110 @@ def _today() -> str:
     return datetime.now().strftime("%d-%m-%Y")
 
 
-def _write_image(path: Path, image: np.ndarray) -> None:
+def _save_uint16_ffc_png_like_auto(path: Path, image: np.ndarray) -> None:
+    """Save Lab AI input using the same 16-bit PNG save behavior as Auto capture.
+
+    Auto capture writes the software-FFC-corrected image with cv2.imwrite as a
+    single-channel uint16 PNG when 16-bit output is selected.  Lab inference must
+    receive the same image type, so this helper is intentionally strict: it does
+    not silently accept 8-bit images.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(path), image)
+
+    if image is None:
+        raise RuntimeError(f"Cannot save Lab AI input because image is None: {path}")
+    if image.ndim != 2:
+        raise RuntimeError(
+            f"Lab AI input must be single-channel Mono image. "
+            f"Got shape={getattr(image, 'shape', None)} dtype={getattr(image, 'dtype', None)}"
+        )
+    if image.dtype != np.uint16:
+        raise RuntimeError(
+            f"Lab AI input must be 16-bit software-FFC-corrected image. "
+            f"Got dtype={image.dtype}. Check LAB_CAM_<SIDE>_PIXEL_FORMAT=Mono16 "
+            f"and LAB_CAM_<SIDE>_SOFTWARE_FFC_ENABLED=True."
+        )
+
+    ok = cv2.imwrite(
+        str(path),
+        image,
+        [cv2.IMWRITE_PNG_COMPRESSION, 0],
+    )
     if not ok:
-        raise IOError(f"Failed to save lab capture image: {path}")
+        raise IOError(f"Failed to save 16-bit FFC corrected Lab AI input image: {path}")
+
+
+def _require_lab_ffc_applied(
+    side: str,
+    manager: Any,
+    image: np.ndarray,
+) -> Dict[str, Any]:
+    """Validate that Lab capture returned the same type required by Auto capture.
+
+    HARDWARE_TRIGGER.capture_all() applies software FFC before returning images.
+    This check prevents raw / 8-bit / preview images from accidentally entering AI.
+    """
+    stats_by_side = getattr(manager, "last_ffc_stats", {}) or {}
+    stats = dict(stats_by_side.get(side, {}) or {})
+
+    if image is None:
+        raise RuntimeError(f"Camera capture did not return side={side}")
+
+    if image.dtype != np.uint16:
+        raise RuntimeError(
+            f"Lab capture side={side} is not 16-bit. "
+            f"dtype={image.dtype}, shape={getattr(image, 'shape', None)}. "
+            f"Set LAB_CAM_{SIDE_ENV_NAMES.get(side, side).upper()}_PIXEL_FORMAT=Mono16."
+        )
+
+    if stats.get("enabled") is not True:
+        raise RuntimeError(
+            f"Lab capture side={side} did not apply software FFC before inference. "
+            f"Set LAB_CAM_{SIDE_ENV_NAMES.get(side, side).upper()}_SOFTWARE_FFC_ENABLED=True."
+        )
+
+    return stats
+
+
+def _log_lab_capture_settings(
+    callback: Optional[Callable[[str], None]],
+    manager: Any,
+    active_sides: List[str],
+) -> None:
+    """Print the exact Lab capture settings used for the AI-input images."""
+    _log(callback, "LAB AI input requirement: Mono16 + software FFC corrected + uint16 PNG")
+    _log(callback, "LAB settings source: .env LAB_CAM_<SIDE>_* values only")
+
+    for cam in getattr(manager, "cameras", []) or []:
+        role_names = [str(role.get("name", "")).lower() for role in getattr(cam, "roles", []) or []]
+        active_roles = [name for name in role_names if name in set(active_sides)]
+        if not active_roles:
+            continue
+        _log(
+            callback,
+            "LAB camera configured "
+            f"serial={getattr(cam, 'serial_number', None)} roles={active_roles} "
+            f"width={getattr(cam, 'width', None)} "
+            f"camera_height={getattr(cam, 'camera_height', None)} "
+            f"final_height={getattr(cam, 'final_height', None)} "
+            f"pixel_format={getattr(cam, 'pixel_format', None)} "
+            f"exposure={getattr(cam, 'exposure_time', None)} "
+            f"gain={getattr(cam, 'gain', None)} "
+            f"line_rate_enabled={getattr(cam, 'acquisition_line_rate_enable', None)} "
+            f"line_rate={getattr(cam, 'acquisition_line_rate', None)}"
+        )
+
+    for side in active_sides:
+        ffc_cfg = getattr(manager, "ffc_config_by_side", {}).get(side)
+        if ffc_cfg is None:
+            _log(callback, f"LAB FFC config side={side}: MISSING")
+            continue
+        _log(
+            callback,
+            f"LAB FFC config side={side}: enabled={ffc_cfg.enabled} "
+            f"target={ffc_cfg.target_mode} gain={ffc_cfg.gain_min}-{ffc_cfg.gain_max} "
+            f"row_block={ffc_cfg.row_block}"
+        )
 
 
 def _log(callback: Optional[Callable[[str], None]], message: str) -> None:
@@ -300,6 +399,8 @@ def run_lab_camera_cycle(
         if not manager.cameras:
             raise RuntimeError("No lab cameras configured. Check LAB_ACTIVE_SIDES and camera serial env values.")
 
+        _log_lab_capture_settings(progress_callback, manager, cfg.active_sides)
+
         _log(progress_callback, "Starting camera streams...")
         manager.start_all_streams()
 
@@ -308,14 +409,30 @@ def run_lab_camera_cycle(
         captured = manager.capture_all(sides_to_capture=cfg.active_sides)
 
         image_map: Dict[str, str] = {}
+        lab_ffc_stats: Dict[str, Dict[str, Any]] = {}
+
         for side in cfg.active_sides:
             img = captured.get(side)
-            if img is None:
-                raise RuntimeError(f"Camera capture did not return side={side}")
+            stats = _require_lab_ffc_applied(side, manager, img)
+            lab_ffc_stats[side] = stats
+
+            # Keep the existing Lab save path exactly the same.
+            # Only the save logic/image type is made identical to Auto 16-bit FFC output.
             out_path = capture_dir / f"{side}.png"
-            _write_image(out_path, img)
+            _save_uint16_ffc_png_like_auto(out_path, img)
+
+            # IMPORTANT: PatchCore must read this saved 16-bit FFC corrected PNG.
             image_map[side] = str(out_path)
-            _log(progress_callback, f"Saved {side}: {out_path.name} shape={getattr(img, 'shape', None)} dtype={getattr(img, 'dtype', None)}")
+
+            _log(
+                progress_callback,
+                f"SAVE_FFC_16BIT_OK {side}: {out_path.name} "
+                f"shape={getattr(img, 'shape', None)} dtype={getattr(img, 'dtype', None)} "
+                f"target={stats.get('target', 0.0):.2f} "
+                f"gain_min={stats.get('gain_min', 0.0):.4f} "
+                f"gain_max={stats.get('gain_max', 0.0):.4f} "
+                f"saturated_pixels={stats.get('saturated_pixels', 0)}"
+            )
 
         metadata = {
             "cycle_id": cycle_id,
@@ -327,7 +444,9 @@ def run_lab_camera_cycle(
             "trigger_mode": "software",
             "plc_enabled": False,
             "send_result_to_plc": False,
+            "ai_input_mode": "16bit_software_ffc_corrected_png",
             "image_map": image_map,
+            "lab_ffc_stats": lab_ffc_stats,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         with open(capture_dir / "lab_capture_metadata.json", "w", encoding="utf-8") as file:
@@ -350,6 +469,8 @@ def run_lab_camera_cycle(
         result["trigger_mode"] = "software"
         result["plc_enabled"] = False
         result["send_result_to_plc"] = False
+        result["ai_input_mode"] = "16bit_software_ffc_corrected_png"
+        result["lab_ffc_stats"] = lab_ffc_stats
 
         _log(progress_callback, f"LAB CAMERA CYCLE COMPLETED | result={result.get('final_label')}")
         _log(progress_callback, f"Output: {output_dir}")

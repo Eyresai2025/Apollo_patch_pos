@@ -4,7 +4,7 @@ echo ==========================================
 echo Starting Apollo GUI Application
 echo ==========================================
 
-set "PROJECT_DIR=C:\Users\YerriswamyChakala\Desktop\Apollo_Vit_App"
+set "PROJECT_DIR=C:\Users\YerriswamyChakala\Desktop\Apollo_Application\Apollo_patch_pos"
 set "ENV_NAME=Apollo"
 
 echo.

@@ -1181,11 +1181,19 @@ class MainWindow(QMainWindow):
         # is required.
         capture_sides = list(active_sides)
 
+        live_laser_manager = None
+        try:
+            if getattr(self, "device_page", None) is not None:
+                live_laser_manager = getattr(self.device_page, "laser_manager", None)
+        except Exception:
+            live_laser_manager = None
+
         self.continuous_worker = start_continuous_cycle(
             media_root=MEDIA_PATH,
             sku_name=sku_name,
             tyre_name=tyre_name,
             multi_camera_manager=self.multi_cam,
+            laser_manager=live_laser_manager,
             min_capture_interval=2.0,
             seg_model_a_path=MAIN_SEG_MODEL_PATH,
             seg_model_b_path=MAIN_SEG_MODEL_PATH,

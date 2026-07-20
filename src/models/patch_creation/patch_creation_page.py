@@ -10,8 +10,8 @@ from typing import Any, Callable, Dict, Optional
 from PyQt5.QtCore import Qt, QThread, pyqtSignal  # type: ignore
 from PyQt5.QtWidgets import (  # type: ignore
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy,
-    QVBoxLayout, QWidget,
+    QCheckBox, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .patch_creation_service import PatchCreationWorker
@@ -103,11 +103,11 @@ class PatchCreationPage(QWidget):
     patchSaved = pyqtSignal(str, dict)
 
     ROLE_INFO = {
-        "sidewall1": ("Sidewall 1", "Use shared cropped image"),
-        "sidewall2": ("Sidewall 2", "Raw image + fast R recipe"),
-        "tread": ("Tread", "Use offset cropped image"),
-        "innerwall": ("Inner Side", "Use offset cropped image"),
-        "bead": ("Bead", "Use offset cropped image"),
+        "sidewall1": ("Sidewall 1", "Use saved resized crop"),
+        "sidewall2": ("Sidewall 2", "Use saved resized crop"),
+        "tread": ("Tread", "Use saved resized crop"),
+        "innerwall": ("Inner Side", "Use saved resized crop"),
+        "bead": ("Bead", "Use saved resized crop"),
     }
 
     def __init__(self, media_path: str, project_root: str,
@@ -138,7 +138,7 @@ class PatchCreationPage(QWidget):
         card = QFrame(); card.setObjectName("PageCard")
         lay = QVBoxLayout(card); lay.setContentsMargins(20,16,20,16); lay.setSpacing(12)
         title = QLabel("Patch Creation"); title.setObjectName("PageTitle")
-        sub = QLabel("Create 448 × 448 patches for all inspection views. Sidewall 1, Tread, Inner and Bead use saved cropped images; Sidewall 2 performs fast-recipe R detection from raw images before patching.")
+        sub = QLabel("Create patches directly from the resized crops produced by the Cropping tab. All five sides use the same patch creation logic; no R detection or additional cropping is performed here.")
         sub.setObjectName("PageSubTitle"); sub.setWordWrap(True)
         lay.addWidget(title); lay.addWidget(sub)
         content = QHBoxLayout(); content.setSpacing(14)
@@ -169,6 +169,85 @@ class PatchCreationPage(QWidget):
         grid.addWidget(self.recipe_label,2,0); grid.addWidget(self.recipe_edit,2,1,1,2)
         grid.addWidget(self.output_label,3,0); grid.addWidget(self.output_edit,3,1); grid.addWidget(self.output_browse,3,2)
         grid.setColumnStretch(1,1); ml.addWidget(config)
+
+        # Editable patch settings are intentionally shown only for Sidewall 1
+        # and Sidewall 2. Tread, Innerwall and Bead continue to use the existing
+        # production defaults without additional operator controls.
+        self.settings_frame = QFrame()
+        self.settings_frame.setStyleSheet(
+            "QFrame{background:#fff;border:1px solid #e7deef;border-radius:12px;}"
+        )
+        settings_grid = QGridLayout(self.settings_frame)
+        settings_grid.setContentsMargins(12,10,12,10)
+        settings_grid.setHorizontalSpacing(10)
+        settings_grid.setVerticalSpacing(8)
+
+        settings_title = QLabel("Sidewall Patch Settings")
+        settings_title.setStyleSheet(
+            "font:700 9.5pt 'Segoe UI';color:#571c86;border:none;"
+        )
+        settings_grid.addWidget(settings_title, 0, 0, 1, 8)
+
+        def make_spin(minimum: int, maximum: int, value: int) -> QSpinBox:
+            spin = QSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setValue(value)
+            spin.setMinimumHeight(32)
+            spin.setAlignment(Qt.AlignCenter)
+            spin.setStyleSheet(
+                "QSpinBox{background:#fff;color:#3f3548;border:1px solid #dcd2e6;"
+                "border-radius:7px;padding:0 7px;font:600 9pt 'Segoe UI';}"
+            )
+            return spin
+
+        self.patch_width_spin = make_spin(32, 8192, 448)
+        self.patch_height_spin = make_spin(32, 8192, 448)
+        self.stride_x_spin = make_spin(1, 8192, 448)
+        self.stride_y_spin = make_spin(1, 8192, 448)
+        self.resize_width_spin = make_spin(32, 20000, 4036)
+        self.resize_height_spin = make_spin(32, 100000, 17920)
+
+        self.cover_edges_check = QCheckBox("Cover edges")
+        self.cover_edges_check.setChecked(True)
+        self.clear_output_check = QCheckBox("Clear old output")
+        self.clear_output_check.setChecked(True)
+        for check in (self.cover_edges_check, self.clear_output_check):
+            check.setStyleSheet(
+                "QCheckBox{color:#4f4658;font:600 9pt 'Segoe UI';border:none;}"
+            )
+
+        setting_fields = [
+            ("Patch width", self.patch_width_spin),
+            ("Patch height", self.patch_height_spin),
+            ("Stride X", self.stride_x_spin),
+            ("Stride Y", self.stride_y_spin),
+            ("Resize width", self.resize_width_spin),
+            ("Resize height", self.resize_height_spin),
+        ]
+        for index, (label_text, widget) in enumerate(setting_fields):
+            label = QLabel(label_text)
+            label.setStyleSheet(
+                "font:700 8.5pt 'Segoe UI';color:#6b5879;border:none;"
+            )
+            column = (index % 3) * 2
+            row = 1 + (index // 3)
+            settings_grid.addWidget(label, row, column)
+            settings_grid.addWidget(widget, row, column + 1)
+
+        settings_grid.addWidget(self.cover_edges_check, 3, 0, 1, 2)
+        settings_grid.addWidget(self.clear_output_check, 3, 2, 1, 2)
+
+        self.output_note = QLabel(
+            "Saved under the selected Patch Output Folder: "
+            "01_actual_cropped_images, 02_resized_images and patches_rtor1."
+        )
+        self.output_note.setWordWrap(True)
+        self.output_note.setStyleSheet(
+            "font:500 8.3pt 'Segoe UI';color:#81758c;border:none;"
+        )
+        settings_grid.addWidget(self.output_note, 3, 4, 1, 2)
+        settings_grid.setColumnStretch(5, 1)
+        ml.addWidget(self.settings_frame)
         status = QFrame(); status.setStyleSheet("QFrame{background:#fff;border:1px solid #e7deef;border-radius:12px;}")
         vl = QVBoxLayout(status); vl.setContentsMargins(12,10,12,10)
         self.status = QLabel("Ready"); self.status.setStyleSheet("font:700 10pt 'Segoe UI';color:#571c86;border:none;")
@@ -184,14 +263,13 @@ class PatchCreationPage(QWidget):
         content.addWidget(main,1); lay.addLayout(content,1); root.addWidget(card,1)
 
     def _defaults(self, role: str) -> Dict[str, str]:
-        sku = self._sku(); offset = self.media_path / "offset_calibration" / sku
-        if role == "sidewall1": input_path = offset / "cropped_images" / "sidewall1"
-        elif role == "sidewall2": input_path = self.media_path / "new_sku_images" / sku / "sidewall2"
-        else: input_path = offset / role / "cropped_images" / role
+        sku = self._sku()
+        crop_root = self.media_path / "cropping" / sku / role
+        input_path = crop_root / "resized_images"
         return {
             "input": str(input_path.resolve()),
             "template": str((self.media_path / "template_extractor" / sku / "sidewall2" / f"{sku}_sidewall2_template.png").resolve()),
-            "recipe": str((self.media_path / "training" / sku / "sidewall2" / f"{sku}_sidewall2_fast_recipe.json").resolve()),
+            "recipe": str((self.media_path / "R_Recipe" / sku / "sidewall2" / f"{sku}_sidewall2_fast_recipe.json").resolve()),
             "output": str((self.media_path / "patch_creation" / sku / role).resolve()),
         }
 
@@ -219,11 +297,30 @@ class PatchCreationPage(QWidget):
     def _load_role(self):
         d = self._defaults(self.active_role); name = self.ROLE_INFO[self.active_role][0]
         self.active_title.setText(f"{name} Patch Creation"); self.create_btn.setText(f"Create {name} Patches")
-        raw = self.active_role == "sidewall2"
-        self.badge.setText("RAW + FAST R RECIPE PIPELINE" if raw else "CROPPED IMAGE PIPELINE")
-        self.input_label.setText("GOOD Raw Image Folder" if raw else "Cropped Image Folder")
+        raw = False
+        self.badge.setText("CROPPED IMAGE PIPELINE")
+        self.input_label.setText("Resized Crop Folder")
         self.input_edit.setText(d["input"]); self.template_edit.setText(d["template"]); self.recipe_edit.setText(d["recipe"]); self.output_edit.setText(d["output"])
         self.template_label.setVisible(raw); self.template_edit.setVisible(raw); self.recipe_label.setVisible(raw); self.recipe_edit.setVisible(raw)
+        self.settings_frame.setVisible(True)
+        config_path = (
+            self.media_path / "cropping" / self._sku()
+            / f"{self._sku()}_crop_resize_configuration.json"
+        )
+        if config_path.is_file():
+            try:
+                import json
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+                saved = dict((payload.get("roles") or {}).get(self.active_role) or {})
+                self.patch_width_spin.setValue(int(saved.get("patch_width", 448)))
+                self.patch_height_spin.setValue(int(saved.get("patch_height", 448)))
+                self.stride_x_spin.setValue(int(saved.get("stride_x", 448)))
+                self.stride_y_spin.setValue(int(saved.get("stride_y", 448)))
+                self.resize_width_spin.setValue(int(saved.get("resize_width", 4032)))
+                self.resize_height_spin.setValue(int(saved.get("resize_height", 23296)))
+                self.cover_edges_check.setChecked(bool(saved.get("cover_edges", True)))
+            except Exception:
+                pass
 
     def _browse_input(self):
         path = QFileDialog.getExistingDirectory(self,"Choose Input Folder",self.input_edit.text())
@@ -237,12 +334,33 @@ class PatchCreationPage(QWidget):
         if self.worker is not None and self.worker.isRunning(): return
         input_path = Path(self.input_edit.text()); output = Path(self.output_edit.text())
         if not input_path.exists(): QMessageBox.warning(self,"Patch Creation",f"Input path not found:\n{input_path}"); return
-        cfg: Dict[str, Any] = {"sku_name":self._sku(),"role":self.active_role,"input_path":str(input_path),"output_root":str(output),"patch_width":448,"patch_height":448,"stride_x":448,"stride_y":448,"cover_edges":True,"resize_width":4036,"resize_height":17920,"clear_output":True}
-        if self.active_role == "sidewall2":
-            template = Path(self.template_edit.text()); recipe = Path(self.recipe_edit.text())
-            if not template.is_file(): QMessageBox.warning(self,"Patch Creation",f"Sidewall 2 R template not found:\n{template}"); return
-            if not recipe.is_file(): QMessageBox.warning(self,"Patch Creation",f"Sidewall 2 fast R recipe not found:\n{recipe}"); return
-            cfg.update({"r_template_path":str(template),"r_recipe_path":str(recipe),"fallback_to_tiled":True})
+        sidewall_settings = True
+        cfg: Dict[str, Any] = {
+            "sku_name": self._sku(),
+            "role": self.active_role,
+            "input_path": str(input_path),
+            "output_root": str(output),
+            "patch_width": self.patch_width_spin.value() if sidewall_settings else 448,
+            "patch_height": self.patch_height_spin.value() if sidewall_settings else 448,
+            "stride_x": self.stride_x_spin.value() if sidewall_settings else 448,
+            "stride_y": self.stride_y_spin.value() if sidewall_settings else 448,
+            "cover_edges": self.cover_edges_check.isChecked() if sidewall_settings else True,
+            "resize_width": self.resize_width_spin.value() if sidewall_settings else 4036,
+            "resize_height": self.resize_height_spin.value() if sidewall_settings else 17920,
+            "clear_output": self.clear_output_check.isChecked() if sidewall_settings else True,
+            "save_actual_crop": self.active_role in {"sidewall1", "sidewall2"},
+            "save_resized_image": self.active_role in {"sidewall1", "sidewall2"},
+        }
+        if cfg["stride_x"] <= 0 or cfg["stride_y"] <= 0:
+            QMessageBox.warning(self, "Patch Creation", "Stride values must be greater than zero.")
+            return
+        if cfg["patch_width"] > cfg["resize_width"] or cfg["patch_height"] > cfg["resize_height"]:
+            QMessageBox.warning(
+                self,
+                "Patch Creation",
+                "Patch width/height cannot be larger than the resized image dimensions.",
+            )
+            return
         self.log.clear(); self.progress.setRange(0,0); self.status.setText(f"Creating {self.ROLE_INFO[self.active_role][0]} patches...")
         self.rows[self.active_role].set_state("running", "Running")
         self._controls(False); self.worker = PatchCreationWorker(cfg,self)
@@ -250,14 +368,21 @@ class PatchCreationPage(QWidget):
 
     def _controls(self, enabled: bool):
         for row in self.rows.values(): row.setEnabled(enabled)
-        for w in (self.input_browse,self.output_browse,self.create_btn,self.next_btn): w.setEnabled(enabled)
+        for w in (
+            self.input_browse, self.output_browse, self.create_btn, self.next_btn,
+            self.patch_width_spin, self.patch_height_spin,
+            self.stride_x_spin, self.stride_y_spin,
+            self.resize_width_spin, self.resize_height_spin,
+            self.cover_edges_check, self.clear_output_check,
+        ):
+            w.setEnabled(enabled)
 
     def _status(self, text: str): self.log.appendPlainText(str(text)); self.status.setText(str(text))
 
     def _finished(self, result: dict):
         self.progress.setRange(0,100); self.progress.setValue(100); self.status.setText("Patch creation completed")
         self.rows[self.active_role].set_state("done", "Completed")
-        self.log.appendPlainText(f"\nOutput: {result.get('output_root')}\nPatches: {result.get('total_patch_count')}\nTime: {float(result.get('total_time_s',0)):.2f}s")
+        self.log.appendPlainText(f"\nOutput: {result.get('output_root')}\nActual crops: {result.get('actual_cropped_images_folder', '-')}\nResized images: {result.get('resized_images_folder', '-')}\nPatches: {result.get('total_patch_count')}\nTime: {float(result.get('total_time_s',0)):.2f}s")
         self._controls(True); self.patchSaved.emit(self.active_role,dict(result))
         if self.worker: self.worker.deleteLater(); self.worker=None
         QMessageBox.information(self,"Patch Creation",f"{self.ROLE_INFO[self.active_role][0]} patches created successfully.\n\nTotal patches: {result.get('total_patch_count')}\nOutput:\n{result.get('output_root')}")

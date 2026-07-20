@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import traceback
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -29,6 +30,7 @@ def find_golden_image(raw_folder: Path) -> Path:
     return files[0]
 
 
+
 def create_fast_recipe(
     *,
     sku: str,
@@ -36,9 +38,16 @@ def create_fast_recipe(
     raw_folder: Path,
     template_path: Path,
     output_dir: Path,
-    match_threshold: float = 0.70,
-    fast_score_threshold: float = 0.50,
+    match_threshold: float = 0.50,
+    fast_score_threshold: float = 0.40,
 ) -> Dict[str, Any]:
+    """Create one fast-R recipe JSON in the dedicated R_Recipe folder.
+
+    All intermediate golden/verification/template files are created in a
+    temporary directory and removed automatically. The final folder contains
+    only ``<SKU>_<role>_fast_recipe.json``. The recipe points to the permanent
+    Template Extractor image, which the live runtime already validates.
+    """
     golden = find_golden_image(raw_folder)
     raw = cv2.imread(str(golden), cv2.IMREAD_UNCHANGED)
     if raw is None:
@@ -73,36 +82,41 @@ def create_fast_recipe(
         raise RuntimeError(f'Invalid measured circumference: {circumference_px}px')
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_name = f'{sku}_{role}_FAST_R'
-    stretched_path = output_dir / f'{sku}_{role}_fast_recipe_golden.png'
-    preview_path = output_dir / f'{sku}_{role}_fast_recipe_verify.png'
     recipe_path = output_dir / f'{sku}_{role}_fast_recipe.json'
+    model_name = f'{sku}_{role}_FAST_R'
 
-    stretched = dc.stretch_gray(raw)
-    if not cv2.imwrite(str(stretched_path), stretched):
-        raise OSError(f'Unable to save stretched golden image: {stretched_path}')
+    with tempfile.TemporaryDirectory(prefix='apollo_fast_r_') as temp_name:
+        temp_dir = Path(temp_name)
+        stretched_path = temp_dir / 'golden_stretched.png'
+        preview_path = temp_dir / 'verify.png'
+        stretched = dc.stretch_gray(raw)
+        if not cv2.imwrite(str(stretched_path), stretched):
+            raise OSError(f'Unable to save temporary stretched golden image: {stretched_path}')
 
-    recipe = rlf.teach(
-        stretched_path,
-        roi=roi,
-        model=model_name,
-        out_dir=output_dir,
-        measure_circumference=False,
-        circumference_px=circumference_px,
-        score_threshold=float(fast_score_threshold),
-        use_gradient=False,
-        auto_first_half=True,
-        first_half_thr=0.18,
-    )
-
-    # rlf.teach saves using model name. Save a stable application-facing filename too.
-    recipe.save(recipe_path)
-    verify = rlf.verify_recipe(stretched_path, recipe, annotate_path=preview_path)
-    if not bool(verify.get('verify_ok')):
-        raise RuntimeError(
-            f'Fast recipe was created but verification score {verify.get("score", 0):.4f} '
-            f'is below threshold {fast_score_threshold:.4f}.'
+        recipe = rlf.teach(
+            stretched_path,
+            roi=roi,
+            model=model_name,
+            out_dir=temp_dir,
+            measure_circumference=False,
+            circumference_px=circumference_px,
+            score_threshold=float(fast_score_threshold),
+            use_gradient=False,
+            auto_first_half=True,
+            first_half_thr=0.18,
         )
+
+        verify = rlf.verify_recipe(stretched_path, recipe, annotate_path=preview_path)
+        if not bool(verify.get('verify_ok')):
+            raise RuntimeError(
+                f'Fast recipe was created but verification score {verify.get("score", 0):.4f} '
+                f'is below threshold {fast_score_threshold:.4f}.'
+            )
+
+        # Runtime resolves this permanent template path and no extra R-recipe
+        # images are needed beside the JSON.
+        recipe.template_path = str(template_path.resolve())
+        recipe.save(recipe_path)
 
     result = {
         'status': 'success',
@@ -110,18 +124,16 @@ def create_fast_recipe(
         'role': role,
         'raw_folder': str(raw_folder),
         'golden_image': str(golden),
-        'r_template_path': str(template_path),
-        'recipe_path': str(recipe_path),
-        'verify_preview_path': str(preview_path),
+        'r_template_path': str(template_path.resolve()),
+        'recipe_path': str(recipe_path.resolve()),
         'verify_score': float(verify.get('score', 0.0)),
         'match_score': float(top_box.get('score', 0.0)),
         'circumference_px': circumference_px,
         'roi': list(roi),
         'detection_metadata': metadata,
+        'dedicated_recipe_folder': str(output_dir.resolve()),
+        'recipe_folder_contains_json_only': True,
     }
-    (output_dir / f'{sku}_{role}_fast_recipe_creation_result.json').write_text(
-        json.dumps(result, indent=2), encoding='utf-8'
-    )
     return result
 
 

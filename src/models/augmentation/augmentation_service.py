@@ -145,95 +145,198 @@ def _apply(image: np.ndarray, key: str, rng: np.random.Generator, rotation: floa
     raise KeyError(key)
 
 
-def _augment_one(index: int, source: Path, output_dir: Path, role: str, selected: List[str], rotation: float, include_originals: bool) -> List[Dict[str, Any]]:
+
+def _augment_one(
+    index: int,
+    source: Path,
+    output_dir: Path,
+    role: str,
+    selected: List[str],
+    rotation: float,
+    include_originals: bool,
+) -> List[Dict[str, Any]]:
+    """Augment one already-created patch using short Windows-safe names."""
     image = _read_gray(source)
-    stem = _safe_name(source.stem, f'patch_{index:06d}')
+    role_code = {
+        "sidewall1": "sw1",
+        "sidewall2": "sw2",
+        "innerwall": "in",
+        "tread": "tr",
+        "bead": "bd",
+    }.get(str(role).lower(), _safe_name(role, "side")[:6])
+
+    item_id = f"{role_code}_{index + 1:06d}"
     rows: List[Dict[str, Any]] = []
+
     if include_originals:
-        out = output_dir / f'{role}_{stem}_u{index:06d}_org.png'; _write_png(out, image)
-        rows.append({'source_patch': str(source), 'output_path': str(out), 'output_type': 'original', 'augmentation_key': 'original', 'augmentation_label': 'Original patch', 'params': {}})
+        out = output_dir / f"{item_id}_org.png"
+        _write_png(out, image)
+        rows.append(
+            {
+                "source_patch": str(source),
+                "source_name": source.name,
+                "source_index": index + 1,
+                "output_path": str(out),
+                "output_type": "original",
+                "augmentation_key": "original",
+                "augmentation_label": "Original patch",
+                "params": {},
+            }
+        )
+
     rng = np.random.default_rng(12345 + index)
     for key in selected:
         definition = AUGMENTATION_BY_KEY[key]
         augmented, params = _apply(image, key, rng, rotation)
-        code = f'rot{int(round(rotation))}' if key == 'rotation' else definition['code']
-        out = output_dir / f'{role}_{stem}_u{index:06d}_{code}.png'; _write_png(out, augmented)
-        rows.append({'source_patch': str(source), 'output_path': str(out), 'output_type': 'augmented', 'augmentation_key': key, 'augmentation_label': definition['label'], 'params': params})
+        code = f"rot{int(round(rotation))}" if key == "rotation" else definition["code"]
+        out = output_dir / f"{item_id}_{code}.png"
+        _write_png(out, augmented)
+        rows.append(
+            {
+                "source_patch": str(source),
+                "source_name": source.name,
+                "source_index": index + 1,
+                "output_path": str(out),
+                "output_type": "augmented",
+                "augmentation_key": key,
+                "augmentation_label": definition["label"],
+                "params": params,
+            }
+        )
     return rows
 
 
+
 def run_augmentation(config: Dict[str, Any], status_callback=None) -> Dict[str, Any]:
-    role = str(config['role'])
-    input_path = Path(str(config['input_folder'])).expanduser().resolve()
-    output_root = Path(str(config['output_root'])).expanduser().resolve()
+    """Apply augmentations directly to patches created by Patch Creation.
+
+    Input:
+        media/patch_creation/<SKU>/<role>/patches_rtor1
+
+    Output:
+        media/augmentation/<SKU>/<role>/04_augmented_patches
+
+    No resize and no second patchification are performed.
+    """
+    role = str(config["role"]).strip().lower()
+    input_path = Path(str(config["input_folder"])).expanduser().resolve()
+    output_root = Path(str(config["output_root"])).expanduser().resolve()
+
     sources = _images(input_path)
     if not sources:
-        raise RuntimeError(f'No source images found in: {input_path}')
+        raise RuntimeError(f"No source patch images found in: {input_path}")
 
-    patch_w = int(config.get('patch_w', 300)); patch_h = int(config.get('patch_h', 300))
-    resize_w = int(config.get('resize_w', 4200)); resize_h = int(config.get('resize_h', 60000))
-    shift_a = int(config.get('shift_a', 50)); shift_b = int(config.get('shift_b', 30))
-    selected = [str(k) for k in config.get('selected_keys', []) if str(k) in AUGMENTATION_BY_KEY]
-    include_originals = bool(config.get('include_originals', True))
-    rotation = max(0.0, min(360.0, float(config.get('rotation_degrees', 0.0))))
-    workers = max(1, int(config.get('workers', min(8, os.cpu_count() or 1))))
+    selected = [
+        str(key)
+        for key in config.get("selected_keys", [])
+        if str(key) in AUGMENTATION_BY_KEY
+    ]
+    include_originals = bool(config.get("include_originals", True))
+    rotation = max(
+        0.0,
+        min(360.0, float(config.get("rotation_degrees", 0.0))),
+    )
+    workers = max(
+        1,
+        int(config.get("workers", min(8, os.cpu_count() or 1))),
+    )
 
-    if bool(config.get('clear_output', True)) and output_root.exists(): shutil.rmtree(output_root)
-    prepared_dir = output_root / '02c_resized_for_clean_patchify'
-    patches_root = output_root / '03_patches'
-    aug_dir = output_root / '04_augmented_patches'
-    for p in (prepared_dir, patches_root, aug_dir): p.mkdir(parents=True, exist_ok=True)
+    if not selected and not include_originals:
+        raise RuntimeError(
+            "Select at least one augmentation or enable Include originals."
+        )
 
-    start = perf_counter(); patch_rows: List[Dict[str, Any]] = []; patch_paths: List[Path] = []
-    passes = planner_passes(patch_w, patch_h, shift_a, shift_b)
-    for source_index, source in enumerate(sources, start=1):
-        if status_callback: status_callback(f'[{role}] Preparing source {source_index}/{len(sources)}: {source.name}')
-        gray = _read_gray(source)
-        resized = cv2.resize(gray, (resize_w, resize_h), interpolation=cv2.INTER_LINEAR)
-        source_code = _safe_name(source.stem, f'image_{source_index:04d}')
-        prepared = prepared_dir / f'{source_code}_prepared_{resize_w}x{resize_h}.png'; _write_png(prepared, resized)
-        for pass_index, pdef in enumerate(passes):
-            pass_dir = patches_root / source_code / pdef['folder']; pass_dir.mkdir(parents=True, exist_ok=True)
-            xs = _axis_starts(resize_w, patch_w, patch_w, int(pdef['ox']))
-            ys = _axis_starts(resize_h, patch_h, patch_h, int(pdef['oy']))
-            for r, y in enumerate(ys):
-                for c, x in enumerate(xs):
-                    patch = resized[y:y+patch_h, x:x+patch_w]
-                    patch_name = f'{source_code}_p{pass_index:02d}__r{r:03d}_c{c:03d}.png'
-                    patch_path = pass_dir / patch_name; _write_png(patch_path, patch); patch_paths.append(patch_path)
-                    patch_rows.append({'source_image': str(source), 'prepared_image': str(prepared), 'pass_folder': pdef['folder'], 'pass_label': pdef['label'], 'offset_x': pdef['ox'], 'offset_y': pdef['oy'], 'patch_path': str(patch_path), 'x': x, 'y': y, 'patch_w': patch_w, 'patch_h': patch_h})
+    if bool(config.get("clear_output", True)) and output_root.exists():
+        shutil.rmtree(output_root)
 
-    patch_manifest = patches_root / '_combined_patch_manifest.csv'
-    with patch_manifest.open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=list(patch_rows[0].keys())); writer.writeheader(); writer.writerows(patch_rows)
+    aug_dir = output_root / "04_augmented_patches"
+    aug_dir.mkdir(parents=True, exist_ok=True)
 
+    start = perf_counter()
     records: List[Dict[str, Any]] = []
-    total = len(patch_paths)
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_augment_one, i, p, aug_dir, role, selected, rotation, include_originals): p for i, p in enumerate(patch_paths)}
-        done = 0
-        for future in as_completed(futures):
-            records.extend(future.result()); done += 1
-            if status_callback and (done == 1 or done == total or done % max(1, total // 10) == 0): status_callback(f'[{role}] Augmented {done}/{total} patches')
+    total = len(sources)
 
-    manifest = output_root / 'augmentation_manifest.csv'
-    with manifest.open('w', newline='', encoding='utf-8') as f:
-        fields = ['source_patch', 'output_path', 'output_type', 'augmentation_key', 'augmentation_label', 'params']
-        writer = csv.DictWriter(f, fieldnames=fields); writer.writeheader()
-        for row in sorted(records, key=lambda x: x['output_path']):
-            data = dict(row); data['params'] = json.dumps(data['params'], sort_keys=True); writer.writerow(data)
+    if status_callback:
+        status_callback(
+            f"[{role}] Direct patch augmentation started: {total} input patches"
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _augment_one,
+                index,
+                source,
+                aug_dir,
+                role,
+                selected,
+                rotation,
+                include_originals,
+            ): source
+            for index, source in enumerate(sources)
+        }
+
+        completed = 0
+        for future in as_completed(futures):
+            records.extend(future.result())
+            completed += 1
+            if status_callback and (
+                completed == 1
+                or completed == total
+                or completed % max(1, total // 10) == 0
+            ):
+                status_callback(
+                    f"[{role}] Augmented {completed}/{total} input patches"
+                )
+
+    manifest = output_root / "augmentation_manifest.csv"
+    fields = [
+        "source_patch",
+        "source_name",
+        "source_index",
+        "output_path",
+        "output_type",
+        "augmentation_key",
+        "augmentation_label",
+        "params",
+    ]
+    with manifest.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        for row in sorted(records, key=lambda item: item["output_path"]):
+            data = dict(row)
+            data["params"] = json.dumps(data["params"], sort_keys=True)
+            writer.writerow(data)
 
     result = {
-        'status': 'success', 'sku_name': str(config.get('sku_name', '')), 'role': role,
-        'input_folder': str(input_path), 'output_root': str(output_root),
-        'prepared_images_folder': str(prepared_dir), 'patches_output_folder': str(patches_root),
-        'patch_manifest_csv': str(patch_manifest), 'augmented_patch_folder': str(aug_dir),
-        'manifest_csv': str(manifest), 'source_image_count': len(sources), 'source_patch_count': len(patch_paths),
-        'selected_augmentations': selected, 'include_originals': include_originals,
-        'output_image_count': len(records), 'duration_s': perf_counter() - start,
-        'planner': {'patch_w': patch_w, 'patch_h': patch_h, 'resize_w': resize_w, 'resize_h': resize_h, 'shift_a': shift_a, 'shift_b': shift_b, 'passes': passes},
+        "status": "success",
+        "mode": "existing_patches",
+        "sku_name": str(config.get("sku_name", "")),
+        "role": role,
+        "input_folder": str(input_path),
+        "output_root": str(output_root),
+        "prepared_images_folder": "",
+        "patches_output_folder": str(input_path),
+        "patch_manifest_csv": "",
+        "augmented_patch_folder": str(aug_dir),
+        "manifest_csv": str(manifest),
+        "source_image_count": 0,
+        "source_patch_count": len(sources),
+        "selected_augmentations": selected,
+        "include_originals": include_originals,
+        "output_image_count": len(records),
+        "duration_s": perf_counter() - start,
+        "planner": {
+            "mode": "existing_patches",
+            "resize_skipped": True,
+            "patchify_skipped": True,
+        },
     }
-    (output_root / 'augmentation_summary.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+
+    (output_root / "augmentation_summary.json").write_text(
+        json.dumps(result, indent=2),
+        encoding="utf-8",
+    )
     return result
 
 

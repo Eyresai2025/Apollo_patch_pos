@@ -394,45 +394,66 @@ class ArenaCameraManager:
     # Buffer conversion
     # ---------------------------------------------------------------------
     def _copy_buffer_to_numpy(self, buffer, serial: str):
+        """
+        Copy an Arena SDK image buffer into a real NumPy image.
+
+        Important fix for Mono16:
+        Arena buffer.data is commonly exposed as bytes / uint8 values even when
+        PixelFormat is Mono16. The old code sliced width*height bytes and cast
+        each byte to uint16, so high/low bytes were displayed as separate pixels.
+        That creates vertical noisy/striped preview images.
+
+        Correct handling:
+        - Mono16 must be decoded as 2 bytes per pixel: dtype <u2 / uint16.
+        - Mono8 must be decoded as 1 byte per pixel: dtype uint8.
+        """
         settings = self.current_settings_by_serial.get(str(serial), {})
-        pixel_format = settings.get("pixel_format", "Mono16")
+        pixel_format = str(settings.get("pixel_format", "Mono16"))
 
         width = int(buffer.width)
         height = int(buffer.height)
-        size = width * height
+        pixel_count = width * height
 
-        if pixel_format == "Mono16":
-            dtype = np.uint16
-            ctype = ctypes.c_uint16
-        else:
-            dtype = np.uint8
-            ctype = ctypes.c_ubyte
+        is_mono16 = pixel_format.lower() in ("mono16", "mono12", "mono12p")
+        dtype = np.uint16 if is_mono16 else np.uint8
+        ctype = ctypes.c_uint16 if is_mono16 else ctypes.c_ubyte
+        bytes_per_pixel = 2 if is_mono16 else 1
+        required_bytes = pixel_count * bytes_per_pixel
 
-        try:
-            arr = np.asarray(buffer.data)
-
-            if arr.size >= size:
-                arr = arr[:size].astype(dtype, copy=True)
-                return arr.reshape((height, width))
-
-        except Exception:
-            pass
-
+        # Path 1: Arena often exposes buffer.data as a byte-like object.
+        # For Mono16, bytes MUST be interpreted as little-endian uint16 pixels.
         try:
             raw = bytes(buffer.data)
-            arr = np.frombuffer(raw, dtype=dtype)
-
-            if arr.size >= size:
-                arr = arr[:size].copy()
+            if len(raw) >= required_bytes:
+                if is_mono16:
+                    arr = np.frombuffer(raw[:required_bytes], dtype="<u2").copy()
+                else:
+                    arr = np.frombuffer(raw[:required_bytes], dtype=np.uint8).copy()
                 return arr.reshape((height, width))
-
         except Exception:
             pass
 
+        # Path 2: Some Arena versions expose buffer.data as a typed NumPy-like
+        # sequence. Use it directly only when it already contains one element per
+        # pixel. If it contains bytes for Mono16, reinterpret the bytes properly.
+        try:
+            arr0 = np.asarray(buffer.data)
+            if arr0.size >= pixel_count:
+                if is_mono16 and arr0.dtype == np.uint8 and arr0.size >= required_bytes:
+                    arr = np.frombuffer(
+                        np.ascontiguousarray(arr0[:required_bytes]).tobytes(),
+                        dtype="<u2"
+                    ).copy()
+                else:
+                    arr = arr0[:pixel_count].astype(dtype, copy=True)
+                return arr.reshape((height, width))
+        except Exception:
+            pass
+
+        # Path 3: Last fallback through pdata pointer.
         try:
             ptr = ctypes.cast(buffer.pdata, ctypes.POINTER(ctype))
-            arr = np.ctypeslib.as_array(ptr, shape=(size,))
-            arr = arr.copy()
+            arr = np.ctypeslib.as_array(ptr, shape=(pixel_count,)).astype(dtype, copy=True)
             return arr.reshape((height, width))
 
         except Exception as e:

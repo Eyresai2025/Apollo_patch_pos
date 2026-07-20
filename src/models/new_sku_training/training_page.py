@@ -556,7 +556,7 @@ class NewSKUTrainingPage(QWidget):
         sku = self._current_sku_name()
         expected = (
             self.media_path
-            / "training"
+            / "R_Recipe"
             / sku
             / role
             / f"{sku}_{role}_fast_recipe.json"
@@ -613,6 +613,7 @@ class NewSKUTrainingPage(QWidget):
         return candidates[0].resolve()
 
     def _default_output_model(self, role: str) -> Path:
+        """Return the dedicated PatchCore training model path for one SKU role."""
         sku = self._current_sku_name()
         return (
             self.media_path
@@ -712,8 +713,23 @@ class NewSKUTrainingPage(QWidget):
         for role, state in self.states.items():
             if not bool(state.get("raw_train_folder_manual")):
                 state["raw_train_folder"] = str(self._default_patch_folder(role))
-            if not state.get("out_path"):
-                state["out_path"] = str(self._default_output_model(role))
+
+            expected_model = self._default_output_model(role)
+            current_output = Path(str(state.get("out_path") or ""))
+
+            # Earlier builds accidentally stored PatchCore models below
+            # media/R_Recipe. R_Recipe must contain only R-recipe artifacts.
+            # Automatically redirect that stale default to media/training.
+            stale_r_recipe_output = (
+                bool(str(current_output))
+                and "r_recipe" in {part.lower() for part in current_output.parts}
+                and current_output.name.endswith("_patchcore_model.pth")
+            )
+            if not state.get("out_path") or stale_r_recipe_output:
+                state["out_path"] = str(expected_model)
+                if stale_r_recipe_output:
+                    state["result"] = {}
+
             if restore_existing and not state.get("result"):
                 self._restore_existing_result(role, state)
 

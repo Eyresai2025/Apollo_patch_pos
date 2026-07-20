@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from src.COMMON.sku_resize_config import update_role_resize_config
+
 from typing import Callable, Optional
 
 import cv2
@@ -375,6 +377,46 @@ def calculate_offset_calibration(
                 + (f"\n{details}" if details else "")
             )
 
+        # Save the exact resized target crops used by downstream training and
+        # live inference. Values come directly from this role's UI settings.
+        resized_target_dir = output_json_path.parent / "resized_images"
+        resized_target_dir.mkdir(parents=True, exist_ok=True)
+        for item_index, item in enumerate(target_success, 1):
+            crop_path = Path(str(item.get("cropped_image") or ""))
+            crop_image = cv2.imread(str(crop_path), cv2.IMREAD_UNCHANGED)
+            if crop_image is None:
+                raise RuntimeError(f"Cannot reopen saved {display_name} crop: {crop_path}")
+            resized_image = cv2.resize(
+                crop_image,
+                (processing_settings["resize_width"], processing_settings["resize_height"]),
+            )
+            resized_path = resized_target_dir / (
+                f"{role}_{item_index:03d}_resized_"
+                f"{processing_settings['resize_width']}x{processing_settings['resize_height']}.png"
+            )
+            if not cv2.imwrite(
+                str(resized_path), resized_image, [cv2.IMWRITE_PNG_COMPRESSION, 0]
+            ):
+                raise OSError(f"Unable to save resized {display_name} image: {resized_path}")
+            item["resized_image"] = str(resized_path.resolve())
+            item["resized_width"] = processing_settings["resize_width"]
+            item["resized_height"] = processing_settings["resize_height"]
+
+        media_root = output_json_path.parent.parent.parent.parent
+        resize_config = update_role_resize_config(
+            media_root,
+            sku_name,
+            role,
+            resize_width=processing_settings["resize_width"],
+            resize_height=processing_settings["resize_height"],
+            patch_width=processing_settings["patch_width"],
+            patch_height=processing_settings["patch_height"],
+            stride_x=processing_settings["patch_stride_x"],
+            stride_y=processing_settings["patch_stride_y"],
+            cover_edges=processing_settings["cover_complete"],
+            source="offset_calibration_ui",
+        )
+
         _emit_status(status_callback, "Averaging calibration measurements...")
         _emit_progress(progress_callback, 75, "Calculating offset ratio")
 
@@ -447,6 +489,9 @@ def calculate_offset_calibration(
             "target_cropped_folder": str(target_cropped_dir.resolve()),
             "sidewall_cropped_image_count": len(sidewall_success),
             "target_cropped_image_count": len(target_success),
+            "resized_target_folder": str(resized_target_dir.resolve()),
+            "resized_target_image_count": len(target_success),
+            "sku_resize_configuration_path": str(resize_config.get("config_path", "")),
         }
 
         _emit_status(status_callback, "Saving calibration JSON...")
@@ -473,6 +518,9 @@ def calculate_offset_calibration(
             "target_cropped_folder": payload["target_cropped_folder"],
             "sidewall_cropped_image_count": payload["sidewall_cropped_image_count"],
             "target_cropped_image_count": payload["target_cropped_image_count"],
+            "resized_target_folder": payload["resized_target_folder"],
+            "resized_target_image_count": payload["resized_target_image_count"],
+            "sku_resize_configuration_path": payload["sku_resize_configuration_path"],
             "resize_width": processing_settings["resize_width"],
             "resize_height": processing_settings["resize_height"],
             "patch_width": processing_settings["patch_width"],

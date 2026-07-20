@@ -48,7 +48,7 @@ class RRecipeCreationPage(QWidget):
         sku = self._sku()
         raw = self.media_path / 'new_sku_images' / sku / role
         template = self.media_path / 'template_extractor' / sku / role / f'{sku}_{role}_template.png'
-        output = self.media_path / 'training' / sku / role / f'{sku}_{role}_fast_recipe.json'
+        output = self.media_path / 'R_Recipe' / sku / role / f'{sku}_{role}_fast_recipe.json'
         return raw, template, output
 
     def _make_button(self, text: str, variant: str = "secondary") -> QPushButton:

@@ -6,8 +6,8 @@ DEFAULT_PERCENTILE = 99.0
 
 # OpenCV resize order is (width, height).
 # Sidewall 1 and Sidewall 2 use the R-to-R crop and this fixed resize.
-RESIZED_R_WIDTH = 4036
-RESIZED_R_HEIGHT = 17920
+RESIZED_R_WIDTH = 4032
+RESIZED_R_HEIGHT = 29120
 
 PATCH_WIDTH = 448
 PATCH_HEIGHT = 448

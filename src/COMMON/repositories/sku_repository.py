@@ -176,3 +176,208 @@ class SKURepository:
             ).format(sql.Identifier(self.schema))
         )
         return [self._row_to_sku(row) or {} for row in rows]
+
+    def delete_sku_with_related_configuration(self, sku_name: str) -> Dict[str, Any]:
+        """Delete one SKU and its New-SKU configuration records.
+
+        This intentionally preserves production inspection history. Existing
+        inspection_cycles rows keep their data and PostgreSQL sets their sku_id
+        to NULL through the schema's ON DELETE SET NULL rule.
+
+        Deleted PostgreSQL records:
+        - active_recipe_state rows for the SKU
+        - all sku_recipes versions
+        - device_profiles (via ON DELETE CASCADE)
+        - new_sku_images metadata for the SKU
+        - ai_models and deployments for the SKU
+        - unreferenced file_assets used only by deleted New-SKU images/models
+        - the skus master row
+
+        Local media folders are not deleted.
+        """
+        sku_name = str(sku_name or "").strip()
+        if not sku_name:
+            raise ValueError("SKU name is required.")
+
+        counts: Dict[str, int] = {
+            "active_recipe_state": 0,
+            "sku_recipes": 0,
+            "device_profiles": 0,
+            "new_sku_images": 0,
+            "ai_models": 0,
+            "file_assets": 0,
+            "skus": 0,
+        }
+
+        def table_exists(cur, table_name: str) -> bool:
+            cur.execute(
+                """
+                SELECT to_regclass(%s) IS NOT NULL AS exists
+                """,
+                (f"{self.schema}.{table_name}",),
+            )
+            row = cur.fetchone()
+            return bool((row or {}).get("exists"))
+
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "SELECT id, sku_name FROM {}.skus WHERE LOWER(sku_name) = LOWER(%s) FOR UPDATE"
+                    ).format(sql.Identifier(self.schema)),
+                    (sku_name,),
+                )
+                sku_row = cur.fetchone()
+                if sku_row is None:
+                    raise ValueError(f"SKU not found in PostgreSQL: {sku_name}")
+
+                sku_id = sku_row["id"]
+                canonical_name = str(sku_row["sku_name"])
+
+                # Collect file assets before deleting rows that reference them.
+                asset_ids = set()
+
+                if table_exists(cur, "new_sku_images"):
+                    cur.execute(
+                        sql.SQL(
+                            """
+                            SELECT asset_id
+                            FROM {}.new_sku_images
+                            WHERE sku_id = %s OR LOWER(sku_name) = LOWER(%s)
+                            """
+                        ).format(sql.Identifier(self.schema)),
+                        (sku_id, canonical_name),
+                    )
+                    asset_ids.update(
+                        row["asset_id"]
+                        for row in cur.fetchall()
+                        if row.get("asset_id") is not None
+                    )
+
+                if table_exists(cur, "ai_models"):
+                    cur.execute(
+                        sql.SQL(
+                            """
+                            SELECT asset_id
+                            FROM {}.ai_models
+                            WHERE LOWER(COALESCE(sku_name, '')) = LOWER(%s)
+                            """
+                        ).format(sql.Identifier(self.schema)),
+                        (canonical_name,),
+                    )
+                    asset_ids.update(
+                        row["asset_id"]
+                        for row in cur.fetchall()
+                        if row.get("asset_id") is not None
+                    )
+
+                if table_exists(cur, "active_recipe_state"):
+                    cur.execute(
+                        sql.SQL(
+                            "DELETE FROM {}.active_recipe_state WHERE sku_id = %s"
+                        ).format(sql.Identifier(self.schema)),
+                        (sku_id,),
+                    )
+                    counts["active_recipe_state"] = int(cur.rowcount or 0)
+
+                if table_exists(cur, "new_sku_images"):
+                    cur.execute(
+                        sql.SQL(
+                            """
+                            DELETE FROM {}.new_sku_images
+                            WHERE sku_id = %s OR LOWER(sku_name) = LOWER(%s)
+                            """
+                        ).format(sql.Identifier(self.schema)),
+                        (sku_id, canonical_name),
+                    )
+                    counts["new_sku_images"] = int(cur.rowcount or 0)
+
+                if table_exists(cur, "ai_models"):
+                    cur.execute(
+                        sql.SQL(
+                            """
+                            DELETE FROM {}.ai_models
+                            WHERE LOWER(COALESCE(sku_name, '')) = LOWER(%s)
+                            """
+                        ).format(sql.Identifier(self.schema)),
+                        (canonical_name,),
+                    )
+                    counts["ai_models"] = int(cur.rowcount or 0)
+
+                if table_exists(cur, "sku_recipes"):
+                    cur.execute(
+                        sql.SQL(
+                            "DELETE FROM {}.sku_recipes WHERE sku_id = %s"
+                        ).format(sql.Identifier(self.schema)),
+                        (sku_id,),
+                    )
+                    counts["sku_recipes"] = int(cur.rowcount or 0)
+
+                if table_exists(cur, "device_profiles"):
+                    cur.execute(
+                        sql.SQL(
+                            "SELECT COUNT(*) AS count FROM {}.device_profiles WHERE sku_id = %s"
+                        ).format(sql.Identifier(self.schema)),
+                        (sku_id,),
+                    )
+                    counts["device_profiles"] = int((cur.fetchone() or {}).get("count") or 0)
+
+                cur.execute(
+                    sql.SQL("DELETE FROM {}.skus WHERE id = %s").format(
+                        sql.Identifier(self.schema)
+                    ),
+                    (sku_id,),
+                )
+                counts["skus"] = int(cur.rowcount or 0)
+
+                # Remove only assets that are no longer referenced by any
+                # remaining image/model row. Inspection image assets are preserved.
+                if asset_ids and table_exists(cur, "file_assets"):
+                    for asset_id in asset_ids:
+                        referenced = False
+
+                        if table_exists(cur, "inspection_images"):
+                            cur.execute(
+                                sql.SQL(
+                                    "SELECT 1 FROM {}.inspection_images WHERE asset_id = %s LIMIT 1"
+                                ).format(sql.Identifier(self.schema)),
+                                (asset_id,),
+                            )
+                            referenced = cur.fetchone() is not None
+
+                        if not referenced and table_exists(cur, "new_sku_images"):
+                            cur.execute(
+                                sql.SQL(
+                                    "SELECT 1 FROM {}.new_sku_images WHERE asset_id = %s LIMIT 1"
+                                ).format(sql.Identifier(self.schema)),
+                                (asset_id,),
+                            )
+                            referenced = cur.fetchone() is not None
+
+                        if not referenced and table_exists(cur, "ai_models"):
+                            cur.execute(
+                                sql.SQL(
+                                    "SELECT 1 FROM {}.ai_models WHERE asset_id = %s LIMIT 1"
+                                ).format(sql.Identifier(self.schema)),
+                                (asset_id,),
+                            )
+                            referenced = cur.fetchone() is not None
+
+                        if not referenced:
+                            cur.execute(
+                                sql.SQL(
+                                    "DELETE FROM {}.file_assets WHERE id = %s"
+                                ).format(sql.Identifier(self.schema)),
+                                (asset_id,),
+                            )
+                            counts["file_assets"] += int(cur.rowcount or 0)
+
+        return {
+            "status": "deleted",
+            "sku_name": canonical_name,
+            "sku_id": str(sku_id),
+            "deleted_counts": counts,
+            "inspection_history_preserved": True,
+            "local_media_deleted": False,
+        }
+

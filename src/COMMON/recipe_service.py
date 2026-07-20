@@ -694,6 +694,16 @@ class RecipeService:
         records.sort(key=lambda item: str(item.get("sku_name", "")).lower())
         return records
 
+
+
+    def delete_sku_from_postgresql(self, sku_name: str) -> Dict[str, Any]:
+        """Delete one selected SKU and its related New-SKU configuration rows.
+
+        Recipe versions are deleted together with the SKU. Production inspection
+        history and local media folders are intentionally retained.
+        """
+        return self.sku_repository.delete_sku_with_related_configuration(sku_name)
+
     def mark_test_active(self, recipe_doc: Dict[str, Any]) -> Dict[str, Any]:
         """Store engineering-only active recipe state in PostgreSQL."""
         return self.recipe_repository.upsert_active_state(

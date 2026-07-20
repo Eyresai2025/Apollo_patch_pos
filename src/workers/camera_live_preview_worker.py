@@ -85,43 +85,92 @@ class CameraLivePreviewWorker(QThread):
             self.error_signal.emit(str(e))
 
     def numpy_to_qimage(self, frame):
-        # 1. Handle 16-bit to 8-bit conversion with smart contrast
-        if frame.dtype == np.uint16:
-            # Use 1st percentile as black and 99th percentile as white
-            # This ignores dead pixels or extreme reflections that ruin contrast
-            p_low = np.percentile(frame, 1)
-            p_high = np.percentile(frame, 99)
-            
-            # Avoid division by zero if the image is flat
-            if p_high <= p_low:
-                p_low = frame.min()
-                p_high = frame.max()
-            
-            # Normalize to 0-255 range
-            display = np.clip((frame - p_low) * (255.0 / (p_high - p_low)), 0, 255).astype(np.uint8)
+        """
+        Convert Arena NumPy frame to QImage for live display.
+
+        This is only for GUI preview. It does not change the original frame used
+        for capture/saving. The conversion behaves closer to Arena display:
+        - Mono16 is auto-windowed to 8-bit for visibility.
+        - Large line-scan frames are downsampled before QImage creation so the UI
+          stays responsive.
+        """
+        if frame is None or frame.size == 0:
+            raise RuntimeError("Empty camera frame received")
+
+        if frame.ndim == 3:
+            # Most Apollo Lucid cameras are mono. This branch is only a safe
+            # fallback if a color buffer is returned later.
+            if frame.shape[2] == 3:
+                display = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            else:
+                display = frame[:, :, 0]
         else:
-            # 2. Handle 8-bit images directly
-            display = frame.astype(np.uint8)
-        
-        # 3. Get dimensions for resizing
-        h, w = display.shape
-        
-        # 4. Resize for performance if the image is too large
-        max_w = 1200
-        if w > max_w:
-            scale = max_w / float(w)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
+            display = frame
+
+        display = np.ascontiguousarray(display)
+
+        # Downsample for preview performance only. Keep original capture untouched.
+        h, w = display.shape[:2]
+        max_w = 1600
+        max_h = 1200
+        if w > max_w or h > max_h:
+            scale = min(max_w / float(w), max_h / float(h))
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
             display = cv2.resize(display, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            h, w = display.shape
-        
-        # 5. Convert to QImage format
-        qimg = QImage(
-            display.data,
-            w,
-            h,
-            w,
-            QImage.Format_Grayscale8
-        )
-        
+            h, w = display.shape[:2]
+
+        if display.dtype == np.uint16:
+            # Stable Mono16 preview conversion.
+            # Lucid line-scan Mono16 commonly carries 12-bit useful data
+            # inside a uint16 container. Per-frame percentile stretching makes
+            # sensor noise/byte-patterns look much worse, so use a fixed display
+            # range instead. This affects preview only; saved capture is untouched.
+            max_v = int(display.max()) if display.size else 0
+
+            if max_v <= 4095:
+                # 12-bit data stored in 16-bit container: 0..4095 -> 0..255
+                display8 = np.clip(display.astype(np.float32) * (255.0 / 4095.0), 0, 255).astype(np.uint8)
+            elif max_v <= 16383:
+                # 14-bit range
+                display8 = np.clip(display.astype(np.float32) * (255.0 / 16383.0), 0, 255).astype(np.uint8)
+            else:
+                # Full 16-bit range
+                display8 = (display >> 8).astype(np.uint8)
+
+        elif display.dtype == np.uint8:
+            display8 = display
+        else:
+            display32 = display.astype(np.float32)
+            min_v = float(np.min(display32))
+            max_v = float(np.max(display32))
+            if max_v <= min_v:
+                display8 = np.zeros((h, w), dtype=np.uint8)
+            else:
+                display8 = np.clip(
+                    (display32 - min_v) * (255.0 / (max_v - min_v)),
+                    0,
+                    255
+                ).astype(np.uint8)
+
+        display8 = np.ascontiguousarray(display8)
+        h, w = display8.shape[:2]
+
+        if display8.ndim == 2:
+            qimg = QImage(
+                display8.data,
+                w,
+                h,
+                w,
+                QImage.Format_Grayscale8
+            )
+        else:
+            qimg = QImage(
+                display8.data,
+                w,
+                h,
+                3 * w,
+                QImage.Format_RGB888
+            )
+
         return qimg.copy()

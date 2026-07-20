@@ -21,12 +21,13 @@ STEP_INDEX = {
     "image_processing": 3,
     "r_recipe": 4,
     "offset": 5,
-    "patch_creation": 6,
-    "augmentation": 7,
-    "training": 8,
-    "feature_threshold": 9,
-    "production_validation": 10,
-    "save_recipe": 11,
+    "cropping": 6,
+    "patch_creation": 7,
+    "augmentation": 8,
+    "training": 9,
+    "feature_threshold": 10,
+    "production_validation": 11,
+    "save_recipe": 12,
 }
 
 
@@ -174,7 +175,7 @@ class NewSKUProductionValidationService:
     def _validate_r_recipes(self, sku: str) -> List[Dict[str, Any]]:
         checks = []
         for role in ("sidewall1", "sidewall2"):
-            path = self.media_path / "training" / sku / role / f"{sku}_{role}_fast_recipe.json"
+            path = self.media_path / "R_Recipe" / sku / role / f"{sku}_{role}_fast_recipe.json"
             if not path.exists():
                 checks.append(self._check("r_recipe", role, "missing", "Fast R recipe JSON is missing", step_key="r_recipe"))
                 continue
@@ -200,6 +201,21 @@ class NewSKUProductionValidationService:
             status = "valid" if payload is not None else "invalid"
             detail = "Calibration JSON is readable" if status == "valid" else f"Invalid calibration JSON: {error}"
             checks.append(self._check("offset", role, status, detail, paths=[path], expected=1, found=1, step_key="offset", metadata=payload or {}))
+        return checks
+
+    def _validate_cropping(self, sku: str) -> List[Dict[str, Any]]:
+        checks: List[Dict[str, Any]] = []
+        for role in ROLES:
+            root = self.media_path / "cropping" / sku / role
+            summary = root / f"{role}_crop_resize_summary.json"
+            cropped = self._images(root / "cropped_images", recursive=True)
+            if not summary.is_file():
+                checks.append(self._check("cropping", role, "missing", "Cropping summary is missing", step_key="cropping"))
+                continue
+            payload, error = self._read_json(summary)
+            status = "valid" if cropped and not error and int((payload or {}).get("failed_count", 0)) == 0 else "invalid"
+            detail = "Cropped image output is available" if status == "valid" else (error or "Cropping output is incomplete")
+            checks.append(self._check("cropping", role, status, detail, paths=[summary, *cropped[:3]], expected=1, found=len(cropped), step_key="cropping", metadata=payload or {}))
         return checks
 
     def _validate_patch_creation(self, sku: str) -> List[Dict[str, Any]]:
@@ -319,6 +335,7 @@ class NewSKUProductionValidationService:
         checks.extend(self._validate_templates(sku))
         checks.extend(self._validate_r_recipes(sku))
         checks.extend(self._validate_offsets(sku))
+        checks.extend(self._validate_cropping(sku))
         checks.extend(self._validate_patch_creation(sku))
         checks.extend(self._validate_augmentation(sku))
         checks.extend(self._validate_training(sku))

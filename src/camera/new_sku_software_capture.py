@@ -108,7 +108,15 @@ def _get_connected_manager(multi_camera_manager=None):
         return multi_camera_manager, False
 
     manager = HT.MultiCameraManager()
-    manager.connect_all(fail_fast=False)
+    if not manager.connect_all(fail_fast=False):
+        try:
+            manager.close_all()
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Not all configured Lucid cameras connected. Camera resources were "
+            "released; correct the connection and start capture again."
+        )
     return manager, True
 
 
@@ -252,7 +260,11 @@ def capture_new_sku_images(
         logger("[NEW SKU CAPTURE] Starting all camera streams once in PLC_SOFTWARE mode...")
         logger(f"[NEW SKU CAPTURE] Main PLC trigger : {main_tag}")
         logger(f"[NEW SKU CAPTURE] Bead PLC trigger : {bead_tag}")
-        manager.start_all_streams()
+        if not manager.start_all_streams():
+            raise RuntimeError(
+                "Not all configured camera streams started. Partial resources were "
+                "released; correct the connection and start capture again."
+            )
         streams_started_here = True
         logger("[NEW SKU CAPTURE] Cameras armed and ready for PLC trigger set 1/2")
 
@@ -263,11 +275,11 @@ def capture_new_sku_images(
                 f"{shot_idx}/{CAPTURE_IMAGES_PER_SIDE}"
             )
             logger(
-                f"[NEW SKU CAPTURE] MAIN {main_tag} -> "
-                "Sidewall1 + Sidewall2 + Innerwall + Tread"
+                f"[NEW SKU CAPTURE] BEAD {bead_tag} -> "
+                "Sidewall1 + Sidewall2 + Tread + Bead"
             )
             logger(
-                f"[NEW SKU CAPTURE] BEAD {bead_tag} -> Bead"
+                f"[NEW SKU CAPTURE] MAIN {main_tag} -> Innerwall"
             )
 
             # HARDWARE_TRIGGER.capture_all() starts two trigger-wait workers:

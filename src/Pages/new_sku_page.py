@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (  # type: ignore
     QPushButton, QMessageBox, QSizePolicy, QApplication,
     QGridLayout, QScrollArea, QDialog, QStackedWidget,
     QFormLayout, QLineEdit, QSpinBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QProgressBar
+    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QProgressBar, QInputDialog
 )
 
 from src.COMMON.common import load_env
@@ -30,6 +30,7 @@ from src.models.template_extracter import TemplateExtractorPage
 from src.models.new_sku_training.training_page import NewSKUTrainingPage
 from src.models.new_sku_training.r_recipe_page import RRecipeCreationPage
 from src.models.new_sku_offset.offset_page import OffsetCalculationPage
+from src.models.cropping.cropping_page import CroppingPage
 from src.models.patch_creation.patch_creation_page import PatchCreationPage
 from src.models.augmentation.augmentation_page import AugmentationPage
 from src.models.feature_thresh.threshold_page import FeatureThresholdPage
@@ -49,12 +50,13 @@ TAB_CAPTURE = 2
 TAB_IMAGE_PROCESSING = 3
 TAB_R_RECIPE_CREATION = 4
 TAB_OFFSET_CALCULATION = 5
-TAB_PATCH_CREATION = 6
-TAB_AUGMENTATION = 7
-TAB_TRAINING = 8
-TAB_FEATURE_THRESHOLD = 9
-TAB_PRODUCTION_VALIDATION = 10
-TAB_SAVE_RECIPE = 11
+TAB_CROPPING = 6
+TAB_PATCH_CREATION = 7
+TAB_AUGMENTATION = 8
+TAB_TRAINING = 9
+TAB_FEATURE_THRESHOLD = 10
+TAB_PRODUCTION_VALIDATION = 11
+TAB_SAVE_RECIPE = 12
 
 # Backward-compatible alias used by older helper names.
 TAB_TEMPLATE_EXTRACTOR = TAB_IMAGE_PROCESSING
@@ -66,6 +68,7 @@ WORKFLOW_STEPS = [
     ("image_processing", "Image Processing"),
     ("r_recipe", "R Recipe"),
     ("offset", "Offset"),
+    ("cropping", "Cropping"),
     ("patch_creation", "Patch Creation"),
     ("augmentation", "Augmentation"),
     ("training", "Training"),
@@ -348,14 +351,22 @@ class FlexibleStackedWidget(QStackedWidget):
 
 
 class ExistingSKUDialog(QDialog):
-    """Compact selector for loading the newest saved version of an SKU."""
+    """Compact selector for loading or deleting an existing PostgreSQL SKU."""
 
-    def __init__(self, recipes: List[Dict[str, Any]], parent=None):
+    skuDeleted = pyqtSignal(dict)
+
+    def __init__(
+        self,
+        recipes: List[Dict[str, Any]],
+        recipe_service: RecipeService,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Load Existing SKU")
         self.setModal(True)
         self.setMinimumWidth(660)
         self._recipes = [dict(item or {}) for item in recipes]
+        self.recipe_service = recipe_service
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
@@ -368,8 +379,9 @@ class ExistingSKUDialog(QDialog):
         root.addWidget(title)
 
         subtitle = QLabel(
-            "Select an already saved SKU. Its latest recipe version, axis targets, "
-            "templates, offsets, trained models and thresholds will be restored."
+            "Select an already saved SKU to load it. Delete Selected SKU permanently "
+            "removes its PostgreSQL setup, all recipe versions and related New-SKU "
+            "configuration records. Production inspection history and local files are retained."
         )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet(
@@ -417,9 +429,10 @@ class ExistingSKUDialog(QDialog):
         button_row = QHBoxLayout()
         button_row.addStretch(1)
 
+        delete_button = QPushButton("Delete Selected SKU")
         cancel_button = QPushButton("Cancel")
         load_button = QPushButton("Load SKU")
-        for button in (cancel_button, load_button):
+        for button in (delete_button, cancel_button, load_button):
             button.setCursor(Qt.PointingHandCursor)
             button.setFixedHeight(38)
             button.setMinimumWidth(120)
@@ -434,8 +447,17 @@ class ExistingSKUDialog(QDialog):
             "border-radius:19px; font:700 10pt 'Segoe UI'; } "
             "QPushButton:hover { background:#6b2aa3; }"
         )
+        delete_button.setStyleSheet(
+            "QPushButton { background:#ffffff; color:#c62828; "
+            "border:1px solid #ef9a9a; border-radius:19px; "
+            "font:700 10pt 'Segoe UI'; padding:0 16px; } "
+            "QPushButton:hover { background:#fff2f2; border-color:#e57373; }"
+        )
+        delete_button.clicked.connect(self._delete_selected_sku)
         cancel_button.clicked.connect(self.reject)
         load_button.clicked.connect(self.accept)
+        button_row.addWidget(delete_button)
+        button_row.addStretch(1)
         button_row.addWidget(cancel_button)
         button_row.addWidget(load_button)
         root.addLayout(button_row)
@@ -461,6 +483,95 @@ class ExistingSKUDialog(QDialog):
             f"Size: {tyre_size}\n"
             f"Last Updated: {updated_at}"
         )
+
+
+    def _delete_selected_sku(self) -> None:
+        recipe = self.selected_recipe()
+        sku_name = str(recipe.get("sku_name") or "").strip()
+        if not sku_name:
+            QMessageBox.warning(self, "Delete SKU", "No SKU is selected.")
+            return
+
+        source = str(recipe.get("record_source") or "RECIPE")
+        version_text = (
+            "Setup only"
+            if source == "SKU_SETUP"
+            else f"all recipe versions up to Version {recipe.get('version', '-')}"
+        )
+
+        first = QMessageBox.warning(
+            self,
+            "Delete SKU from PostgreSQL",
+            f"This will permanently delete PostgreSQL configuration for:\n\n"
+            f"SKU: {sku_name}\n"
+            f"Recipe Number: "
+            f"{recipe.get('recipe_number') or recipe.get('plc_recipe_number') or '-'}\n"
+            f"Recipes: {version_text}\n\n"
+            "It also deletes related New-SKU image metadata, device profiles "
+            "and registered AI model rows.\n\n"
+            "Production inspection history and local media folders are NOT deleted.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if first != QMessageBox.Yes:
+            return
+
+        typed, ok = QInputDialog.getText(
+            self,
+            "Confirm SKU Deletion",
+            f"Type the exact SKU name to confirm deletion:\n{sku_name}",
+        )
+        if not ok:
+            return
+
+        if str(typed).strip() != sku_name:
+            QMessageBox.warning(
+                self,
+                "Delete SKU",
+                "The entered SKU name does not match. Nothing was deleted.",
+            )
+            return
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            result = self.recipe_service.delete_sku_from_postgresql(sku_name)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Delete SKU",
+                f"Unable to delete {sku_name} from PostgreSQL:\n\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        counts = dict(result.get("deleted_counts") or {})
+        QMessageBox.information(
+            self,
+            "SKU Deleted",
+            f"{sku_name} was deleted from PostgreSQL.\n\n"
+            f"Recipe versions: {counts.get('sku_recipes', 0)}\n"
+            f"New-SKU images: {counts.get('new_sku_images', 0)}\n"
+            f"Device profiles: {counts.get('device_profiles', 0)}\n"
+            f"AI models: {counts.get('ai_models', 0)}\n"
+            f"File assets: {counts.get('file_assets', 0)}\n\n"
+            "Inspection history was preserved. Local media files were not deleted.",
+        )
+
+        self.skuDeleted.emit(dict(result))
+
+        current_index = self.selector.currentIndex()
+        if current_index >= 0:
+            self.selector.removeItem(current_index)
+
+        if self.selector.count() == 0:
+            self.reject()
+        else:
+            self.selector.setCurrentIndex(
+                min(current_index, self.selector.count() - 1)
+            )
+            self._refresh_details()
 
     def selected_recipe(self) -> Dict[str, Any]:
         data = self.selector.currentData()
@@ -733,6 +844,7 @@ class NewSKUPage(QWidget):
         self.template_extractor_page: Optional[TemplateExtractorPage] = None
         self.r_recipe_page: Optional[RRecipeCreationPage] = None
         self.offset_page: Optional[OffsetCalculationPage] = None
+        self.cropping_page: Optional[CroppingPage] = None
         self.patch_creation_page: Optional[PatchCreationPage] = None
         self.augmentation_page: Optional[AugmentationPage] = None
         self.training_page: Optional[NewSKUTrainingPage] = None
@@ -1125,6 +1237,7 @@ class NewSKUPage(QWidget):
                 self.template_extractor_page,
                 self.r_recipe_page,
                 self.offset_page,
+                self.cropping_page,
                 self.patch_creation_page,
                 self.augmentation_page,
                 self.training_page,
@@ -1151,6 +1264,9 @@ class NewSKUPage(QWidget):
             self.template_extractor_page,
             self.r_recipe_page,
             self.offset_page,
+            self.cropping_page,
+            self.patch_creation_page,
+            self.augmentation_page,
             self.training_page,
             self.feature_threshold_page,
             self.production_validation_page,
@@ -1333,7 +1449,7 @@ class NewSKUPage(QWidget):
 
         # 5. Fast R recipes
         recipe_count = sum(
-            (media / "training" / sku / role / f"{sku}_{role}_fast_recipe.json").exists()
+            (media / "R_Recipe" / sku / role / f"{sku}_{role}_fast_recipe.json").exists()
             for role in ("sidewall1", "sidewall2")
         )
         if recipe_count == 2:
@@ -1352,7 +1468,39 @@ class NewSKUPage(QWidget):
         elif offset_roles:
             statuses["offset"] = "partial"
 
-        # 7. Patch creation
+        # 7. Cropping
+        cropping_roles = 0
+        cropping_partial = 0
+        for role in ("sidewall1", "sidewall2", "tread", "innerwall", "bead"):
+            root = media / "cropping" / sku / role
+            summary = root / f"{role}_crop_resize_summary.json"
+            cropped_images = root / "cropped_images"
+            resized_images = root / "resized_images"
+
+            has_summary = summary.is_file()
+            has_crop = self._has_images(cropped_images)
+            has_resized = self._has_images(resized_images)
+
+            if has_summary and has_crop and has_resized:
+                try:
+                    payload = json.loads(summary.read_text(encoding="utf-8"))
+                except Exception:
+                    payload = {}
+                successful = int(payload.get("successful_count", 0) or 0)
+                failed = int(payload.get("failed_count", 0) or 0)
+                if successful > 0 and failed == 0:
+                    cropping_roles += 1
+                else:
+                    cropping_partial += 1
+            elif has_summary or has_crop or has_resized:
+                cropping_partial += 1
+
+        if cropping_roles == 5:
+            statuses["cropping"] = "completed"
+        elif cropping_roles > 0 or cropping_partial > 0:
+            statuses["cropping"] = "partial"
+
+        # 8. Patch creation
         patch_roles = 0
         for role in ("sidewall1", "sidewall2", "tread", "innerwall", "bead"):
             root = media / "patch_creation" / sku / role
@@ -1365,7 +1513,7 @@ class NewSKUPage(QWidget):
         elif patch_roles:
             statuses["patch_creation"] = "partial"
 
-        # 8. Augmentation
+        # 9. Augmentation
         aug_roles = 0
         for role in ("sidewall1", "sidewall2", "tread", "innerwall", "bead"):
             root = media / "augmentation" / sku / role
@@ -1647,6 +1795,8 @@ class NewSKUPage(QWidget):
             self.r_recipe_page.refresh_context()
         elif idx == TAB_OFFSET_CALCULATION and self.offset_page is not None:
             self.offset_page.refresh_context()
+        elif idx == TAB_CROPPING and self.cropping_page is not None:
+            self.cropping_page.refresh_context()
         elif idx == TAB_PATCH_CREATION and self.patch_creation_page is not None:
             self.patch_creation_page.refresh_context()
         elif idx == TAB_AUGMENTATION and self.augmentation_page is not None:
@@ -1676,7 +1826,7 @@ class NewSKUPage(QWidget):
         summary_row.setSpacing(12)
         self.workflow_summary_sku = QLabel("SKU  •  unknown_sku")
         self.workflow_summary_sku.setObjectName("WorkflowSku")
-        self.workflow_summary_count = QLabel("0 of 12 steps completed  •  0%")
+        self.workflow_summary_count = QLabel("0 of 13 steps completed  •  0%")
         self.workflow_summary_count.setObjectName("WorkflowMeta")
         self.workflow_summary_status = QLabel("Current step  •  SKU Setup")
         self.workflow_summary_status.setObjectName("WorkflowMeta")
@@ -1772,6 +1922,18 @@ class NewSKUPage(QWidget):
         )
         self.offset_page.offsetSaved.connect(self._on_offset_saved)
         self.offset_page.continueRequested.connect(
+            lambda: self._switch_tab(TAB_CROPPING)
+        )
+
+        self.cropping_page = CroppingPage(
+            media_path=self.media_path,
+            sku_name_provider=self._get_sku_name,
+            parent=self,
+        )
+        self.cropping_page.cropSaved.connect(
+            lambda _role, _payload: self._refresh_workflow_header()
+        )
+        self.cropping_page.continueRequested.connect(
             lambda: self._switch_tab(TAB_PATCH_CREATION)
         )
 
@@ -1856,6 +2018,7 @@ class NewSKUPage(QWidget):
         self.stack.addWidget(self.template_extractor_page)
         self.stack.addWidget(self.r_recipe_page)
         self.stack.addWidget(self.offset_page)
+        self.stack.addWidget(self.cropping_page)
         self.stack.addWidget(self.patch_creation_page)
         self.stack.addWidget(self.augmentation_page)
         self.stack.addWidget(self.training_page)
@@ -2020,7 +2183,8 @@ class NewSKUPage(QWidget):
             )
             return
 
-        dialog = ExistingSKUDialog(recipes, self)
+        dialog = ExistingSKUDialog(recipes, self.recipe_service, self)
+        dialog.skuDeleted.connect(self._on_existing_sku_deleted)
         if dialog.exec_() != QDialog.Accepted:
             return
 
@@ -2035,6 +2199,37 @@ class NewSKUPage(QWidget):
                 self,
                 "Load Existing SKU",
                 f"The selected SKU could not be loaded:\n{exc}",
+            )
+
+    def _on_existing_sku_deleted(self, result: Dict[str, Any]) -> None:
+        """Clear the form when the currently displayed SKU was deleted."""
+        deleted_sku = str((result or {}).get("sku_name") or "").strip()
+        current_widget = self.wizard_widgets.get("sku_name")
+        current_sku = (current_widget.text() if current_widget is not None else "").strip()
+        if not deleted_sku or deleted_sku.lower() != current_sku.lower():
+            return
+
+        self.sku_meta = {}
+        self.recipe_doc = {}
+        for key, widget in self.wizard_widgets.items():
+            if isinstance(widget, QLineEdit):
+                widget.clear()
+            elif isinstance(widget, QSpinBox):
+                if key == "recipe_number":
+                    widget.setValue(max(widget.minimum(), 1))
+                elif key == "inspection_zones":
+                    widget.setValue(5)
+                elif key == "image_count_per_zone":
+                    widget.setValue(CAPTURE_IMAGES_PER_SIDE)
+                elif key == "train_good_count":
+                    widget.setValue(0)
+                else:
+                    widget.setValue(widget.minimum())
+
+        self._refresh_workflow_header()
+        if self.status_lbl is not None:
+            self.status_lbl.setText(
+                f"{deleted_sku} was deleted from PostgreSQL. Local media files were retained."
             )
 
     def _restore_existing_sku_recipe(self, recipe: Dict[str, Any]) -> None:
@@ -3309,6 +3504,23 @@ class NewSKUPage(QWidget):
         root = os.path.join(self.media_path, "laser_profiles")
         return {"profile_root": root, "exists": os.path.isdir(root)}
 
+    def _collect_cropping_assets(self) -> dict:
+        sku = self._get_sku_name()
+        root = Path(self.media_path) / "cropping" / sku
+        roles = {}
+        for role in ("sidewall1", "sidewall2", "tread", "innerwall", "bead"):
+            role_root = root / role
+            summary = role_root / f"{role}_crop_resize_summary.json"
+            resized = sorted(role_root.rglob("*CROP_RESIZED*.png")) if role_root.exists() else []
+            roles[role] = {
+                "summary_json_path": str(summary) if summary.is_file() else "",
+                "output_root": str(role_root),
+                "resized_images": [str(path) for path in resized],
+                "resized_image_count": len(resized),
+            }
+        profile = root / f"{sku}_crop_resize_configuration.json"
+        return {"profile_json_path": str(profile) if profile.is_file() else "", "roles": roles}
+
     def _build_final_recipe_doc(self) -> dict:
         sku_name = self._get_sku_name()
         if not sku_name or sku_name == "unknown_sku":
@@ -3376,6 +3588,7 @@ class NewSKUPage(QWidget):
         recipe_doc["recipe_number"] = recipe_number
         recipe_doc["plc_recipe_number"] = recipe_number
         recipe_doc["offset_assets"] = self._collect_offset_assets()
+        recipe_doc["cropping_assets"] = self._collect_cropping_assets()
         recipe_doc["training_assets"] = self._collect_training_assets()
         recipe_doc["template_assets"] = self._collect_template_assets()
         recipe_doc["threshold_assets"] = self._collect_threshold_assets()

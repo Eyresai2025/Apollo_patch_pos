@@ -193,6 +193,7 @@ class DevicePage(QWidget):
 
         self.live_worker = None
         self.capture_worker = None
+        self._last_camera_preview_pixmap = None
 
         self.laser_live_worker = None
         self.laser_capture_worker = None
@@ -528,7 +529,8 @@ class DevicePage(QWidget):
 
         self.preview_label = QLabel("No Image")
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumHeight(320)
+        self.preview_label.setMinimumHeight(420)
+        self.preview_label.setContentsMargins(0, 0, 0, 0)
         self.preview_label.setSizePolicy(
             QSizePolicy.Expanding,
             QSizePolicy.Expanding,
@@ -807,6 +809,47 @@ class DevicePage(QWidget):
         self.start_preview_btn.setEnabled(True)
         self.stop_preview_btn.setEnabled(False)
         self.capture_one_btn.setEnabled(True)
+
+    def _show_camera_preview_pixmap(self, pixmap):
+        """
+        Display live preview without damaging the line-scan geometry.
+
+        Do not use Qt.IgnoreAspectRatio here. A Lucid line-scan frame can be
+        4096 x 6000 or taller. Stretching that frame into a wide QLabel makes the
+        image look worse and different from the real camera data.
+
+        This is only GUI display scaling. The captured NumPy image and saved PNG
+        remain original size and original pixel values.
+        """
+        if pixmap is None or pixmap.isNull():
+            return
+
+        self._last_camera_preview_pixmap = pixmap
+
+        rect = self.preview_label.contentsRect()
+        target_w = rect.width()
+        target_h = rect.height()
+
+        if target_w <= 10:
+            target_w = max(self.preview_label.width(), 900)
+        if target_h <= 10:
+            target_h = max(self.preview_label.height(), 500)
+
+        scaled = pixmap.scaled(
+            target_w,
+            target_h,
+            Qt.KeepAspectRatio,
+            Qt.FastTransformation
+        )
+
+        self.preview_label.setText("")
+        self.preview_label.setPixmap(scaled)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+        if getattr(self, "_last_camera_preview_pixmap", None) is not None:
+            self._show_camera_preview_pixmap(self._last_camera_preview_pixmap)
         
     def stop_live_preview(self):
         if self.live_worker:
@@ -822,18 +865,7 @@ class DevicePage(QWidget):
 
     def on_live_frame_ready(self, qimg, line_count):
         pixmap = QPixmap.fromImage(qimg)
-
-        w = max(self.preview_label.width(), 800)
-        h = max(self.preview_label.height(), 500)
-
-        scaled = pixmap.scaled(
-            w,
-            h,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
-
-        self.preview_label.setPixmap(scaled)
+        self._show_camera_preview_pixmap(pixmap)
 
         settings = self.get_selected_settings()
         expected_height = settings.get("height", 6000)
@@ -908,16 +940,7 @@ class DevicePage(QWidget):
         pixmap = QPixmap(image_path)
 
         if not pixmap.isNull():
-            w = max(self.preview_label.width(), 800)
-            h = max(self.preview_label.height(), 500)
-
-            scaled = pixmap.scaled(
-                w,
-                h,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            self.preview_label.setPixmap(scaled)
+            self._show_camera_preview_pixmap(pixmap)
         else:
             self.preview_label.setText("Image saved but preview failed")
 

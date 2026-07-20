@@ -14,6 +14,7 @@ STEP_ORDER: Tuple[Tuple[str, str], ...] = (
     ("image_processing", "Image Processing"),
     ("r_recipe", "R Recipe"),
     ("offset", "Offset"),
+    ("cropping", "Cropping"),
     ("patch_creation", "Patch Creation"),
     ("augmentation", "Augmentation"),
     ("training", "Training"),
@@ -31,7 +32,8 @@ DEPENDENCY_MAP: Dict[str, Tuple[str, ...]] = {
     "image_processing": ("capture",),
     "r_recipe": ("image_processing",),
     "offset": ("capture", "image_processing"),
-    "patch_creation": ("r_recipe", "offset"),
+    "cropping": ("r_recipe", "offset", "capture"),
+    "patch_creation": ("cropping",),
     "augmentation": ("patch_creation",),
     "training": ("augmentation",),
     "feature_threshold": ("training",),
@@ -42,6 +44,7 @@ DEPENDENCY_MAP: Dict[str, Tuple[str, ...]] = {
         "image_processing",
         "r_recipe",
         "offset",
+        "cropping",
         "patch_creation",
         "augmentation",
         "training",
@@ -240,7 +243,7 @@ class NewSKUWorkflowService:
         recipe_found: List[str] = []
         recipe_files: List[Path] = []
         for role in ("sidewall1", "sidewall2"):
-            path = media / "training" / sku / role / f"{sku}_{role}_fast_recipe.json"
+            path = media / "R_Recipe" / sku / role / f"{sku}_{role}_fast_recipe.json"
             if path.exists():
                 recipe_found.append(role)
                 recipe_files.append(path)
@@ -262,6 +265,21 @@ class NewSKUWorkflowService:
             "complete": len(offset_found) == 3,
             "items": offset_found,
             "timestamp": self._latest_mtime(offset_files),
+        }
+
+        cropping_found: List[str] = []
+        cropping_markers: List[Path] = []
+        for role in ROLES:
+            root = media / "cropping" / sku / role
+            summary = root / f"{role}_crop_resize_summary.json"
+            resized = list(root.rglob("*CROP_RESIZED*.png")) if root.exists() else []
+            if summary.exists() and resized:
+                cropping_found.append(role)
+                cropping_markers.extend([summary, *resized])
+        outputs["cropping"] = {
+            "complete": len(cropping_found) == len(ROLES),
+            "items": cropping_found,
+            "timestamp": self._latest_mtime(cropping_markers),
         }
 
         patch_found: List[str] = []
