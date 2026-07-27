@@ -1,363 +1,482 @@
 # lucid_plc_ffc_env_runner.py
 # ============================================================
-# UI runner for standalone_lucid_plc_software_ffc_raw_corrected.py
+# Capture-page runner.
 #
-# Keep this file in:
-#   src/camera/lucid_plc_ffc_env_runner.py
+# PLC_SOFTWARE mode uses the same frozen production camera manager:
+#     src/camera/HARDWARE_TRIGGER.py
 #
-# It reads settings from environment variables supplied by the PyQt Auto tab,
-# patches the standalone module globals, resets runtime queues/events, then
-# calls main().
+# SOFTWARE/FREE modes are delegated to the previous standalone runner so
+# their existing service/testing behaviour remains available.
 # ============================================================
+
+from __future__ import annotations
 
 import json
 import os
-import queue
 import signal
 import sys
-import threading
 import traceback
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Iterable
 
-def env_str(name: str, default):
+import cv2
+import numpy as np
+
+
+def _log(message: str) -> None:
+    print(str(message), flush=True)
+
+
+def _env_str(name: str, default: Any = "") -> str:
     value = os.environ.get(name)
     if value is None or str(value).strip() == "":
-        return default
+        return str(default)
     return str(value).strip()
 
 
-def env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int) -> int:
     try:
-        return int(float(env_str(name, default)))
+        return int(float(_env_str(name, default)))
     except Exception:
         return int(default)
 
 
-def env_float(name: str, default: float) -> float:
+def _env_float(name: str, default: float) -> float:
     try:
-        return float(env_str(name, default))
+        return float(_env_str(name, default))
     except Exception:
         return float(default)
 
 
-def env_bool(name: str, default: bool) -> bool:
+def _env_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
         return bool(default)
-    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
-
-def print_runner_settings(cap) -> None:
-    """
-    Print the full effective settings received from the PyQt Auto tab.
-    These are the values that will be applied to the camera capture script.
-    """
-    print("=" * 80, flush=True)
-    print("[UI_RUNNER] Settings loaded from PyQt Auto tab", flush=True)
-    print("-" * 80, flush=True)
-    print(f"[UI_RUNNER] CAPTURE_MODE={cap.CAPTURE_MODE}", flush=True)
-    print(f"[UI_RUNNER] SAVE_DIR={cap.SAVE_DIR}", flush=True)
-    print(f"[UI_RUNNER] NUM_FULL_IMAGES={cap.NUM_FULL_IMAGES}", flush=True)
-    print(f"[UI_RUNNER] NUM_BEAD_IMAGES={cap.NUM_BEAD_IMAGES}", flush=True)
-    print(f"[UI_RUNNER] FINAL_HEIGHT={cap.FINAL_HEIGHT}", flush=True)
-    print(f"[UI_RUNNER] CAMERA_HEIGHT={cap.CAMERA_HEIGHT}", flush=True)
-    print(f"[UI_RUNNER] GLOBAL_PIXEL_FORMAT_FALLBACK={cap.PIXEL_FORMAT}", flush=True)
-    print(f"[UI_RUNNER] PLC_TRIGGER_SEQUENCE={getattr(cap, 'PLC_TRIGGER_SEQUENCE', 'BEAD_THEN_MAIN')}", flush=True)
-    print("[UI_RUNNER] MAIN_TRIGGER_POLICY=LATCH_AFTER_BEAD_EDGE_RELEASE_AFTER_READY", flush=True)
-    print("[UI_RUNNER] SHARED_254901431_ACQUISITION=4K_ACQUISITIONSTART_STITCH_AND_REARM", flush=True)
-    print(f"[UI_RUNNER] NUM_STREAM_BUFFERS={cap.NUM_STREAM_BUFFERS}", flush=True)
-    print(f"[UI_RUNNER] BUFFER_TIMEOUT_MS={cap.BUFFER_TIMEOUT_MS}", flush=True)
-    print(f"[UI_RUNNER] PACKET_SIZE={cap.PACKET_SIZE}", flush=True)
-    print(f"[UI_RUNNER] PACKET_DELAY={cap.PACKET_DELAY}", flush=True)
-    print(f"[UI_RUNNER] PNG_COMPRESSION={cap.PNG_COMPRESSION}", flush=True)
-    print(f"[UI_RUNNER] SAVE_AS_8BIT={cap.SAVE_AS_8BIT}", flush=True)
-    print(f"[UI_RUNNER] SAVE_IMAGE_FORMAT={cap.SAVE_IMAGE_FORMAT}", flush=True)
-    print(f"[UI_RUNNER] CAPTURE_BUILD_MODE={cap.CAPTURE_BUILD_MODE}", flush=True)
-    print(f"[UI_RUNNER] TIME_CAPTURE_SEC={cap.TIME_CAPTURE_SEC}", flush=True)
-    print("-" * 80, flush=True)
-    print(f"[UI_RUNNER] PLC_IP={cap.PLC_IP}", flush=True)
-    print(f"[UI_RUNNER] PLC_RACK={cap.PLC_RACK}", flush=True)
-    print(f"[UI_RUNNER] PLC_SLOT={cap.PLC_SLOT}", flush=True)
-    print(f"[UI_RUNNER] PLC_DB={cap.PLC_DB}", flush=True)
-    print(f"[UI_RUNNER] MAIN_TRIGGER=DB{cap.PLC_DB}.DBX{cap.MAIN_PLC_BYTE}.{cap.MAIN_PLC_BIT}", flush=True)
-    print(f"[UI_RUNNER] BEAD_TRIGGER=DB{cap.PLC_DB}.DBX{cap.BEAD_PLC_BYTE}.{cap.BEAD_PLC_BIT}", flush=True)
-    print(f"[UI_RUNNER] PLC_POLL_DELAY_SEC={cap.PLC_POLL_DELAY_SEC}", flush=True)
-    print("-" * 80, flush=True)
-    print(f"[UI_RUNNER] ENABLE_SOFTWARE_FFC={cap.ENABLE_SOFTWARE_FFC}", flush=True)
-    print(f"[UI_RUNNER] SAVE_RAW_IMAGES={cap.SAVE_RAW_IMAGES}", flush=True)
-    print(f"[UI_RUNNER] SAVE_CORRECTED_IMAGES={cap.SAVE_CORRECTED_IMAGES}", flush=True)
-    print(f"[UI_RUNNER] SAVE_GAIN_NPY={cap.SAVE_GAIN_NPY}", flush=True)
-    print(f"[UI_RUNNER] GAIN_TARGET_MODE={cap.GAIN_TARGET_MODE}", flush=True)
-    print(f"[UI_RUNNER] GAIN_RANGE_MIN={cap.GAIN_RANGE_MIN}", flush=True)
-    print(f"[UI_RUNNER] GAIN_RANGE_MAX={cap.GAIN_RANGE_MAX}", flush=True)
-    print(f"[UI_RUNNER] FFC_ROW_BLOCK={cap.FFC_ROW_BLOCK}", flush=True)
-    print("-" * 80, flush=True)
-    print(f"[UI_RUNNER] CAMERA_CONFIGS_COUNT={len(cap.CAMERA_CONFIGS)}", flush=True)
-
-    for serial, cfg in cap.CAMERA_CONFIGS.items():
-        print(
-            "[UI_RUNNER_CAMERA] "
-            f"serial={serial} "
-            f"enabled={cfg.get('enabled')} "
-            f"camera_name={cfg.get('camera_name')} "
-            f"width={cfg.get('width')} "
-            f"camera_height={cfg.get('camera_height', cap.CAMERA_HEIGHT)} "
-            f"final_height={cfg.get('final_height', cap.FINAL_HEIGHT)} "
-            f"continuous_stream={cfg.get('continuous_stream', False)} "
-            f"pixel_format={cfg.get('pixel_format', cap.PIXEL_FORMAT)} "
-            f"line_rate={cfg.get('line_rate')} "
-            f"exposure_us={cfg.get('exposure_us')} "
-            f"gain={cfg.get('gain')} "
-            f"roles={cfg.get('roles')}",
-            flush=True,
-        )
-
-    print("=" * 80, flush=True)
-
-CAPTURE_GROUP_BY_ROLE = {
-    "sidewall1": "bead",
-    "sidewall2": "bead",
-    "tread": "bead",
-    "bead": "bead",
-    "innerwall": "main",
-    "inner": "main",
-}
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "y")
 
 
-def enforce_requested_capture_flow(configs, shared_serial: str = "254901431"):
-    """Force production role groups and the shared 4K AcquisitionStart profile."""
-    shared_serial = str(shared_serial)
-    for serial, cfg in configs.items():
-        for role in cfg.get("roles", []) or []:
-            name = str(role.get("name", "")).strip().lower()
-            if name in CAPTURE_GROUP_BY_ROLE:
-                role["group"] = CAPTURE_GROUP_BY_ROLE[name]
-
-        # The replacement shared inner/bead camera is now a normal 4K camera.
-        # It uses the same AcquisitionStart/software trigger and chunk stitching
-        # as sidewall1, sidewall2 and tread. A full re-arm is performed between
-        # its BEAD role and INNERWALL role.
-        if str(serial) == shared_serial:
-            cfg["frame_trigger_stream"] = False
-            cfg["continuous_stream"] = False
-    return configs
+def _normalise_role(value: Any) -> str:
+    name = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "sidewall_1": "sidewall1",
+        "side_wall_1": "sidewall1",
+        "sidewall_2": "sidewall2",
+        "side_wall_2": "sidewall2",
+        "inner": "innerwall",
+        "inner_wall": "innerwall",
+    }
+    return aliases.get(name, name)
 
 
-def main() -> int:
-    here = Path(__file__).resolve().parent
-    if str(here) not in sys.path:
-        sys.path.insert(0, str(here))
+def _load_runtime_profile() -> Dict[str, Any]:
+    raw_json = _env_str("APOLLO_CAMERA_PROFILE_JSON", "")
+    profile_path = _env_str("APOLLO_CAMERA_PROFILE_PATH", "")
+    selected_sku = _env_str("APOLLO_SELECTED_SKU", "CAPTURE_PAGE")
 
-    try:
-        import standalone_lucid_plc_software_ffc_raw_corrected as cap
-    except Exception as e:
-        raise RuntimeError(
-            "Could not import standalone_lucid_plc_software_ffc_raw_corrected.py. "
-            "Keep this runner in the same folder as the standalone script. "
-            f"Import error: {e}"
-        )
-
-    # --------------------------------------------------------
-    # Capture mode / PLC
-    # --------------------------------------------------------
-    cap.CAPTURE_MODE = env_str("APOLLO_CAPTURE_MODE", getattr(cap, "CAPTURE_MODE", "PLC_SOFTWARE"))
-
-    cap.PLC_IP = env_str("APOLLO_PLC_IP", getattr(cap, "PLC_IP", "192.168.10.1"))
-    cap.PLC_RACK = env_int("APOLLO_PLC_RACK", getattr(cap, "PLC_RACK", 0))
-    cap.PLC_SLOT = env_int("APOLLO_PLC_SLOT", getattr(cap, "PLC_SLOT", 1))
-    cap.PLC_DB = env_int("APOLLO_PLC_DB", getattr(cap, "PLC_DB", 74))
-    cap.MAIN_PLC_BYTE = env_int("APOLLO_MAIN_PLC_BYTE", getattr(cap, "MAIN_PLC_BYTE", 0))
-    cap.MAIN_PLC_BIT = env_int("APOLLO_MAIN_PLC_BIT", getattr(cap, "MAIN_PLC_BIT", 3))
-    cap.BEAD_PLC_BYTE = env_int("APOLLO_BEAD_PLC_BYTE", getattr(cap, "BEAD_PLC_BYTE", 86))
-    cap.BEAD_PLC_BIT = env_int("APOLLO_BEAD_PLC_BIT", getattr(cap, "BEAD_PLC_BIT", 0))
-    cap.PLC_POLL_DELAY_SEC = env_float("APOLLO_PLC_POLL_DELAY_SEC", getattr(cap, "PLC_POLL_DELAY_SEC", 0.002))
-    cap.MAIN_TRIGGER_LATCH_ENABLED = env_bool(
-        "APOLLO_MAIN_TRIGGER_LATCH_ENABLED",
-        getattr(cap, "MAIN_TRIGGER_LATCH_ENABLED", True),
-    )
-    cap.OVERLAP_SHARED_REARM = env_bool(
-        "APOLLO_OVERLAP_SHARED_REARM",
-        getattr(cap, "OVERLAP_SHARED_REARM", True),
-    )
-    cap.SHARED_INNER_BEAD_SERIAL = env_str(
-        "APOLLO_SHARED_CAMERA_SERIAL",
-        getattr(cap, "SHARED_INNER_BEAD_SERIAL", "254901431"),
-    )
-    cap.SHARED_FRAME_START_MODE = env_bool(
-        "APOLLO_SHARED_FRAME_START_MODE",
-        getattr(cap, "SHARED_FRAME_START_MODE", False),
-    )
-    cap.SHARED_CAMERA_HEIGHT = env_int(
-        "APOLLO_SHARED_CAMERA_HEIGHT",
-        getattr(cap, "SHARED_CAMERA_HEIGHT", 15000),
-    )
-    cap.SHARED_SINGLE_FRAME_MODE = env_bool(
-        "APOLLO_SHARED_SINGLE_FRAME_MODE",
-        getattr(cap, "SHARED_SINGLE_FRAME_MODE", False),
-    )
-    cap.AFTER_TRIGGER_DELAY_SEC = env_float(
-        "APOLLO_AFTER_TRIGGER_DELAY_SEC",
-        getattr(cap, "AFTER_TRIGGER_DELAY_SEC", 0.0),
-    )
-
-    # --------------------------------------------------------
-    # Capture settings
-    # --------------------------------------------------------
-    cap.SAVE_DIR = env_str("APOLLO_FFC_SAVE_DIR", getattr(cap, "SAVE_DIR", str(here / "Auto_FFC_Capture")))
-    cap.NUM_FULL_IMAGES = env_int("APOLLO_NUM_FULL_IMAGES", getattr(cap, "NUM_FULL_IMAGES", 1))
-    cap.NUM_BEAD_IMAGES = env_int("APOLLO_NUM_BEAD_IMAGES", getattr(cap, "NUM_BEAD_IMAGES", 1))
-    cap.CAMERA_HEIGHT = env_int("APOLLO_CAMERA_HEIGHT", getattr(cap, "CAMERA_HEIGHT", 15000))
-    cap.FINAL_HEIGHT = env_int("APOLLO_FINAL_HEIGHT", getattr(cap, "FINAL_HEIGHT", 60000))
-    cap.CAPTURE_BUILD_MODE = env_str(
-        "APOLLO_CAPTURE_BUILD_MODE",
-        getattr(cap, "CAPTURE_BUILD_MODE", "HEIGHT_BASED"),
-    )
-
-    cap.TIME_CAPTURE_SEC = env_float(
-        "APOLLO_TIME_CAPTURE_SEC",
-        getattr(cap, "TIME_CAPTURE_SEC", 5.0),
-    )
-    cap.PIXEL_FORMAT = env_str("APOLLO_PIXEL_FORMAT", getattr(cap, "PIXEL_FORMAT", "Mono8"))
-    cap.NUM_STREAM_BUFFERS = env_int("APOLLO_NUM_STREAM_BUFFERS", getattr(cap, "NUM_STREAM_BUFFERS", 16))
-    cap.BUFFER_TIMEOUT_MS = env_int("APOLLO_BUFFER_TIMEOUT_MS", getattr(cap, "BUFFER_TIMEOUT_MS", 30000))
-    cap.PNG_COMPRESSION = env_int("APOLLO_PNG_COMPRESSION", getattr(cap, "PNG_COMPRESSION", 0))
-    cap.SAVE_AS_8BIT = env_bool(
-        "APOLLO_SAVE_AS_8BIT",
-        getattr(cap, "SAVE_AS_8BIT", True),
-    )
-    cap.SAVE_IMAGE_FORMAT = env_str(
-        "APOLLO_SAVE_IMAGE_FORMAT",
-        getattr(cap, "SAVE_IMAGE_FORMAT", "png"),
-    ).lower()
-    cap.PACKET_SIZE = env_int("APOLLO_PACKET_SIZE", getattr(cap, "PACKET_SIZE", 9000))
-    cap.PACKET_DELAY = env_int("APOLLO_PACKET_DELAY", getattr(cap, "PACKET_DELAY", 1000))
-
-    # --------------------------------------------------------
-    # FFC settings
-    # --------------------------------------------------------
-    cap.ENABLE_SOFTWARE_FFC = env_bool("APOLLO_ENABLE_SOFTWARE_FFC", getattr(cap, "ENABLE_SOFTWARE_FFC", True))
-    cap.SAVE_RAW_IMAGES = env_bool("APOLLO_SAVE_RAW_IMAGES", getattr(cap, "SAVE_RAW_IMAGES", True))
-    cap.SAVE_CORRECTED_IMAGES = env_bool("APOLLO_SAVE_CORRECTED_IMAGES", getattr(cap, "SAVE_CORRECTED_IMAGES", True))
-    cap.SAVE_GAIN_NPY = env_bool("APOLLO_SAVE_GAIN_NPY", getattr(cap, "SAVE_GAIN_NPY", False))
-    cap.GAIN_TARGET_MODE = env_str("APOLLO_GAIN_TARGET_MODE", getattr(cap, "GAIN_TARGET_MODE", "PERCENTILE_95"))
-    cap.GAIN_RANGE_MIN = env_float("APOLLO_GAIN_RANGE_MIN", getattr(cap, "GAIN_RANGE_MIN", 1.0))
-    cap.GAIN_RANGE_MAX = env_float("APOLLO_GAIN_RANGE_MAX", getattr(cap, "GAIN_RANGE_MAX", 15.99))
-    cap.FFC_ROW_BLOCK = env_int("APOLLO_FFC_ROW_BLOCK", getattr(cap, "FFC_ROW_BLOCK", 512))
-
-    # --------------------------------------------------------
-    # Camera configs from UI table
-    # --------------------------------------------------------
-    camera_json = os.environ.get("APOLLO_CAMERA_CONFIGS_JSON", "").strip()
-    if camera_json:
+    if raw_json:
         try:
-            configs = json.loads(camera_json)
-            if isinstance(configs, dict) and configs:
-                cap.CAMERA_CONFIGS = enforce_requested_capture_flow(
-                    configs,
-                    shared_serial=cap.SHARED_INNER_BEAD_SERIAL,
-                )
-        except Exception as e:
-            raise RuntimeError(f"Invalid APOLLO_CAMERA_CONFIGS_JSON: {e}")
+            profile = json.loads(raw_json)
+        except Exception as error:
+            raise RuntimeError(f"Invalid APOLLO_CAMERA_PROFILE_JSON: {error}") from error
+    elif profile_path:
+        path = Path(profile_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Camera profile not found: {path}")
+        profile = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        raise RuntimeError(
+            "PLC_SOFTWARE capture requires APOLLO_CAMERA_PROFILE_JSON or "
+            "APOLLO_CAMERA_PROFILE_PATH from the Capture page SKU loader"
+        )
 
-    # The standalone file creates save_queue at import time. Recreate it after
-    # applying SAVE_QUEUE_SIZE/settings to avoid stale queue sizes on each start.
-    cap.SAVE_QUEUE_SIZE = env_int("APOLLO_SAVE_QUEUE_SIZE", getattr(cap, "SAVE_QUEUE_SIZE", 4))
-    cap.save_queue = queue.Queue(maxsize=cap.SAVE_QUEUE_SIZE)
-    cap.running = True
+    if not isinstance(profile, dict):
+        raise RuntimeError("Camera profile JSON must contain an object")
+
+    raw_cameras = profile.get("cameras", {}) or {}
+    if not isinstance(raw_cameras, dict):
+        raise RuntimeError("Camera profile cameras must be an object")
+
+    cameras: Dict[str, Dict[str, Any]] = {}
+    for raw_role, raw_cfg in raw_cameras.items():
+        role = _normalise_role(raw_role)
+        if role not in ("sidewall1", "sidewall2", "tread", "bead", "innerwall"):
+            continue
+        if isinstance(raw_cfg, dict):
+            cameras[role] = deepcopy(raw_cfg)
+
+    if "innerwall" in cameras and "bead" not in cameras:
+        cameras["bead"] = deepcopy(cameras["innerwall"])
+    elif "bead" in cameras and "innerwall" not in cameras:
+        cameras["innerwall"] = deepcopy(cameras["bead"])
+
+    required = ("sidewall1", "sidewall2", "tread", "bead", "innerwall")
+    missing = [role for role in required if role not in cameras]
+    if missing:
+        raise RuntimeError(f"Camera profile missing required role(s): {', '.join(missing)}")
+
+    shared_serial = str(
+        profile.get("shared_inner_bead_serial")
+        or cameras["innerwall"].get("serial")
+        or cameras["bead"].get("serial")
+        or "254901431"
+    ).strip()
+    cameras["innerwall"]["serial"] = shared_serial
+    cameras["bead"]["serial"] = shared_serial
+
+    profile["profile_type"] = "camera"
+    profile["sku_name"] = str(profile.get("sku_name") or profile.get("sku") or selected_sku)
+    profile["sku"] = profile["sku_name"]
+    profile["shared_inner_bead_serial"] = shared_serial
+    profile["shared_role_profiles_enabled"] = True
+    profile["cameras"] = cameras
+    return profile
+
+
+def _set_hw_env_defaults(hw, profile: Dict[str, Any]) -> None:
+    """Patch the frozen manager's runtime configuration before manager creation."""
+    cameras = profile["cameras"]
+    shared_serial = str(profile["shared_inner_bead_serial"])
+
+    role_env_names = {
+        "sidewall1": "SIDEWALL1",
+        "sidewall2": "SIDEWALL2",
+        "tread": "TREAD",
+        "innerwall": "INNERWALL",
+        "bead": "BEAD",
+    }
+
+    env_updates: Dict[str, str] = {
+        "CAM_TRIGGER_MODE": "plc_software",
+        "CAM_TRIGGER_SELECTOR": "AcquisitionStart",
+        "CAM_TRIGGER_SOURCE": "Software",
+        "CAM_TRIGGER_ACTIVATION": "RisingEdge",
+        "CAM_SHARED_INNER_BEAD": "True",
+        "CAM_SERIALIZE_CHUNK_COPY": "True",
+        "CAM_SOFTWARE_FFC_ENABLED": "False",
+    }
+
+    for role, env_role in role_env_names.items():
+        cfg = cameras[role]
+        env_updates[f"CAM_{env_role}_SERIAL"] = str(cfg.get("serial", ""))
+        env_updates[f"CAM_{env_role}_ENABLED"] = "True" if bool(cfg.get("enabled", True)) else "False"
+        env_updates[f"CAM_{env_role}_WIDTH"] = str(int(cfg.get("width", 4096)))
+        env_updates[f"CAM_{env_role}_CAMERA_HEIGHT"] = str(
+            int(cfg.get("camera_height", cfg.get("height", 15000)))
+        )
+        env_updates[f"CAM_{env_role}_FINAL_HEIGHT"] = str(int(cfg.get("final_height", 60000)))
+        env_updates[f"CAM_{env_role}_PIXEL_FORMAT"] = str(cfg.get("pixel_format", "Mono8"))
+        env_updates[f"CAM_{env_role}_STREAM_BUFFERS"] = str(int(cfg.get("num_stream_buffers", 16)))
+        env_updates[f"CAM_{env_role}_EXPOSURE_TIME"] = str(float(cfg.get("exposure_time", 120.0)))
+        env_updates[f"CAM_{env_role}_GAIN"] = str(float(cfg.get("gain", 24.0)))
+        env_updates[f"CAM_{env_role}_ACQUISITION_LINE_RATE_ENABLE"] = (
+            "True" if bool(cfg.get("acquisition_line_rate_enable", True)) else "False"
+        )
+        env_updates[f"CAM_{env_role}_ACQUISITION_LINE_RATE"] = str(
+            float(cfg.get("acquisition_line_rate", 0.0) or 0.0)
+        )
+        env_updates[f"CAM_{env_role}_SOFTWARE_FFC_ENABLED"] = "False"
+
+    hw._ENV.update(env_updates)
+
+    hw.TRIGGER_MODE = "plc_software"
+    hw.TRIGGER_SELECTOR = "AcquisitionStart"
+    hw.TRIGGER_SOURCE = "Software"
+    hw.TRIGGER_ACTIVATION = "RisingEdge"
+    hw.MAIN_TRIGGER_LATCH_ENABLED = _env_bool("APOLLO_MAIN_TRIGGER_LATCH_ENABLED", True)
+    hw.OVERLAP_SHARED_REARM = True
+
+    hw.PLC_IP = _env_str("APOLLO_PLC_IP", hw.PLC_IP)
+    hw.PLC_RACK = _env_int("APOLLO_PLC_RACK", hw.PLC_RACK)
+    hw.PLC_SLOT = _env_int("APOLLO_PLC_SLOT", hw.PLC_SLOT)
+    plc_db = _env_int("APOLLO_PLC_DB", 74)
+    hw.MAIN_TRIGGER_DB = plc_db
+    hw.MAIN_TRIGGER_BYTE = _env_int("APOLLO_MAIN_PLC_BYTE", 0)
+    hw.MAIN_TRIGGER_BIT = _env_int("APOLLO_MAIN_PLC_BIT", 3)
+    hw.BEAD_TRIGGER_DB = plc_db
+    hw.BEAD_TRIGGER_BYTE = _env_int("APOLLO_BEAD_PLC_BYTE", 86)
+    hw.BEAD_TRIGGER_BIT = _env_int("APOLLO_BEAD_PLC_BIT", 0)
+    hw.PLC_POLL_DELAY_SEC = _env_float("APOLLO_PLC_POLL_DELAY_SEC", 0.005)
+
+    hw.BUFFER_TIMEOUT_MS = _env_int("APOLLO_BUFFER_TIMEOUT_MS", hw.BUFFER_TIMEOUT_MS)
+    hw.PACKET_SIZE = _env_int("APOLLO_PACKET_SIZE", hw.PACKET_SIZE)
+    hw.PACKET_DELAY = _env_int("APOLLO_PACKET_DELAY", hw.PACKET_DELAY)
+    hw.AFTER_TRIGGER_DELAY_SEC = _env_float("APOLLO_AFTER_TRIGGER_DELAY_SEC", hw.AFTER_TRIGGER_DELAY_SEC)
+    hw.SERIALIZE_CHUNK_COPY = True
+    hw.INNER_TRIGGER_WARN_MS = _env_float("CAM_INNER_TRIGGER_WARN_MS", 250.0)
+    hw.PARALLEL = True
+
+    hw.SHARED_INNER_BEAD = True
+    hw.SHARED_INNER_BEAD_SERIAL = shared_serial
+    hw._configured_shared_serial = shared_serial
+    hw.SHARED_FRAME_START_MODE = False
+    hw.SHARED_SINGLE_FRAME_MODE = False
+    hw.SHARED_CAMERA_CONTINUOUS_STREAM = False
+
+    hw.SOFTWARE_FFC_ENABLED = False
+    hw.CAMERA_ROLE_CONFIG = hw.get_camera_role_config()
+    hw.CAMERA_SERIALS = list({item["serial"] for item in hw.CAMERA_ROLE_CONFIG})
+    hw.NUM_CAMERAS = len(hw.CAMERA_SERIALS)
+
+
+def _capture_profile_without_internal_ffc(profile: Dict[str, Any]) -> Dict[str, Any]:
+    profile = deepcopy(profile)
+    for cfg in profile.get("cameras", {}).values():
+        if isinstance(cfg, dict):
+            cfg["software_ffc_enabled"] = False
+    return profile
+
+
+def _save_image(path: Path, image: np.ndarray, *, save_as_8bit: bool, png_compression: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if image.ndim != 2:
+        raise RuntimeError(f"Expected 2D mono image, got shape={image.shape}")
+
+    if image.dtype not in (np.uint8, np.uint16):
+        image = image.astype(np.uint16)
+
+    if save_as_8bit:
+        save_image = image if image.dtype == np.uint8 else (image >> 8).astype(np.uint8)
+    else:
+        save_image = image if image.dtype == np.uint16 else image.astype(np.uint16) * 257
+
+    params = []
+    if path.suffix.lower() == ".png":
+        params = [cv2.IMWRITE_PNG_COMPRESSION, int(max(0, min(9, png_compression)))]
+
+    if not cv2.imwrite(str(path), save_image, params):
+        raise RuntimeError(f"cv2.imwrite failed: {path}")
+
+
+def _enabled_roles(profile: Dict[str, Any]) -> Iterable[str]:
+    order = ("sidewall1", "sidewall2", "bead", "tread", "innerwall")
+    for role in order:
+        cfg = profile["cameras"].get(role, {})
+        if bool(cfg.get("enabled", True)):
+            yield role
+
+
+def _next_cycle_number(save_root: Path) -> int:
+    """Return the first free Cycle_N directory without overwriting earlier runs."""
+    highest = 0
+    try:
+        for child in save_root.iterdir():
+            if not child.is_dir():
+                continue
+            name = child.name.strip()
+            if not name.lower().startswith("cycle_"):
+                continue
+            try:
+                highest = max(highest, int(name.split("_", 1)[1]))
+            except Exception:
+                continue
+    except FileNotFoundError:
+        pass
+
+    candidate = highest + 1
+    while (save_root / f"Cycle_{candidate}").exists():
+        candidate += 1
+    return candidate
+
+
+def _run_validated_plc_capture() -> int:
+    here = Path(__file__).resolve().parent
+    project_root = here.parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    profile = _load_runtime_profile()
+
+    from src.camera import HARDWARE_TRIGGER as hw
+
+    _set_hw_env_defaults(hw, profile)
+    capture_profile = _capture_profile_without_internal_ffc(profile)
+
+    save_root = Path(_env_str("APOLLO_FFC_SAVE_DIR", str(project_root / "media" / "Auto_FFC_Capture")))
+    save_root.mkdir(parents=True, exist_ok=True)
+
+    cycle_count = max(
+        1,
+        _env_int("APOLLO_NUM_FULL_IMAGES", 1),
+        _env_int("APOLLO_NUM_BEAD_IMAGES", 1),
+    )
+    save_raw = _env_bool("APOLLO_SAVE_RAW_IMAGES", False)
+    save_corrected = _env_bool("APOLLO_SAVE_CORRECTED_IMAGES", True)
+    save_gain = _env_bool("APOLLO_SAVE_GAIN_NPY", False)
+    enable_ffc = _env_bool("APOLLO_ENABLE_SOFTWARE_FFC", True)
+    save_as_8bit = _env_bool("APOLLO_SAVE_AS_8BIT", True)
+    extension = ".bmp" if _env_str("APOLLO_SAVE_IMAGE_FORMAT", "png").lower() == "bmp" else ".png"
+    png_compression = _env_int("APOLLO_PNG_COMPRESSION", 0)
+
+    ffc_config = hw.SoftwareFFCConfig(
+        enabled=enable_ffc,
+        target_mode=_env_str("APOLLO_GAIN_TARGET_MODE", "PERCENTILE_95").upper(),
+        gain_min=_env_float("APOLLO_GAIN_RANGE_MIN", 1.0),
+        gain_max=_env_float("APOLLO_GAIN_RANGE_MAX", 15.99),
+        row_block=max(1, _env_int("APOLLO_FFC_ROW_BLOCK", 512)),
+    )
+
+    _log("=" * 88)
+    _log("[CAPTURE_PAGE] VALIDATED PLC SOFTWARE CAMERA CORE")
+    _log(f"[CAPTURE_PAGE] SKU={profile.get('sku_name')} profile={_env_str('APOLLO_CAMERA_PROFILE_PATH', '<table-json>')}")
+    _log(
+        f"[CAPTURE_PAGE] FLOW=BEAD_GROUP -> immediate shared BEAD_TO_INNER -> "
+        f"current MAIN edge -> INNERWALL"
+    )
+    _log(
+        f"[CAPTURE_PAGE] cycles={cycle_count} save_root={save_root} "
+        f"raw={save_raw} corrected={save_corrected} ffc={enable_ffc}"
+    )
+    for role in ("sidewall1", "sidewall2", "tread", "bead", "innerwall"):
+        cfg = profile["cameras"][role]
+        _log(
+            f"[CAPTURE_PAGE_PROFILE] role={role} serial={cfg.get('serial')} "
+            f"size={cfg.get('width')}x{cfg.get('camera_height', cfg.get('height'))} "
+            f"final={cfg.get('final_height')} rate={cfg.get('acquisition_line_rate')} "
+            f"exposure={cfg.get('exposure_time')} gain={cfg.get('gain')}"
+        )
+    _log("=" * 88)
+
+    manager = hw.MultiCameraManager()
+    stopped = False
+
+    def request_stop(signum=None, frame=None):
+        nonlocal stopped
+        _log(f"[CAPTURE_PAGE] stop requested signal={signum}")
+        if not stopped:
+            stopped = True
+            try:
+                manager.stop_all_streams()
+            except Exception as error:
+                _log(f"[CAPTURE_PAGE][STOP_WARNING] {error}")
 
     try:
-        cap.shutdown_event.clear()
+        signal.signal(signal.SIGINT, request_stop)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, request_stop)
     except Exception:
         pass
 
-    print("=" * 80, flush=True)
-    print("[UI_RUNNER] CONFIG READY", flush=True)
-    print(
-        "[UI_RUNNER] FLOW=BEAD(sidewall1+sidewall2+tread+bead) "
-        "-> LATCHED MAIN(innerwall only)",
-        flush=True,
-    )
-    print(
-        f"[UI_RUNNER] PLC bead=DB{cap.PLC_DB}.DBX{cap.BEAD_PLC_BYTE}.{cap.BEAD_PLC_BIT} "
-        f"main=DB{cap.PLC_DB}.DBX{cap.MAIN_PLC_BYTE}.{cap.MAIN_PLC_BIT} "
-        f"poll={cap.PLC_POLL_DELAY_SEC}s latch={cap.MAIN_TRIGGER_LATCH_ENABLED}",
-        flush=True,
-    )
-    print(
-        f"[UI_RUNNER] SHARED_4K serial={cap.SHARED_INNER_BEAD_SERIAL} "
-        f"frame_start={cap.SHARED_FRAME_START_MODE} direct_single_frame={cap.SHARED_SINGLE_FRAME_MODE} "
-        f"stitching=same_as_other_4k overlap_rearm={cap.OVERLAP_SHARED_REARM} "
-        f"after_trigger_delay={cap.AFTER_TRIGGER_DELAY_SEC}s",
-        flush=True,
-    )
-    print(
-        f"[UI_RUNNER] CAPTURE mode={cap.CAPTURE_MODE} main_images={cap.NUM_FULL_IMAGES} "
-        f"bead_images={cap.NUM_BEAD_IMAGES} buffers={cap.NUM_STREAM_BUFFERS} "
-        f"packet={cap.PACKET_SIZE}/{cap.PACKET_DELAY}",
-        flush=True,
-    )
-    print(
-        f"[UI_RUNNER] OUTPUT dir={cap.SAVE_DIR} raw={cap.SAVE_RAW_IMAGES} "
-        f"ffc={cap.SAVE_CORRECTED_IMAGES} bit8={cap.SAVE_AS_8BIT}",
-        flush=True,
-    )
-    print("=" * 80, flush=True)
-
-    # --------------------------------------------------------
-    # Graceful stop channel from the PyQt Capture tab.
-    # The parent QProcess writes ``STOP\n`` to stdin. This lets the
-    # standalone capture finish its own finally-block, stop camera streams,
-    # disconnect PLC clients, finish queued saves and destroy Arena devices.
-    # --------------------------------------------------------
-    def stdin_stop_listener() -> None:
-        try:
-            for line in sys.stdin:
-                command = str(line).strip().upper()
-                if command in {"STOP", "QUIT", "EXIT", "SHUTDOWN"}:
-                    print(
-                        f"[UI_STOP_REQUEST] command={command}; beginning graceful shutdown",
-                        flush=True,
-                    )
-                    cap.request_shutdown("stop requested from Capture tab")
-                    return
-        except Exception as error:
-            print(f"[UI_STOP_LISTENER_ERROR] {error}", flush=True)
-
-    stop_listener = threading.Thread(
-        target=stdin_stop_listener,
-        name="capture-ui-stop-listener",
-        daemon=True,
-    )
-    stop_listener.start()
-
-    def request_signal_shutdown(signum, _frame) -> None:
-        cap.request_shutdown(f"runner received signal {signum}")
-
-    for signal_name in ("SIGTERM", "SIGBREAK"):
-        signal_value = getattr(signal, signal_name, None)
-        if signal_value is not None:
-            try:
-                signal.signal(signal_value, request_signal_shutdown)
-            except Exception:
-                pass
-
     try:
-        cap.main()
-    except KeyboardInterrupt:
-        cap.request_shutdown("KeyboardInterrupt in UI runner")
-        print("[UI_RUNNER] KeyboardInterrupt handled; resources are being released", flush=True)
-        return 130
-    except Exception as error:
-        cap.request_shutdown(f"UI runner fatal error: {error}")
-        print(f"[UI_RUNNER_FATAL] {type(error).__name__}: {error}", flush=True)
-        traceback.print_exc()
-        return 1
+        manager.apply_camera_profile(capture_profile)
+        if not manager.start_all_streams():
+            raise RuntimeError("Not all configured camera streams started")
 
-    if cap.shutdown_event.is_set():
-        print("[UI_RUNNER] GRACEFUL_STOP_COMPLETE", flush=True)
-    else:
-        print("[UI_RUNNER] CAPTURE_COMPLETE", flush=True)
-    return 0
+        roles = list(_enabled_roles(profile))
+        serial_by_role = {
+            role: str(profile["cameras"][role].get("serial", ""))
+            for role in profile["cameras"]
+        }
+
+        first_output_cycle = _next_cycle_number(save_root)
+        _log(f"[CAPTURE_PAGE] OUTPUT_CYCLE_START Cycle_{first_output_cycle}")
+
+        for run_index in range(1, cycle_count + 1):
+            output_cycle = first_output_cycle + run_index - 1
+            cycle_name = f"Cycle_{output_cycle}"
+            _log(
+                f"[CAPTURE_PAGE] CYCLE_START run={run_index}/{cycle_count} "
+                f"output_cycle={cycle_name}"
+            )
+            images = manager.capture_all(sides_to_capture=roles)
+            cycle_dir = save_root / cycle_name
+            cycle_dir.mkdir(parents=True, exist_ok=False)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+            for role in roles:
+                image = images.get(role)
+                if image is None:
+                    raise RuntimeError(f"No image returned for role={role} cycle={cycle_name}")
+
+                serial = serial_by_role.get(role, "")
+                role_dir = cycle_dir / role
+                raw_path = role_dir / f"{role}_{serial}_{cycle_name}_{timestamp}_raw{extension}"
+                corrected_path = role_dir / f"{role}_{serial}_{cycle_name}_{timestamp}_ffc_corrected{extension}"
+                gain_path = role_dir / "gain" / f"{role}_{serial}_{cycle_name}_{timestamp}_ffc_gain.npy"
+
+                if save_raw:
+                    _save_image(
+                        raw_path,
+                        image,
+                        save_as_8bit=save_as_8bit,
+                        png_compression=png_compression,
+                    )
+                    _log(f"[{role.upper()}] SAVE_RAW_OK {raw_path}")
+
+                if enable_ffc:
+                    gain_values, stats = hw.compute_ffc_gain_from_image(image, ffc_config)
+                    saturated = hw.apply_software_ffc_inplace(
+                        image,
+                        gain_values,
+                        ffc_config.row_block,
+                    )
+                    if save_corrected:
+                        _save_image(
+                            corrected_path,
+                            image,
+                            save_as_8bit=save_as_8bit,
+                            png_compression=png_compression,
+                        )
+                        _log(f"[{role.upper()}] SAVE_FFC_OK {corrected_path}")
+                    if save_gain:
+                        gain_path.parent.mkdir(parents=True, exist_ok=True)
+                        np.save(str(gain_path), gain_values)
+                        _log(f"[{role.upper()}] SAVE_GAIN_OK {gain_path}")
+                    _log(
+                        f"[{role.upper()}] FFC_STATS target={stats['target']:.2f} "
+                        f"gain_min={stats['gain_min']:.4f} gain_max={stats['gain_max']:.4f} "
+                        f"gain_at_max={stats['gain_count_at_max']} saturated_pixels={saturated}"
+                    )
+                elif save_corrected:
+                    _save_image(
+                        corrected_path,
+                        image,
+                        save_as_8bit=save_as_8bit,
+                        png_compression=png_compression,
+                    )
+                    _log(f"[{role.upper()}] SAVE_CAPTURED_OK {corrected_path} ffc_disabled=True")
+
+            manager.wait_for_next_cycle_ready(
+                timeout_sec=60.0,
+                raise_on_error=True,
+                log_wait=True,
+            )
+            _log(f"[CAPTURE_PAGE] CYCLE_COMPLETE run={run_index}/{cycle_count} output_cycle={cycle_name} saved={cycle_dir}")
+            del images
+
+        _log(f"[CAPTURE_PAGE] ALL_CYCLES_COMPLETE count={cycle_count} output={save_root}")
+        return 0
+    finally:
+        if not stopped:
+            stopped = True
+            try:
+                manager.stop_all_streams()
+            except Exception as stop_error:
+                _log(f"[CAPTURE_PAGE][CLEANUP_WARNING] stop_all_streams failed: {stop_error}")
+
+
+def main() -> int:
+    mode = _env_str("APOLLO_CAPTURE_MODE", "PLC_SOFTWARE").strip().upper()
+    if mode == "PLC_SOFTWARE":
+        return _run_validated_plc_capture()
+
+    _log(
+        f"[CAPTURE_PAGE] mode={mode}; delegating to legacy standalone runner. "
+        "Validated production integration is applied only to PLC_SOFTWARE mode."
+    )
+    import lucid_plc_ffc_env_runner_legacy as legacy
+
+    return int(legacy.main() or 0)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        _log("[CAPTURE_PAGE] Interrupted")
+        raise SystemExit(130)
+    except Exception as error:
+        _log(f"[CAPTURE_PAGE][FATAL] {error}")
+        traceback.print_exc()
+        raise SystemExit(1)

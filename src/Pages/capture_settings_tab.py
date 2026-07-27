@@ -15,6 +15,8 @@ import ctypes
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from copy import deepcopy
 from typing import Dict, List, Optional
 
 import cv2
@@ -1050,6 +1052,12 @@ class AutoPLCFFCProcessTab(QWidget):
         self.process: Optional[QProcess] = None
         self._stop_requested = False
 
+        self.project_root = Path(__file__).resolve().parents[2]
+        self.camera_profile_root = self.project_root / "media" / "Camera_Profiles"
+        self.loaded_camera_profile: Optional[Dict] = None
+        self.loaded_camera_profile_path: str = ""
+        self.loaded_sku_name: str = ""
+
         self._terminate_timer = QTimer(self)
         self._terminate_timer.setSingleShot(True)
         self._terminate_timer.timeout.connect(self._terminate_after_grace)
@@ -1062,30 +1070,119 @@ class AutoPLCFFCProcessTab(QWidget):
 
     # -----------------------------------------------------
     def build_ui(self):
+        """Build a compact production-style Capture page without changing capture behaviour."""
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         scroll = QScrollArea()
+        scroll.setObjectName("CaptureScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         content = QWidget()
+        content.setObjectName("CapturePage")
         content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         main = QVBoxLayout(content)
-        main.setContentsMargins(18, 18, 18, 18)
-        main.setSpacing(12)
+        main.setContentsMargins(16, 12, 16, 16)
+        main.setSpacing(10)
         scroll.setWidget(content)
         outer.addWidget(scroll)
 
-        title = QLabel("Capture — PLC Software Trigger + Software FFC")
-        title.setObjectName("PageTitle")
-        main.addWidget(title)
+        def compact_form():
+            form = QFormLayout()
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setHorizontalSpacing(10)
+            form.setVerticalSpacing(7)
+            form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            form.setFormAlignment(Qt.AlignTop)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            return form
 
-        # ---------------- PATH SETTINGS ----------------
-        path_box = QGroupBox("Path Settings")
-        path_layout = QFormLayout(path_box)
-        path_layout.setSpacing(10)
+        def panel(title_text):
+            frame = QFrame()
+            frame.setObjectName("InnerPanel")
+            layout = QVBoxLayout(frame)
+            layout.setContentsMargins(12, 10, 12, 10)
+            layout.setSpacing(8)
+            heading = QLabel(title_text)
+            heading.setObjectName("PanelTitle")
+            layout.addWidget(heading)
+            return frame, layout
+
+        # ---------------- PAGE HEADER ----------------
+        header = QFrame()
+        header.setObjectName("PageHeader")
+        header_l = QHBoxLayout(header)
+        header_l.setContentsMargins(2, 0, 2, 2)
+        header_l.setSpacing(10)
+
+        header_text_l = QVBoxLayout()
+        header_text_l.setContentsMargins(0, 0, 0, 0)
+        header_text_l.setSpacing(2)
+        title = QLabel("Camera Capture")
+        title.setObjectName("PageTitle")
+        subtitle = QLabel("SKU-based PLC software capture with validated shared bead / innerwall sequencing")
+        subtitle.setObjectName("PageSubtitle")
+        header_text_l.addWidget(title)
+        header_text_l.addWidget(subtitle)
+        header_l.addLayout(header_text_l)
+        header_l.addStretch()
+
+        mode_badge = QLabel("PLC SOFTWARE")
+        mode_badge.setObjectName("ModeBadge")
+        core_badge = QLabel("VALIDATED CORE")
+        core_badge.setObjectName("CoreBadge")
+        header_l.addWidget(mode_badge)
+        header_l.addWidget(core_badge)
+        main.addWidget(header)
+
+        # ---------------- PROFILE + PATHS ----------------
+        top_row = QHBoxLayout()
+        top_row.setSpacing(10)
+
+        sku_box = QGroupBox("SKU Camera Profile")
+        sku_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        sku_layout = QGridLayout(sku_box)
+        sku_layout.setContentsMargins(12, 12, 12, 10)
+        sku_layout.setHorizontalSpacing(8)
+        sku_layout.setVerticalSpacing(8)
+
+        self.sku_combo = QComboBox()
+        self.sku_combo.setEditable(True)
+        self.sku_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.sku_combo.setPlaceholderText("Select or enter SKU")
+        self.sku_combo.setMinimumWidth(220)
+
+        self.refresh_sku_btn = QPushButton("Refresh")
+        self.refresh_sku_btn.setObjectName("SecondaryButton")
+        self.refresh_sku_btn.setFixedWidth(90)
+        self.load_sku_profile_btn = QPushButton("Load Profile")
+        self.load_sku_profile_btn.setObjectName("PrimaryButton")
+        self.load_sku_profile_btn.setFixedWidth(116)
+
+        self.profile_status_label = QLabel("No SKU camera profile loaded")
+        self.profile_status_label.setObjectName("ProfileStatus")
+        self.profile_status_label.setWordWrap(True)
+
+        self.refresh_sku_btn.clicked.connect(self.refresh_sku_profiles)
+        self.load_sku_profile_btn.clicked.connect(self.load_sku_camera_profile)
+
+        sku_layout.addWidget(QLabel("SKU"), 0, 0)
+        sku_layout.addWidget(self.sku_combo, 0, 1)
+        sku_layout.addWidget(self.refresh_sku_btn, 0, 2)
+        sku_layout.addWidget(self.load_sku_profile_btn, 0, 3)
+        sku_layout.addWidget(self.profile_status_label, 1, 0, 1, 4)
+        sku_layout.setColumnStretch(1, 1)
+        top_row.addWidget(sku_box, 5)
+
+        path_box = QGroupBox("Output & Runner")
+        path_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        path_grid = QGridLayout(path_box)
+        path_grid.setContentsMargins(12, 12, 12, 10)
+        path_grid.setHorizontalSpacing(8)
+        path_grid.setVerticalSpacing(8)
 
         src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         camera_dir = os.path.join(src_dir, "camera")
@@ -1093,94 +1190,108 @@ class AutoPLCFFCProcessTab(QWidget):
         default_save = os.path.join(os.path.abspath(os.path.join(src_dir, "..")), "media", "Auto_FFC_Capture")
 
         self.script_path_edit = QLineEdit(default_runner)
+        self.script_path_edit.setToolTip("Python runner used by this Capture page")
         self.save_dir_edit = QLineEdit(default_save)
+        self.save_dir_edit.setToolTip("Root folder for capture cycles")
 
         script_browse = QPushButton("Browse")
+        script_browse.setObjectName("SecondaryButton")
+        script_browse.setFixedWidth(76)
         script_browse.clicked.connect(self.browse_script_path)
         save_browse = QPushButton("Browse")
+        save_browse.setObjectName("SecondaryButton")
+        save_browse.setFixedWidth(76)
         save_browse.clicked.connect(self.browse_save_dir)
-        open_output_btn = QPushButton("Open Output Folder")
+        open_output_btn = QPushButton("Open Folder")
+        open_output_btn.setObjectName("SecondaryButton")
+        open_output_btn.setFixedWidth(96)
         open_output_btn.clicked.connect(
             lambda: open_output_folder_path(self.save_dir_edit.text(), self)
         )
 
-        script_row = QHBoxLayout()
-        script_row.addWidget(self.script_path_edit)
-        script_row.addWidget(script_browse)
+        path_grid.addWidget(QLabel("Runner"), 0, 0)
+        path_grid.addWidget(self.script_path_edit, 0, 1)
+        path_grid.addWidget(script_browse, 0, 2)
+        path_grid.addWidget(QLabel("Save to"), 1, 0)
+        path_grid.addWidget(self.save_dir_edit, 1, 1)
+        save_buttons = QHBoxLayout()
+        save_buttons.setContentsMargins(0, 0, 0, 0)
+        save_buttons.setSpacing(6)
+        save_buttons.addWidget(save_browse)
+        save_buttons.addWidget(open_output_btn)
+        path_grid.addLayout(save_buttons, 1, 2)
+        path_grid.setColumnStretch(1, 1)
+        top_row.addWidget(path_box, 7)
+        main.addLayout(top_row)
 
-        save_row = QHBoxLayout()
-        save_row.addWidget(self.save_dir_edit)
-        save_row.addWidget(save_browse)
-        save_row.addWidget(open_output_btn)
+        # ---------------- CAPTURE / PLC CONFIGURATION ----------------
+        cap_box = QGroupBox("Capture & PLC Configuration")
+        cap_outer = QVBoxLayout(cap_box)
+        cap_outer.setContentsMargins(12, 12, 12, 10)
+        cap_outer.setSpacing(8)
 
-        path_layout.addRow("Runner Script", script_row)
-        path_layout.addRow("Save Folder", save_row)
-        main.addWidget(path_box)
+        cap_columns = QHBoxLayout()
+        cap_columns.setSpacing(8)
 
-        # ---------------- CAPTURE + PLC SETTINGS ----------------
-        cap_box = QGroupBox("Capture / PLC Settings")
-        cap_grid = QGridLayout(cap_box)
-        cap_grid.setSpacing(12)
-
-        left = QFormLayout()
-        left.setSpacing(10)
-        right = QFormLayout()
-        right.setSpacing(10)
+        operation_panel, operation_l = panel("Operation")
+        operation_form = compact_form()
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["PLC_SOFTWARE", "SOFTWARE", "FREE"])
         self.mode_combo.setCurrentText("PLC_SOFTWARE")
-
-        self.sequence_label = QLabel(
-            "PLC_SOFTWARE sequence: 1) BEAD -> sidewall1 + sidewall2 + tread + bead in parallel, "
-            "2) shared 4K camera 254901431 is re-armed, then MAIN releases innerwall. "
-            "All four cameras use AcquisitionStart/Software and the same 4K stitching logic."
-        )
-        self.sequence_label.setWordWrap(True)
-        self.sequence_label.setObjectName("InfoNote")
-
         self.num_main_spin = self.make_spin(1, 1000, 1)
         self.num_bead_spin = self.make_spin(0, 1000, 1)
         self.num_main_spin.valueChanged.connect(self.num_bead_spin.setValue)
 
-        # Common frame/chunk height for sidewall1, sidewall2 and tread.
-        self.camera_height_spin = self.make_spin(1, 100000, 15000)
-
-        # Shared serial 254901431 serves both bead and innerwall. It is a 4K
-        # camera and therefore uses the same patch/final-height stitching settings.
-        self.shared_camera_serial = "254901431"
-        self.final_height_spin = self.make_spin(1, 200000, 60000)
-
-        # Capture build mode:
-        # HEIGHT_BASED = existing fixed FINAL_HEIGHT stitching
-        # TIME_BASED   = collect frames continuously for TIME_CAPTURE_SEC seconds
         self.capture_build_mode_combo = QComboBox()
         self.capture_build_mode_combo.addItems(["HEIGHT_BASED", "TIME_BASED"])
         self.capture_build_mode_combo.setCurrentText("HEIGHT_BASED")
-
         self.time_capture_sec_spin = self.make_double(0.1, 120.0, 2.0, 2)
 
         self.pixel_format_combo = QComboBox()
         self.pixel_format_combo.addItems(["Mono16", "Mono8"])
         self.pixel_format_combo.setCurrentText("Mono8")
-
-        # Saved output bit depth.
-        # Camera Pixel Format controls camera capture.
-        # Output Bit Depth controls final saved raw/FFC files.
         self.output_bit_depth_combo = QComboBox()
         self.output_bit_depth_combo.addItems(["8-bit", "16-bit"])
         self.output_bit_depth_combo.setCurrentText("8-bit")
-
         self.save_format_combo = QComboBox()
         self.save_format_combo.addItems(["PNG", "BMP"])
         self.save_format_combo.setCurrentText("PNG")
 
+        operation_form.addRow("Mode", self.mode_combo)
+        operation_form.addRow("Cycles", self.num_main_spin)
+        operation_form.addRow("Bead cycles", self.num_bead_spin)
+        operation_form.addRow("Build mode", self.capture_build_mode_combo)
+        operation_form.addRow("Timed capture", self.time_capture_sec_spin)
+        operation_form.addRow("Camera format", self.pixel_format_combo)
+        operation_form.addRow("Output depth", self.output_bit_depth_combo)
+        operation_form.addRow("File format", self.save_format_combo)
+        operation_l.addLayout(operation_form)
+        cap_columns.addWidget(operation_panel, 4)
+
+        transport_panel, transport_l = panel("Image & Transport")
+        transport_form = compact_form()
+        self.camera_height_spin = self.make_spin(1, 100000, 15000)
+        self.shared_camera_serial = "254901431"
+        self.final_height_spin = self.make_spin(1, 200000, 60000)
         self.stream_buffers_spin = self.make_spin(1, 128, 16)
-        self.buffer_timeout_spin = self.make_spin(1000, 300000, 30000)
+        self.buffer_timeout_spin = self.make_spin(1000, 300000, 300000)
         self.packet_size_spin = self.make_spin(576, 9014, 9000)
         self.packet_delay_spin = self.make_spin(0, 100000, 1000)
-        self.png_compression_spin = self.make_spin(0, 9, 3)
+        self.png_compression_spin = self.make_spin(0, 9, 0)
 
+        transport_form.addRow("Patch height", self.camera_height_spin)
+        transport_form.addRow("Final height", self.final_height_spin)
+        transport_form.addRow("Stream buffers", self.stream_buffers_spin)
+        transport_form.addRow("Timeout (ms)", self.buffer_timeout_spin)
+        transport_form.addRow("Packet size", self.packet_size_spin)
+        transport_form.addRow("Packet delay", self.packet_delay_spin)
+        transport_form.addRow("PNG compression", self.png_compression_spin)
+        transport_l.addLayout(transport_form)
+        cap_columns.addWidget(transport_panel, 4)
+
+        plc_panel, plc_l = panel("PLC Trigger")
+        plc_form = compact_form()
         self.plc_ip_edit = QLineEdit("192.168.10.1")
         self.plc_rack_spin = self.make_spin(0, 10, 0)
         self.plc_slot_spin = self.make_spin(0, 10, 1)
@@ -1189,94 +1300,136 @@ class AutoPLCFFCProcessTab(QWidget):
         self.main_bit_spin = self.make_spin(0, 7, 3)
         self.bead_byte_spin = self.make_spin(0, 4096, 86)
         self.bead_bit_spin = self.make_spin(0, 7, 0)
-        self.poll_delay_spin = self.make_double(0.001, 1.0, 0.002, 3)
-        self.main_latch_chk = QCheckBox("Latch MAIN after BEAD edge")
+        self.poll_delay_spin = self.make_double(0.001, 1.0, 0.005, 3)
+        self.main_latch_chk = QCheckBox("Latch MAIN after BEAD")
         self.main_latch_chk.setChecked(True)
-        self.overlap_rearm_chk = QCheckBox("Re-arm shared 4K inner/bead camera while other BEAD cameras finish")
+        self.overlap_rearm_chk = QCheckBox("Prepare shared camera early")
         self.overlap_rearm_chk.setChecked(True)
         self.overlap_rearm_chk.setEnabled(True)
         self.after_trigger_delay_spin = self.make_double(0.0, 1.0, 0.0, 3)
 
-        left.addRow("Capture Mode", self.mode_combo)
-        left.addRow("Main Images", self.num_main_spin)
-        left.addRow("Bead Images", self.num_bead_spin)
-        left.addRow("4K Camera/Patch Height", self.camera_height_spin)
-        left.addRow("4K Final Stitch Height", self.final_height_spin)
-        left.addRow("Capture Build Mode", self.capture_build_mode_combo)
-        left.addRow("Time Capture sec", self.time_capture_sec_spin)
-        left.addRow("Pixel Format", self.pixel_format_combo)
-        left.addRow("Output Bit Depth", self.output_bit_depth_combo)
-        left.addRow("Save Format", self.save_format_combo)
-        left.addRow("Stream Buffers", self.stream_buffers_spin)
-        left.addRow("Buffer Timeout ms", self.buffer_timeout_spin)
-        left.addRow("Packet Size", self.packet_size_spin)
-        left.addRow("Packet Delay", self.packet_delay_spin)
-        left.addRow("PNG Compression", self.png_compression_spin)
+        rack_slot_row = QWidget()
+        rack_slot_l = QHBoxLayout(rack_slot_row)
+        rack_slot_l.setContentsMargins(0, 0, 0, 0)
+        rack_slot_l.setSpacing(6)
+        rack_slot_l.addWidget(QLabel("R"))
+        rack_slot_l.addWidget(self.plc_rack_spin)
+        rack_slot_l.addWidget(QLabel("S"))
+        rack_slot_l.addWidget(self.plc_slot_spin)
 
-        right.addRow(self.sequence_label)
-        right.addRow("PLC IP", self.plc_ip_edit)
-        right.addRow("PLC Rack", self.plc_rack_spin)
-        right.addRow("PLC Slot", self.plc_slot_spin)
-        right.addRow("PLC DB", self.plc_db_spin)
-        right.addRow("Main Trigger Byte", self.main_byte_spin)
-        right.addRow("Main Trigger Bit", self.main_bit_spin)
-        right.addRow("Bead Trigger Byte", self.bead_byte_spin)
-        right.addRow("Bead Trigger Bit", self.bead_bit_spin)
-        right.addRow("PLC Poll Delay sec", self.poll_delay_spin)
-        right.addRow(self.main_latch_chk)
-        right.addRow(self.overlap_rearm_chk)
-        right.addRow("Post-trigger buffer delay sec", self.after_trigger_delay_spin)
+        main_trigger_row = QWidget()
+        main_trigger_l = QHBoxLayout(main_trigger_row)
+        main_trigger_l.setContentsMargins(0, 0, 0, 0)
+        main_trigger_l.setSpacing(6)
+        main_trigger_l.addWidget(QLabel("Byte"))
+        main_trigger_l.addWidget(self.main_byte_spin)
+        main_trigger_l.addWidget(QLabel("Bit"))
+        main_trigger_l.addWidget(self.main_bit_spin)
 
-        cap_grid.addLayout(left, 0, 0)
-        cap_grid.addLayout(right, 0, 1)
+        bead_trigger_row = QWidget()
+        bead_trigger_l = QHBoxLayout(bead_trigger_row)
+        bead_trigger_l.setContentsMargins(0, 0, 0, 0)
+        bead_trigger_l.setSpacing(6)
+        bead_trigger_l.addWidget(QLabel("Byte"))
+        bead_trigger_l.addWidget(self.bead_byte_spin)
+        bead_trigger_l.addWidget(QLabel("Bit"))
+        bead_trigger_l.addWidget(self.bead_bit_spin)
+
+        plc_form.addRow("PLC IP", self.plc_ip_edit)
+        plc_form.addRow("Rack / slot", rack_slot_row)
+        plc_form.addRow("DB", self.plc_db_spin)
+        plc_form.addRow("MAIN trigger", main_trigger_row)
+        plc_form.addRow("BEAD trigger", bead_trigger_row)
+        plc_form.addRow("Poll delay", self.poll_delay_spin)
+        plc_form.addRow("Buffer delay", self.after_trigger_delay_spin)
+        plc_l.addLayout(plc_form)
+        plc_l.addWidget(self.main_latch_chk)
+        plc_l.addWidget(self.overlap_rearm_chk)
+        cap_columns.addWidget(plc_panel, 5)
+
+        cap_outer.addLayout(cap_columns)
+
+        self.sequence_label = QLabel(
+            "Validated sequence: BEAD starts SW1, SW2, Tread and Bead in parallel; the shared camera then "
+            "switches immediately to Innerwall and the current MAIN edge releases Innerwall capture."
+        )
+        self.sequence_label.setWordWrap(True)
+        self.sequence_label.setObjectName("CompactHint")
+        cap_outer.addWidget(self.sequence_label)
         main.addWidget(cap_box)
 
-        # ---------------- CAMERA CONFIG TABLE ----------------
-        cam_box = QGroupBox("Camera Settings")
+        # ---------------- CAMERA PROFILE TABLE ----------------
+        cam_box = QGroupBox("Loaded Camera Profile")
         cam_l = QVBoxLayout(cam_box)
-        cam_l.setSpacing(8)
+        cam_l.setContentsMargins(12, 12, 12, 10)
+        cam_l.setSpacing(7)
 
-        hint = QLabel(
-            "All four cameras are 4K. Shared serial 254901431 performs both bead and "
-            "innerwall roles. Every camera uses AcquisitionStart/Software triggering, "
-            "the common 4K Camera/Patch Height, and the configured Final Height. "
-            "The shared camera is safely stopped, re-armed and restarted between its "
-            "BEAD image and INNERWALL image so both use the same stitching logic."
+        cam_head = QHBoxLayout()
+        cam_hint = QLabel(
+            "Five logical roles are shown. Bead and Innerwall may share a serial while retaining independent settings."
         )
-        hint.setWordWrap(True)
-        hint.setObjectName("InfoNote")
-        cam_l.addWidget(hint)
+        cam_hint.setObjectName("TableHint")
+        cam_head.addWidget(cam_hint)
+        cam_head.addStretch()
+        cam_l.addLayout(cam_head)
 
         self.camera_table = QTableWidget()
-        self.camera_table.setColumnCount(11)
+        self.camera_table.setColumnCount(13)
         self.camera_table.setHorizontalHeaderLabels([
-            "Serial", "Enabled", "Camera Name", "Width", "Pixel Format",
-            "Final Height", "Line Rate", "Exposure us", "Gain",
-            "Main Role", "Bead Role"
+            "Role", "Serial", "Enabled", "Width", "Patch H",
+            "Pixel", "Final H", "Line Rate", "Exposure", "Gain",
+            "Buffers", "Packet", "Delay"
         ])
-        self.camera_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.camera_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(58)
+        self.camera_table.verticalHeader().setDefaultSectionSize(30)
+        self.camera_table.verticalHeader().setFixedWidth(28)
         self.camera_table.setAlternatingRowColors(True)
-        self.camera_table.setMinimumHeight(190)
+        self.camera_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.camera_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.camera_table.setMinimumHeight(205)
+        self.camera_table.setMaximumHeight(230)
+        self.camera_table.setShowGrid(False)
         cam_l.addWidget(self.camera_table)
         self.load_default_camera_table()
+        self.refresh_sku_profiles()
+
+        for col, width in enumerate([90, 105, 78, 68, 82, 78, 82, 88, 86, 62, 72, 72, 72]):
+            self.camera_table.setColumnWidth(col, width)
 
         main.addWidget(cam_box)
 
-        # ---------------- FFC SETTINGS ----------------
-        ffc_box = QGroupBox("Software FFC Settings")
-        ffc_grid = QGridLayout(ffc_box)
-        ffc_grid.setSpacing(12)
+        # ---------------- FFC + CAPTURE CONTROL ----------------
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(10)
 
-        ffc_left = QFormLayout()
-        ffc_right = QFormLayout()
-        self.enable_ffc_chk = QCheckBox("Enable Software FFC")
+        ffc_box = QGroupBox("Software FFC")
+        ffc_grid = QGridLayout(ffc_box)
+        ffc_grid.setContentsMargins(12, 12, 12, 10)
+        ffc_grid.setHorizontalSpacing(16)
+        ffc_grid.setVerticalSpacing(7)
+
+        self.enable_ffc_chk = QCheckBox("Enable FFC")
         self.enable_ffc_chk.setChecked(True)
-        self.save_raw_chk = QCheckBox("Save Raw Images")
+        self.save_raw_chk = QCheckBox("Save raw")
         self.save_raw_chk.setChecked(False)
-        self.save_corrected_chk = QCheckBox("Save Corrected Images")
+        self.save_corrected_chk = QCheckBox("Save corrected")
         self.save_corrected_chk.setChecked(True)
-        self.save_gain_chk = QCheckBox("Save Gain .npy")
+        self.save_gain_chk = QCheckBox("Save gain .npy")
         self.save_gain_chk.setChecked(False)
+
+        checks_panel = QFrame()
+        checks_panel.setObjectName("CheckPanel")
+        checks_l = QGridLayout(checks_panel)
+        checks_l.setContentsMargins(10, 8, 10, 8)
+        checks_l.setHorizontalSpacing(14)
+        checks_l.setVerticalSpacing(7)
+        checks_l.addWidget(self.enable_ffc_chk, 0, 0)
+        checks_l.addWidget(self.save_corrected_chk, 0, 1)
+        checks_l.addWidget(self.save_raw_chk, 1, 0)
+        checks_l.addWidget(self.save_gain_chk, 1, 1)
 
         self.gain_target_combo = QComboBox()
         self.gain_target_combo.addItems(["PERCENTILE_95", "MEAN", "MAX"])
@@ -1284,119 +1437,301 @@ class AutoPLCFFCProcessTab(QWidget):
         self.gain_max_spin = self.make_double(0.01, 100.0, 15.99, 3)
         self.ffc_row_block_spin = self.make_spin(16, 10000, 512)
 
-        ffc_left.addRow(self.enable_ffc_chk)
-        ffc_left.addRow(self.save_raw_chk)
-        ffc_left.addRow(self.save_corrected_chk)
-        ffc_left.addRow(self.save_gain_chk)
-        ffc_right.addRow("Gain Target Mode", self.gain_target_combo)
-        ffc_right.addRow("Gain Min", self.gain_min_spin)
-        ffc_right.addRow("Gain Max", self.gain_max_spin)
-        ffc_right.addRow("FFC Row Block", self.ffc_row_block_spin)
+        ffc_form = compact_form()
+        ffc_form.addRow("Target", self.gain_target_combo)
+        ffc_form.addRow("Gain min", self.gain_min_spin)
+        ffc_form.addRow("Gain max", self.gain_max_spin)
+        ffc_form.addRow("Row block", self.ffc_row_block_spin)
 
-        ffc_grid.addLayout(ffc_left, 0, 0)
-        ffc_grid.addLayout(ffc_right, 0, 1)
-        main.addWidget(ffc_box)
+        ffc_grid.addWidget(checks_panel, 0, 0)
+        ffc_grid.addLayout(ffc_form, 0, 1)
+        ffc_grid.setColumnStretch(1, 1)
+        bottom_row.addWidget(ffc_box, 7)
 
-        # ---------------- CONTROL ----------------
         control_box = QGroupBox("Capture Control")
         control_l = QVBoxLayout(control_box)
-        btn_row = QHBoxLayout()
+        control_l.setContentsMargins(12, 12, 12, 10)
+        control_l.setSpacing(8)
 
+        self.status_label = QLabel("Ready — load a profile, verify settings, then start capture")
+        self.status_label.setObjectName("CaptureStatus")
+        self.status_label.setWordWrap(True)
+        control_l.addWidget(self.status_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         self.start_btn = QPushButton("Start Capture")
+        self.start_btn.setObjectName("PrimaryButton")
+        self.start_btn.setFixedWidth(130)
         self.start_btn.clicked.connect(self.start_process)
-        self.stop_btn = QPushButton("Stop Capture / Release Cameras")
+        self.stop_btn = QPushButton("Stop & Release")
+        self.stop_btn.setObjectName("StopButton")
+        self.stop_btn.setFixedWidth(130)
         self.stop_btn.clicked.connect(self.stop_process)
         self.stop_btn.setEnabled(False)
+        control_open_btn = QPushButton("Open Output")
+        control_open_btn.setObjectName("SecondaryButton")
+        control_open_btn.setFixedWidth(105)
+        control_open_btn.clicked.connect(
+            lambda: open_output_folder_path(self.save_dir_edit.text(), self)
+        )
 
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.stop_btn)
+        btn_row.addWidget(control_open_btn)
         btn_row.addStretch()
-
-        self.status_label = QLabel("Ready")
-        self.status_label.setObjectName("InfoNote")
-        self.status_label.setWordWrap(True)
-
         control_l.addLayout(btn_row)
-        control_l.addWidget(self.status_label)
-        main.addWidget(control_box)
+        bottom_row.addWidget(control_box, 5)
+        main.addLayout(bottom_row)
 
         # ---------------- TERMINAL ----------------
-        term_title = QLabel("Terminal Output")
-        term_title.setObjectName("PageTitle")
-        main.addWidget(term_title)
+        terminal_box = QGroupBox("Live Capture Console")
+        terminal_l = QVBoxLayout(terminal_box)
+        terminal_l.setContentsMargins(10, 10, 10, 10)
+        terminal_l.setSpacing(7)
+
+        terminal_toolbar = QHBoxLayout()
+        console_note = QLabel("Runner and camera diagnostics")
+        console_note.setObjectName("TableHint")
+        clear_terminal_btn = QPushButton("Clear")
+        clear_terminal_btn.setObjectName("SecondaryButton")
+        clear_terminal_btn.setFixedWidth(70)
+        clear_terminal_btn.clicked.connect(self.terminal.clear if hasattr(self, "terminal") else lambda: None)
+        terminal_toolbar.addWidget(console_note)
+        terminal_toolbar.addStretch()
+        terminal_toolbar.addWidget(clear_terminal_btn)
+        terminal_l.addLayout(terminal_toolbar)
 
         self.terminal = QTextEdit()
         self.terminal.setReadOnly(True)
-        self.terminal.setMinimumHeight(260)
-        self.terminal.setStyleSheet("""
-            QTextEdit {
-                background: #111;
-                color: #00ff7f;
-                border-radius: 8px;
-                padding: 8px;
-                font-family: Consolas;
-                font-size: 12px;
-            }
-        """)
-        main.addWidget(self.terminal, 1)
+        self.terminal.setMinimumHeight(210)
+        self.terminal.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        terminal_l.addWidget(self.terminal, 1)
 
+        # Reconnect Clear after terminal creation.
+        try:
+            clear_terminal_btn.clicked.disconnect()
+        except Exception:
+            pass
+        clear_terminal_btn.clicked.connect(self.terminal.clear)
+
+        main.addWidget(terminal_box, 1)
         self.setStyleSheet(self._style())
 
     # -----------------------------------------------------
     def _style(self):
         return """
-            QWidget { background: #f7f7f9; font-family: Arial; font-size: 13px; }
-            QLabel#PageTitle { font-size: 20px; font-weight: bold; color: #5b168b; }
-            QLabel#InfoNote {
-                background: #fff7df;
-                border: 1px solid #e8d28a;
-                border-radius: 8px;
-                padding: 8px 10px;
-                color: #4b3b00;
+            QWidget#CapturePage {
+                background: #f6f7fb;
+                color: #263238;
+                font-family: "Segoe UI", Arial, sans-serif;
+                font-size: 12px;
+            }
+            QScrollArea#CaptureScroll, QScrollArea#CaptureScroll > QWidget > QWidget {
+                background: #f6f7fb;
+                border: none;
+            }
+            QFrame#PageHeader { background: transparent; border: none; }
+            QLabel#PageTitle {
+                font-size: 20px;
+                font-weight: 700;
+                color: #5b168b;
+            }
+            QLabel#PageSubtitle {
+                font-size: 11px;
+                color: #667085;
+            }
+            QLabel#ModeBadge, QLabel#CoreBadge {
+                border-radius: 11px;
+                padding: 5px 10px;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QLabel#ModeBadge {
+                background: #eee5f6;
+                color: #5b168b;
+                border: 1px solid #dbc7ec;
+            }
+            QLabel#CoreBadge {
+                background: #f3eef8;
+                color: #6d2fa0;
+                border: 1px solid #dbc7ec;
             }
             QGroupBox {
-                background: white;
-                border: 1px solid #dedede;
-                border-radius: 12px;
-                margin-top: 12px;
-                padding: 14px;
-                font-weight: bold;
+                background: #ffffff;
+                border: 1px solid #e3e6ec;
+                border-radius: 10px;
+                margin-top: 9px;
+                padding-top: 6px;
+                font-weight: 600;
+                color: #5b168b;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 14px;
-                padding: 0 6px;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 5px;
+                background: #ffffff;
                 color: #5b168b;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QFrame#InnerPanel {
+                background: #faf9fc;
+                border: 1px solid #ece8f1;
+                border-radius: 8px;
+            }
+            QLabel#PanelTitle {
+                color: #5b168b;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QLabel#ProfileStatus, QLabel#CaptureStatus, QLabel#CompactHint {
+                border-radius: 6px;
+                padding: 6px 9px;
+                font-size: 11px;
+            }
+            QLabel#ProfileStatus {
+                background: #fff8e6;
+                border: 1px solid #ead89b;
+                color: #665200;
+            }
+            QLabel#CaptureStatus {
+                background: #f5effa;
+                border: 1px solid #dfcceb;
+                color: #4f176f;
+                font-weight: 600;
+            }
+            QLabel#CompactHint {
+                background: #fbf7fd;
+                border-left: 3px solid #6d2fa0;
+                color: #5d5265;
+            }
+            QLabel#TableHint {
+                color: #667085;
+                font-size: 10px;
             }
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-                min-height: 30px;
-                border: 1px solid #cfcfcf;
+                min-height: 28px;
+                max-height: 28px;
+                background: #ffffff;
+                color: #263238;
+                border: 1px solid #d7dce3;
                 border-radius: 6px;
-                padding: 4px 8px;
-                background: white;
+                padding: 0 8px;
+                selection-background-color: #6d2fa0;
+            }
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+                border: 1px solid #7b3fac;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 22px;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button,
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                width: 16px;
+                border: none;
+                background: transparent;
             }
             QPushButton {
-                min-height: 34px;
-                border-radius: 8px;
-                padding: 6px 16px;
-                background: #6d2fa0;
-                color: white;
-                font-weight: bold;
+                min-height: 30px;
+                max-height: 30px;
+                border-radius: 6px;
+                padding: 0 12px;
+                font-size: 11px;
+                font-weight: 600;
             }
-            QPushButton:hover { background: #7e3bb8; }
-            QPushButton:disabled { background: #9a9a9a; }
+            QPushButton#PrimaryButton {
+                background: #6d2fa0;
+                color: #ffffff;
+                border: 1px solid #6d2fa0;
+            }
+            QPushButton#PrimaryButton:hover { background: #7d3bb3; }
+            QPushButton#SecondaryButton {
+                background: #ffffff;
+                color: #5b168b;
+                border: 1px solid #b996d0;
+            }
+            QPushButton#SecondaryButton:hover { background: #f4edf8; }
+            QPushButton#StopButton {
+                background: #4b5563;
+                color: #ffffff;
+                border: 1px solid #4b5563;
+            }
+            QPushButton#StopButton:hover { background: #374151; }
+            QPushButton:disabled {
+                background: #e6e8ec;
+                color: #9aa1ab;
+                border: 1px solid #d8dce2;
+            }
+            QCheckBox {
+                min-height: 22px;
+                color: #3f4650;
+                spacing: 7px;
+            }
+            QCheckBox::indicator {
+                width: 15px;
+                height: 15px;
+                border: 1px solid #b9bec7;
+                border-radius: 3px;
+                background: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background: #6d2fa0;
+                border: 1px solid #6d2fa0;
+            }
+            QFrame#CheckPanel {
+                background: #faf9fc;
+                border: 1px solid #ece8f1;
+                border-radius: 7px;
+            }
             QTableWidget {
-                background: white;
-                border: 1px solid #dedede;
-                border-radius: 8px;
-                gridline-color: #eeeeee;
+                background: #ffffff;
+                alternate-background-color: #faf9fc;
+                border: 1px solid #e1e4ea;
+                border-radius: 7px;
+                color: #30363d;
+                selection-background-color: #eee5f6;
+                selection-color: #4f176f;
+                outline: none;
+            }
+            QTableWidget::item {
+                padding: 3px 6px;
+                border-bottom: 1px solid #eff1f4;
             }
             QHeaderView::section {
-                background: #f1e9f8;
+                background: #f0e7f7;
                 color: #5b168b;
-                padding: 6px;
+                min-height: 28px;
+                padding: 4px 5px;
                 border: none;
-                font-weight: bold;
+                border-right: 1px solid #e1d4eb;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QTextEdit {
+                background: #111318;
+                color: #d7fbe8;
+                border: 1px solid #252936;
+                border-radius: 7px;
+                padding: 8px;
+                font-family: Consolas, "Courier New", monospace;
+                font-size: 11px;
+                selection-background-color: #6d2fa0;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 10px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #c8b4d8;
+                border-radius: 4px;
+                min-height: 30px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         """
 
@@ -1438,28 +1773,236 @@ class AutoPLCFFCProcessTab(QWidget):
             self.save_dir_edit.setText(folder)
 
     # -----------------------------------------------------
+    def _normalise_profile_role(self, value):
+        name = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "sidewall_1": "sidewall1",
+            "side_wall_1": "sidewall1",
+            "sidewall_2": "sidewall2",
+            "side_wall_2": "sidewall2",
+            "inner": "innerwall",
+            "inner_wall": "innerwall",
+        }
+        return aliases.get(name, name)
+
+    # -----------------------------------------------------
+    def refresh_sku_profiles(self):
+        current = self.sku_combo.currentText().strip() if hasattr(self, "sku_combo") else ""
+        names = []
+        try:
+            self.camera_profile_root.mkdir(parents=True, exist_ok=True)
+            for path in sorted(self.camera_profile_root.glob("*/camera_profile.json")):
+                names.append(path.parent.name)
+        except Exception as error:
+            if hasattr(self, "profile_status_label"):
+                self.profile_status_label.setText(f"Could not scan SKU camera profiles: {error}")
+
+        self.sku_combo.blockSignals(True)
+        self.sku_combo.clear()
+        self.sku_combo.addItems(names)
+        if current:
+            self.sku_combo.setCurrentText(current)
+        elif names:
+            self.sku_combo.setCurrentIndex(0)
+        self.sku_combo.blockSignals(False)
+
+    # -----------------------------------------------------
+    def _camera_profile_path(self, sku_name):
+        return self.camera_profile_root / str(sku_name).strip() / "camera_profile.json"
+
+    # -----------------------------------------------------
+    def _normalise_camera_profile(self, raw_profile, sku_name):
+        if not isinstance(raw_profile, dict):
+            raise ValueError("Camera profile JSON must contain an object")
+
+        profile_type = str(raw_profile.get("profile_type", "camera")).strip().lower()
+        if profile_type and profile_type != "camera":
+            raise ValueError(f"Selected profile is not a camera profile: {profile_type}")
+
+        raw_cameras = raw_profile.get("cameras", {}) or {}
+        if not isinstance(raw_cameras, dict) or not raw_cameras:
+            raise ValueError("Camera profile has no cameras mapping")
+
+        cameras = {}
+        for raw_role, raw_cfg in raw_cameras.items():
+            role = self._normalise_profile_role(raw_role)
+            if role not in ("sidewall1", "sidewall2", "tread", "bead", "innerwall"):
+                continue
+            if isinstance(raw_cfg, dict):
+                cameras[role] = deepcopy(raw_cfg)
+
+        if "innerwall" in cameras and "bead" not in cameras:
+            cameras["bead"] = deepcopy(cameras["innerwall"])
+        elif "bead" in cameras and "innerwall" not in cameras:
+            cameras["innerwall"] = deepcopy(cameras["bead"])
+
+        required = ("sidewall1", "sidewall2", "tread", "bead", "innerwall")
+        missing = [role for role in required if role not in cameras]
+        if missing:
+            raise ValueError(f"Camera profile is missing role(s): {', '.join(missing)}")
+
+        shared_serial = str(
+            raw_profile.get("shared_inner_bead_serial")
+            or cameras["innerwall"].get("serial")
+            or cameras["bead"].get("serial")
+            or self.shared_camera_serial
+        ).strip()
+        if not shared_serial:
+            shared_serial = "254901431"
+        cameras["innerwall"]["serial"] = shared_serial
+        cameras["bead"]["serial"] = shared_serial
+
+        profile = deepcopy(raw_profile)
+        profile["profile_type"] = "camera"
+        profile["sku_name"] = str(raw_profile.get("sku_name") or raw_profile.get("sku") or sku_name)
+        profile["sku"] = profile["sku_name"]
+        profile["shared_inner_bead_serial"] = shared_serial
+        profile["shared_role_profiles_enabled"] = True
+        profile["cameras"] = cameras
+        return profile
+
+    # -----------------------------------------------------
+    def load_sku_camera_profile(self, checked=False, *, show_message=True):
+        del checked
+        sku = self.sku_combo.currentText().strip()
+        if not sku:
+            if show_message:
+                QMessageBox.warning(self, "Missing SKU", "Select or enter an SKU first.")
+            return False
+
+        path = self._camera_profile_path(sku)
+        if not path.exists():
+            self.profile_status_label.setText(f"Camera profile not found: {path}")
+            if show_message:
+                QMessageBox.warning(self, "Camera Profile Missing", f"Camera profile not found:\n{path}")
+            return False
+
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw_profile = json.load(handle)
+            profile = self._normalise_camera_profile(raw_profile, sku)
+            self._populate_camera_table_from_profile(profile)
+        except Exception as error:
+            self.profile_status_label.setText(f"Profile load failed: {error}")
+            if show_message:
+                QMessageBox.critical(self, "Camera Profile Error", str(error))
+            return False
+
+        self.loaded_camera_profile = profile
+        self.loaded_camera_profile_path = str(path)
+        self.loaded_sku_name = sku
+        self.shared_camera_serial = str(profile.get("shared_inner_bead_serial", "254901431"))
+        self.profile_status_label.setText(
+            f"Loaded SKU={sku} | {path} | shared bead/inner serial={self.shared_camera_serial}"
+        )
+
+        default_capture_root = self.project_root / "media" / "Auto_FFC_Capture" / sku
+        current_save = self.save_dir_edit.text().strip()
+        generic_save = str(self.project_root / "media" / "Auto_FFC_Capture")
+        if not current_save or os.path.normcase(os.path.abspath(current_save)) == os.path.normcase(os.path.abspath(generic_save)):
+            self.save_dir_edit.setText(str(default_capture_root))
+
+        if show_message:
+            QMessageBox.information(
+                self,
+                "SKU Camera Profile Loaded",
+                f"Loaded camera profile for SKU: {sku}\n\n{path}",
+            )
+        return True
+
+    # -----------------------------------------------------
+    def _set_camera_table_row(self, row, role, cfg):
+        values = {
+            0: role,
+            1: str(cfg.get("serial", "")),
+            3: str(int(cfg.get("width", 4096))),
+            4: str(int(cfg.get("camera_height", cfg.get("height", 15000)))),
+            6: str(int(cfg.get("final_height", 60000))),
+            7: str(cfg.get("acquisition_line_rate", cfg.get("line_rate", ""))),
+            8: str(cfg.get("exposure_time", cfg.get("exposure_us", 120.0))),
+            9: str(cfg.get("gain", 24.0)),
+            10: str(int(cfg.get("num_stream_buffers", 16))),
+            11: str(int(cfg.get("packet_size", 9000))),
+            12: str(int(cfg.get("packet_delay", 1000))),
+        }
+        for col, value in values.items():
+            item = QTableWidgetItem(value)
+            item.setTextAlignment(Qt.AlignCenter)
+            if col == 0:
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.camera_table.setItem(row, col, item)
+
+        enabled_combo = QComboBox()
+        enabled_combo.addItems(["Yes", "No"])
+        enabled_combo.setCurrentText("Yes" if bool(cfg.get("enabled", True)) else "No")
+        enabled_combo.setProperty("noWheelChange", True)
+        self.camera_table.setCellWidget(row, 2, enabled_combo)
+
+        pixel_combo = QComboBox()
+        pixel_combo.addItems(["Mono8", "Mono16"])
+        pixel = str(cfg.get("pixel_format", "Mono8"))
+        pixel_combo.setCurrentText("Mono16" if pixel.lower() == "mono16" else "Mono8")
+        pixel_combo.setProperty("noWheelChange", True)
+        self.camera_table.setCellWidget(row, 5, pixel_combo)
+
+    # -----------------------------------------------------
+    def _populate_camera_table_from_profile(self, profile):
+        cameras = profile.get("cameras", {})
+        role_order = ["sidewall1", "sidewall2", "tread", "bead", "innerwall"]
+        self.camera_table.setRowCount(len(role_order))
+        for row, role in enumerate(role_order):
+            self._set_camera_table_row(row, role, cameras.get(role, {}))
+
+        first = cameras.get("sidewall1") or next(iter(cameras.values()))
+        self.camera_height_spin.setValue(int(first.get("camera_height", first.get("height", 15000))))
+        self.final_height_spin.setValue(int(first.get("final_height", 60000)))
+        self.pixel_format_combo.setCurrentText(
+            "Mono16" if str(first.get("pixel_format", "Mono8")).lower() == "mono16" else "Mono8"
+        )
+        self.stream_buffers_spin.setValue(int(first.get("num_stream_buffers", 16)))
+        self.packet_size_spin.setValue(int(first.get("packet_size", 9000)))
+        self.packet_delay_spin.setValue(int(first.get("packet_delay", 1000)))
+
+    # -----------------------------------------------------
     def load_default_camera_table(self):
-        rows = [
-            ["254901428", "1", "sidewall2", "4096", "Mono8", "60000", "11575.0", "61.0", "24.0", "", "sidewall2"],
-            ["254901432", "1", "sidewall1", "4096", "Mono8", "60000", "11575.0", "61.0", "24.0", "", "sidewall1"],
-            ["254901430", "1", "tread", "4096", "Mono8", "60000", "14640.0", "48.0", "24.0", "", "tread"],
-            ["254901431", "1", "inner_camera_used_for_inner_and_bead", "4096", "Mono8", "60000", "11575.0", "61.0", "24.0", "innerwall", "bead"],
-        ]
-        self.camera_table.setRowCount(len(rows))
-
-        for r, row in enumerate(rows):
-            for c, value in enumerate(row):
-                if c == 4:
-                    combo = QComboBox()
-                    combo.addItems(["Mono16", "Mono8"])
-                    combo.setCurrentText(str(value))
-                    combo.setProperty("noWheelChange", True)
-                    self.camera_table.setCellWidget(r, c, combo)
-                    continue
-
-                item = QTableWidgetItem(str(value))
-                item.setTextAlignment(Qt.AlignCenter)
-                self.camera_table.setItem(r, c, item)
+        profile = {
+            "profile_type": "camera",
+            "sku_name": "CAPTURE_PAGE_DEFAULT",
+            "shared_inner_bead_serial": "254901431",
+            "cameras": {
+                "sidewall1": {
+                    "serial": "254901432", "enabled": True, "width": 4096,
+                    "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
+                    "acquisition_line_rate": 11471.0, "exposure_time": 56.0, "gain": 24.0,
+                    "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
+                },
+                "sidewall2": {
+                    "serial": "254901428", "enabled": True, "width": 4096,
+                    "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
+                    "acquisition_line_rate": 11471.0, "exposure_time": 86.0, "gain": 24.0,
+                    "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
+                },
+                "tread": {
+                    "serial": "254901430", "enabled": True, "width": 4096,
+                    "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
+                    "acquisition_line_rate": 14003.0, "exposure_time": 71.0, "gain": 24.0,
+                    "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
+                },
+                "bead": {
+                    "serial": "254901431", "enabled": True, "width": 4096,
+                    "camera_height": 15000, "pixel_format": "Mono8", "final_height": 60000,
+                    "acquisition_line_rate": 8937.0, "exposure_time": 61.5, "gain": 20.0,
+                    "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
+                },
+                "innerwall": {
+                    "serial": "254901431", "enabled": True, "width": 4096,
+                    "camera_height": 15000, "pixel_format": "Mono8", "final_height": 60000,
+                    "acquisition_line_rate": 12744.0, "exposure_time": 78.0, "gain": 24.0,
+                    "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
+                },
+            },
+        }
+        self._populate_camera_table_from_profile(profile)
 
     # -----------------------------------------------------
     def _cell_text(self, row, col):
@@ -1471,85 +2014,137 @@ class AutoPLCFFCProcessTab(QWidget):
         return item.text().strip() if item else ""
 
     # -----------------------------------------------------
-    def build_camera_configs_json(self):
+    def _table_role_configs(self):
+        loaded_cameras = {}
+        if isinstance(self.loaded_camera_profile, dict):
+            loaded_cameras = self.loaded_camera_profile.get("cameras", {}) or {}
+
         configs = {}
         for row in range(self.camera_table.rowCount()):
-            serial = self._cell_text(row, 0)
+            role = self._normalise_profile_role(self._cell_text(row, 0))
+            if role not in ("sidewall1", "sidewall2", "tread", "bead", "innerwall"):
+                continue
+
+            base = deepcopy(loaded_cameras.get(role, {})) if isinstance(loaded_cameras.get(role), dict) else {}
+            serial = self._cell_text(row, 1)
+            enabled = self._cell_text(row, 2).strip().lower() not in ("no", "0", "false", "off", "disabled")
+
+            def as_int(col, default):
+                try:
+                    return int(float(self._cell_text(row, col)))
+                except Exception:
+                    return int(default)
+
+            def as_float(col, default):
+                try:
+                    return float(self._cell_text(row, col))
+                except Exception:
+                    return float(default)
+
+            line_rate_text = self._cell_text(row, 7)
+            try:
+                line_rate = float(line_rate_text)
+                line_rate_enable = True
+            except Exception:
+                line_rate = 0.0
+                line_rate_enable = False
+
+            pixel = self._cell_text(row, 5)
+            pixel = "Mono16" if pixel.lower() == "mono16" else "Mono8"
+
+            base.update({
+                "serial": serial,
+                "enabled": enabled,
+                "width": as_int(3, 4096),
+                "height": as_int(4, self.camera_height_spin.value()),
+                "camera_height": as_int(4, self.camera_height_spin.value()),
+                "pixel_format": pixel,
+                "final_height": as_int(6, self.final_height_spin.value()),
+                "acquisition_line_rate_enable": line_rate_enable,
+                "acquisition_line_rate": line_rate,
+                "exposure_auto": "Off",
+                "exposure_time": as_float(8, 120.0),
+                "gain_auto": "Off",
+                "gain": as_float(9, 24.0),
+                "num_stream_buffers": as_int(10, self.stream_buffers_spin.value()),
+                "packet_size": as_int(11, self.packet_size_spin.value()),
+                "packet_delay": as_int(12, self.packet_delay_spin.value()),
+                "acquisition_mode": str(base.get("acquisition_mode", "Continuous")),
+                "exposure_auto_limit_auto": str(base.get("exposure_auto_limit_auto", "Off")),
+            })
+            configs[role] = base
+
+        if "innerwall" in configs and "bead" in configs:
+            shared_serial = str(configs["innerwall"].get("serial") or configs["bead"].get("serial") or self.shared_camera_serial)
+            configs["innerwall"]["serial"] = shared_serial
+            configs["bead"]["serial"] = shared_serial
+            self.shared_camera_serial = shared_serial
+        return configs
+
+    # -----------------------------------------------------
+    def build_runtime_camera_profile(self):
+        profile = deepcopy(self.loaded_camera_profile) if isinstance(self.loaded_camera_profile, dict) else {}
+        sku = self.sku_combo.currentText().strip() or self.loaded_sku_name or "CAPTURE_PAGE"
+        profile.update({
+            "profile_type": "camera",
+            "sku": sku,
+            "sku_name": sku,
+            "shared_inner_bead_serial": self.shared_camera_serial,
+            "shared_role_profiles_enabled": True,
+            "cameras": self._table_role_configs(),
+        })
+        return profile
+
+    # -----------------------------------------------------
+    def build_camera_configs_json(self):
+        """Legacy physical-camera JSON for SOFTWARE/FREE fallback modes."""
+        role_configs = self._table_role_configs()
+        physical = {}
+        role_order = ["sidewall1", "sidewall2", "tread", "innerwall", "bead"]
+        for role in role_order:
+            cfg = role_configs.get(role)
+            if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+                continue
+            serial = str(cfg.get("serial", "")).strip()
             if not serial:
                 continue
 
-            enabled_txt = self._cell_text(row, 1).lower()
-            enabled = enabled_txt not in ("0", "false", "no", "off", "disabled")
-            camera_name = self._cell_text(row, 2) or f"camera_{serial}"
-
-            try:
-                width = int(float(self._cell_text(row, 3)))
-            except Exception:
-                width = 4096
-
-            pixel_format = self._cell_text(row, 4) or self.pixel_format_combo.currentText()
-            if pixel_format.lower() not in ("mono8", "mono16"):
-                pixel_format = "Mono16"
-            pixel_format = "Mono8" if pixel_format.lower() == "mono8" else "Mono16"
-
-            try:
-                final_height = int(float(self._cell_text(row, 5)))
-            except Exception:
-                final_height = self.final_height_spin.value()
-            final_height = max(1, final_height)
-
-            line_rate_txt = self._cell_text(row, 6)
-            line_rate = None
-            if line_rate_txt and line_rate_txt.lower() not in ("none", "null", "skip"):
-                try:
-                    line_rate = float(line_rate_txt)
-                except Exception:
-                    line_rate = None
-
-            try:
-                exposure = float(self._cell_text(row, 7))
-            except Exception:
-                exposure = 120.0
-
-            try:
-                gain = float(self._cell_text(row, 8))
-            except Exception:
-                gain = 24.0
-
-            roles = []
-            main_role = self._cell_text(row, 9)
-            bead_role = self._cell_text(row, 10)
-            if main_role:
-                roles.append({"name": main_role, "group": "main", "enabled": True})
-            if bead_role:
-                roles.append({"name": bead_role, "group": "bead", "enabled": True})
-
-            is_shared_inner_bead = str(serial) == self.shared_camera_serial
-            camera_height = self.camera_height_spin.value()
-
-            configs[serial] = {
-                "enabled": enabled,
-                "camera_name": camera_name,
-                "width": width,
-                "camera_height": camera_height,
-                "final_height": final_height,
-                "continuous_stream": False,
-                "frame_trigger_stream": False,
-                "pixel_format": pixel_format,
-                "line_rate": line_rate,
-                "exposure_us": exposure,
-                "gain": gain,
-                "roles": roles,
-            }
-
-        return json.dumps(configs)
+            # For the shared physical camera use BEAD values at startup because
+            # the first PLC station is BEAD. Roles still contain both entries.
+            replace_physical = serial not in physical or role == "bead"
+            if replace_physical:
+                physical[serial] = {
+                    "enabled": True,
+                    "camera_name": "shared_inner_bead" if serial == self.shared_camera_serial else role,
+                    "width": int(cfg.get("width", 4096)),
+                    "camera_height": int(cfg.get("camera_height", cfg.get("height", 15000))),
+                    "final_height": int(cfg.get("final_height", 60000)),
+                    "continuous_stream": False,
+                    "frame_trigger_stream": False,
+                    "pixel_format": str(cfg.get("pixel_format", "Mono8")),
+                    "line_rate": cfg.get("acquisition_line_rate"),
+                    "exposure_us": float(cfg.get("exposure_time", 120.0)),
+                    "gain": float(cfg.get("gain", 24.0)),
+                    "roles": [],
+                }
+            group = "main" if role == "innerwall" else "bead"
+            physical[serial].setdefault("roles", []).append({
+                "name": role,
+                "group": group,
+                "enabled": True,
+            })
+        return json.dumps(physical)
 
     # -----------------------------------------------------
     def build_env(self):
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        runtime_profile = self.build_runtime_camera_profile()
 
         env.update({
+            "APOLLO_SELECTED_SKU": str(runtime_profile.get("sku_name", "CAPTURE_PAGE")),
+            "APOLLO_CAMERA_PROFILE_PATH": self.loaded_camera_profile_path,
+            "APOLLO_CAMERA_PROFILE_JSON": json.dumps(runtime_profile),
             "APOLLO_FFC_SAVE_DIR": self.save_dir_edit.text().strip(),
             "APOLLO_CAPTURE_MODE": self.mode_combo.currentText(),
             "APOLLO_NUM_FULL_IMAGES": str(self.num_main_spin.value()),
@@ -1608,6 +2203,11 @@ class AutoPLCFFCProcessTab(QWidget):
             camera_configs = {"__error__": f"Could not parse camera table: {e}"}
 
         return {
+            "SKU Camera Profile": {
+                "SKU": self.sku_combo.currentText().strip(),
+                "Loaded Path": self.loaded_camera_profile_path,
+                "Runtime Profile": self.build_runtime_camera_profile(),
+            },
             "Path Settings": {
                 "Runner Script": self.script_path_edit.text().strip(),
                 "Save Folder": self.save_dir_edit.text().strip(),
@@ -1615,11 +2215,11 @@ class AutoPLCFFCProcessTab(QWidget):
             "Capture / PLC Settings": {
                 "Capture Mode": self.mode_combo.currentText(),
                 "PLC Trigger Sequence": "BEAD_GROUP_SW1_SW2_TREAD_BEAD_THEN_MAIN_INNER",
-                "Main Trigger Policy": "Latch LOW-to-HIGH after BEAD edge; release innerwall after group/reset ready",
+                "Main Trigger Policy": "Latch current-cycle MAIN edge; release as soon as shared camera is INNERWALL-ready",
                 "Main Trigger Latch": self.main_latch_chk.isChecked(),
                 "Shared FrameStart Stream": False,
                 "Post-trigger Buffer Delay sec": self.after_trigger_delay_spin.value(),
-                "Shared 254901431 Acquisition": "4K AcquisitionStart with normal chunk stitching; full re-arm between bead and innerwall",
+                "Shared 254901431 Acquisition": "Validated native-copy capture; immediate BEAD-to-INNERWALL profile switch",
                 "Main Images": self.num_main_spin.value(),
                 "Bead Images": self.num_bead_spin.value(),
                 "4K Camera/Patch Height": self.camera_height_spin.value(),
@@ -1659,6 +2259,7 @@ class AutoPLCFFCProcessTab(QWidget):
     # -----------------------------------------------------
     def print_auto_settings_snapshot(self, snapshot):
         """Print only the essential configuration before camera startup."""
+        profile_info = snapshot.get("SKU Camera Profile", {})
         cap = snapshot.get("Capture / PLC Settings", {})
         ffc = snapshot.get("Software FFC Settings", {})
         cameras = snapshot.get("Camera Settings Table", {})
@@ -1666,6 +2267,7 @@ class AutoPLCFFCProcessTab(QWidget):
         lines = [
             "=" * 80,
             "[AUTO_CONFIG] READY",
+            f"[AUTO_CONFIG] SKU={profile_info.get('SKU')} profile={profile_info.get('Loaded Path')}",
             "[AUTO_CONFIG] FLOW=BEAD(sidewall1+sidewall2+tread+bead) -> LATCHED MAIN(innerwall only)",
             (
                 f"[AUTO_CONFIG] PLC bead={cap.get('Bead Trigger')} "
@@ -1721,8 +2323,31 @@ class AutoPLCFFCProcessTab(QWidget):
             QMessageBox.warning(self, "Already Running", "Capture is already running.")
             return
 
+        mode = self.mode_combo.currentText().strip().upper()
         script_path = self.script_path_edit.text().strip()
         save_dir = self.save_dir_edit.text().strip()
+
+        if mode == "PLC_SOFTWARE":
+            sku = self.sku_combo.currentText().strip()
+            if not sku:
+                QMessageBox.warning(
+                    self,
+                    "SKU Required",
+                    "Select an SKU and load its camera profile before PLC software capture.",
+                )
+                return
+            if self.loaded_camera_profile is None or self.loaded_sku_name != sku:
+                if not self.load_sku_camera_profile(show_message=False):
+                    QMessageBox.warning(
+                        self,
+                        "Camera Profile Required",
+                        f"Could not load the camera profile for SKU: {sku}",
+                    )
+                    return
+
+            validated_runner = self.project_root / "src" / "camera" / "lucid_plc_ffc_env_runner.py"
+            script_path = str(validated_runner)
+            self.script_path_edit.setText(script_path)
 
         if not script_path or not os.path.isfile(script_path):
             QMessageBox.warning(self, "Missing Script", f"Runner script not found:\n{script_path}")

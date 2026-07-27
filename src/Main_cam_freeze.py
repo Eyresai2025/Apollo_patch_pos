@@ -135,10 +135,6 @@ class ContinuousCycleWorker(QObject):
         self._is_running = False
         self._cleanup_lock = threading.Lock()
         self._cleanup_done = False
-        self._cycle_state_lock = threading.Lock()
-        self._cycle_active = False
-        self._graceful_stop_requested = False
-        self._streams_started = False
         self._runtimes_preloaded = False
         self._runtimes = None
         self.is_hardware = (TRIGGER_MODE == "hardware")
@@ -176,12 +172,6 @@ class ContinuousCycleWorker(QObject):
                 self.finished.emit()
                 return
        
-        if self._stop_event.is_set() or self._stopping:
-            self._cleanup()
-            self._is_running = False
-            self.finished.emit()
-            return
-
         # Configure + start camera streams in Live
         if not hasattr(self.multi_camera_manager, "start_all_streams"):
             raise RuntimeError(
@@ -223,13 +213,6 @@ class ContinuousCycleWorker(QObject):
 
         self.status_update.emit(" Configuring cameras for Live...")
         self.multi_camera_manager.start_all_streams()
-        self._streams_started = True
-
-        if self._stop_event.is_set() or self._stopping:
-            self._cleanup()
-            self._is_running = False
-            self.finished.emit()
-            return
  
         if self.is_hardware:
             self.status_update.emit(" Camera streams started - waiting for HARDWARE triggers")
@@ -323,62 +306,6 @@ class ContinuousCycleWorker(QObject):
    
     def confirm_ready_to_start(self):
         self._ready_confirm_event.set()
-
-    def _set_cycle_active(self, active: bool) -> None:
-        with self._cycle_state_lock:
-            self._cycle_active = bool(active)
-
-    def is_cycle_active(self) -> bool:
-        with self._cycle_state_lock:
-            return bool(self._cycle_active)
-
-    def request_graceful_stop(self) -> None:
-        """Stop safely from the Live-page operator button.
-
-        If the worker is only waiting for READY/PLC trigger, release the wait and
-        stop immediately. If a tyre cycle has already received its trigger, let
-        that cycle finish and publish its result, then stop before entering the
-        next trigger wait.
-        """
-        if self._stopping:
-            return
-
-        self._graceful_stop_requested = True
-        self._stopping = True
-
-        if self.is_cycle_active():
-            try:
-                self.status_update.emit(
-                    "Stop requested. Current inspection cycle will complete; "
-                    "the next trigger will not be accepted."
-                )
-            except RuntimeError:
-                pass
-            return
-
-        try:
-            self.status_update.emit(
-                "Stop requested. Releasing PLC/camera trigger wait..."
-            )
-        except RuntimeError:
-            pass
-
-        self._stop_event.set()
-        self._ready_confirm_event.set()
-
-        try:
-            if self.multi_camera_manager is not None and hasattr(
-                self.multi_camera_manager, "_stop_event"
-            ):
-                self.multi_camera_manager._stop_event.set()
-        except Exception:
-            pass
-
-        # Stop streams now only when they have actually started. If model/profile
-        # loading is still in progress, run() will observe _stop_event before or
-        # immediately after start_all_streams() and perform cleanup there.
-        if self._streams_started:
-            self._cleanup()
  
    
     def _preload_runtimes(self):
@@ -635,7 +562,6 @@ class ContinuousCycleWorker(QObject):
 
             def on_cycle_trigger(info: Dict[str, Any]) -> None:
                 nonlocal cycle_t0, cycle_start_wall, trigger_timestamp
-                self._set_cycle_active(True)
                 cycle_t0 = float(info.get("perf_ts", time.perf_counter()))
                 cycle_start_wall = str(
                     info.get("wall_time")
@@ -677,21 +603,6 @@ class ContinuousCycleWorker(QObject):
             capture_call_wait_inclusive_sec = capture_return_ts - capture_call_t0
 
             if cycle_t0 is None:
-                # When the operator clicks Stop Inspection while the worker is
-                # waiting for the next PLC trigger, the camera manager is
-                # intentionally unblocked. capture_all() then returns without a
-                # trigger timestamp. This is a normal stop, not a failed cycle.
-                if (
-                    self._stop_event.is_set()
-                    or self._stopping
-                    or self._graceful_stop_requested
-                ):
-                    self.status_update.emit(
-                        " Trigger wait released by operator stop; "
-                        "no new inspection cycle was started."
-                    )
-                    return False
-
                 camera_timing = getattr(
                     self.multi_camera_manager,
                     "last_capture_timing",
@@ -962,22 +873,6 @@ class ContinuousCycleWorker(QObject):
             return True
 
         except Exception as error:
-            # An operator stop can interrupt a blocking PLC/camera wait. Do not
-            # convert that expected cancellation into INSPECTION_CYCLE_FAILED.
-            if (
-                self._stop_event.is_set()
-                or self._graceful_stop_requested
-                or self._stopping
-            ):
-                try:
-                    self.status_update.emit(
-                        " Inspection stop completed; cancelled trigger wait "
-                        "was not recorded as a failed cycle."
-                    )
-                except RuntimeError:
-                    pass
-                return False
-
             try:
                 failure_cycle_id = locals().get("cycle_id") or f"Capture_{capture_count}"
                 failure_wall = cycle_start_wall or execute_start_wall
@@ -1032,7 +927,6 @@ class ContinuousCycleWorker(QObject):
             )
             return False
         finally:
-            self._set_cycle_active(False)
             try:
                 self._release_cycle_images(locals().get("images"))
             except Exception:
@@ -1329,7 +1223,6 @@ class ContinuousCycleWorker(QObject):
 
                 if hasattr(self.multi_camera_manager, "stop_all_streams"):
                     self.multi_camera_manager.stop_all_streams()
-                self._streams_started = False
 
         except Exception as e:
             self.status_update.emit(f" Camera cleanup warning: {e}")
@@ -1339,16 +1232,6 @@ class ContinuousCycleWorker(QObject):
                 self._owned_laser_manager.close_all()
         except Exception as e:
             self.status_update.emit(f" Laser cleanup warning: {e}")
-
-        # Release the stopped SKU runtime so the next Live start loads the
-        # newly selected SKU recipe/models instead of retaining old GPU state.
-        try:
-            self._runtimes = None
-            self._runtimes_preloaded = False
-            clear_runtime_cache()
-            gc.collect()
-        except Exception as error:
-            self.status_update.emit(f" Runtime cache cleanup warning: {error}")
 
         try:
             import torch

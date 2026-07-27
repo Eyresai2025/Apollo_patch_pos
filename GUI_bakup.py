@@ -340,8 +340,6 @@ class MainWindow(QMainWindow):
         self.multi_cam = multi_cam
         self.continuous_worker = None
         self.is_continuous_running = False
-        self._continuous_stop_requested = False
-        self._continuous_stop_poll_attempts = 0
         
         self.side_order = [
             ("sidewall1", "Side Wall 1"),
@@ -1166,35 +1164,22 @@ class MainWindow(QMainWindow):
             self.pending_live_tyre_name = tyre_name
             self.start_runtime_preload(sku_name=sku_name)
 
-    def _set_stop_inspection_button_state(
-        self,
-        *,
-        running: bool,
-        stopping: bool = False,
-    ) -> None:
-        button = getattr(self, "stop_inspection_btn", None)
-        if button is None:
-            return
-        button.setText("Stopping..." if stopping else "Stop Inspection")
-        button.setEnabled(bool(running and not stopping))
-
     def start_continuous_inspection(self, sku_name, tyre_name):
-        """Start continuous PLC/hardware monitored inspection."""
-        if self._inspection_is_active():
-            QMessageBox.information(
-                self,
-                "Live Inspection",
-                "An inspection session is already running or stopping.\n\n"
-                "Use Stop Inspection and wait for the stopped message before "
-                "starting another SKU.",
-            )
+        """Start continuous PLC/Hardware monitored inspection"""
+        if self.is_continuous_running:
+            QMessageBox.information(self, "Live Inspection", "Continuous inspection already running.")
             return
-
+        
         if self.multi_cam is None:
             QMessageBox.critical(self, "Camera Error", "Cameras not initialized.")
             return
-
+        
+        self.stop_continuous_inspection()
+        
         active_sides = get_active_inspection_sides()
+        # Capture only the views currently enabled for AI. When later pipelines
+        # are ready, update PATCHCORE_ACTIVE_SIDES in .env; no GUI code change
+        # is required.
         capture_sides = list(active_sides)
 
         live_laser_manager = None
@@ -1203,9 +1188,6 @@ class MainWindow(QMainWindow):
                 live_laser_manager = getattr(self.device_page, "laser_manager", None)
         except Exception:
             live_laser_manager = None
-
-        self._continuous_stop_requested = False
-        self._continuous_stop_poll_attempts = 0
 
         self.continuous_worker = start_continuous_cycle(
             media_root=MEDIA_PATH,
@@ -1222,39 +1204,33 @@ class MainWindow(QMainWindow):
             sides_to_run=active_sides,
             capture_sides=capture_sides,
         )
-
         def on_ready_for_inspection(message):
-            if self._continuous_stop_requested:
-                if self.continuous_worker:
-                    self.continuous_worker.request_graceful_stop()
-                return
+            QMessageBox.information(
+                self,
+                "Ready for Inspection",
+                message,
+            )
 
-            QMessageBox.information(self, "Ready for Inspection", message)
-            if self.continuous_worker and not self._continuous_stop_requested:
+            if self.continuous_worker:
                 self.continuous_worker.confirm_ready_to_start()
 
-        self.continuous_worker.ready_for_inspection.connect(
-            on_ready_for_inspection
-        )
+        self.continuous_worker.ready_for_inspection.connect(on_ready_for_inspection)
         self.continuous_worker.status_update.connect(
             lambda msg: self.statusBar().showMessage(msg)
         )
-        self.continuous_worker.processing_completed.connect(
-            self._on_continuous_completed
-        )
+        self.continuous_worker.processing_completed.connect(self._on_continuous_completed)
         self.continuous_worker.processing_error.connect(
             lambda err: logger.error(f"Continuous error: {err}")
         )
-
+        
         self.thread_manager.start_thread(
             "continuous_cycle",
             self.continuous_worker,
-            on_finished=self._on_continuous_worker_finished,
-            on_error=self._on_continuous_worker_error,
+            on_finished=lambda: setattr(self, 'is_continuous_running', False),
+            on_error=lambda err: setattr(self, 'is_continuous_running', False)
         )
-
+        
         self.is_continuous_running = True
-        self._set_stop_inspection_button_state(running=True)
         reset_live_result()
         apply_tyre_result_to_gui(self)
 
@@ -1268,135 +1244,24 @@ class MainWindow(QMainWindow):
         )
         apply_live_progress_to_gui(self)
 
-        self.statusBar().showMessage(
-            f"Continuous inspection | SKU={sku_name} | Monitoring trigger..."
-        )
+        self.statusBar().showMessage(f"🔄 Continuous inspection | SKU={sku_name} | Monitoring trigger...")
 
-    def request_stop_continuous_inspection(self, checked=False):
-        """Operator action: end Live inspection without closing Apollo."""
-        if not self._inspection_is_active():
-            self._set_stop_inspection_button_state(running=False)
-            QMessageBox.information(
-                self,
-                "Stop Inspection",
-                "No Live inspection is currently running.",
-            )
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Stop Live Inspection",
-            "Stop the current Live inspection session?\n\n"
-            "• If the system is waiting for a PLC trigger, it will stop now.\n"
-            "• If a tyre cycle is already running, that cycle will finish and "
-            "the next trigger will not be accepted.\n\n"
-            "After it stops, click Live again to load another SKU.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        self._continuous_stop_requested = True
-        self._set_stop_inspection_button_state(running=True, stopping=True)
-        self.statusBar().showMessage("Stopping Live inspection safely...")
-
-        set_live_progress(
-            phase="STOPPING",
-            active_zone="-",
-            message=(
-                "Stop requested. Finishing the active cycle or releasing the "
-                "trigger wait."
-            ),
-        )
-        apply_live_progress_to_gui(self)
-
-        worker = self.continuous_worker
-        try:
-            if worker is not None and hasattr(worker, "request_graceful_stop"):
-                worker.request_graceful_stop()
-            elif worker is not None:
-                worker.stop()
-        except Exception as error:
-            logger.exception(
-                "Operator stop request failed",
-                extra={
-                    "event_code": "LIVE_STOP_REQUEST_FAILED",
-                    "error_code": "LIVE-STOP-001",
-                },
-            )
-            self._continuous_stop_requested = False
-            self._set_stop_inspection_button_state(running=True)
-            QMessageBox.critical(
-                self,
-                "Stop Inspection",
-                f"Could not stop Live inspection:\n\n{error}",
-            )
-
-    def _on_continuous_worker_error(self, error):
-        logger.error(f"Continuous worker error: {error}")
-        self.statusBar().showMessage(f"Live inspection error: {error}")
-
-    def _on_continuous_worker_finished(self):
-        """Update GUI after the worker has emitted finished."""
-        self.is_continuous_running = False
-        self._set_stop_inspection_button_state(running=False)
-
-        set_live_progress(
-            phase="STOPPED",
-            active_zone="-",
-            images_captured=0,
-            total_images=len(get_active_inspection_sides()),
-            message="Live inspection stopped. Click Live to select/load a SKU.",
-        )
-        apply_live_progress_to_gui(self)
-        self.statusBar().showMessage(
-            "Live inspection stopped. Click Live to start another SKU."
-        )
-
-        self._continuous_stop_poll_attempts = 0
-        QTimer.singleShot(100, self._finalize_continuous_worker_stop)
-
-    def _finalize_continuous_worker_stop(self):
-        thread = self.thread_manager.active_threads.get("continuous_cycle")
-        if thread is not None and thread.isRunning():
-            self._continuous_stop_poll_attempts += 1
-            if self._continuous_stop_poll_attempts < 100:
-                QTimer.singleShot(100, self._finalize_continuous_worker_stop)
-                return
-            logger.warning(
-                "Continuous worker thread still running after stop request"
-            )
-            self.statusBar().showMessage(
-                "Inspection stop is taking longer than expected. Please wait."
-            )
-            return
-
-        self.continuous_worker = None
-        self._continuous_stop_requested = False
-        self._continuous_stop_poll_attempts = 0
-        self.pending_live_start = False
-        self.pending_live_sku = None
-        self.pending_live_tyre_name = None
-        self.current_preloaded_sku = None
-        self.pending_preload_sku = None
-        self.current_recipe_context = {}
-        self._set_stop_inspection_button_state(running=False)
 
     def stop_continuous_inspection(self):
-        """Immediate shutdown used only by application cleanup/exit."""
+        """Stop continuous inspection gracefully"""
         try:
             if self.continuous_worker:
+                # Worker.stop() now synchronously releases PLC waits and Arena
+                # buffers before its QObject/QThread can be deleted.
                 self.continuous_worker.stop()
-        except Exception as error:
-            logger.warning(f"[EXIT] continuous inspection stop warning: {error}")
+
+        except Exception as e:
+            logger.warning(f"[EXIT] continuous inspection stop warning: {e}")
 
         self.is_continuous_running = False
-        self._continuous_stop_requested = False
-        self._set_stop_inspection_button_state(running=False)
 
         set_live_progress(
-            phase="STOPPED",
+            phase="WAITING",
             active_zone="-",
             images_captured=0,
             total_images=len(self.side_order),
@@ -1983,33 +1848,6 @@ class MainWindow(QMainWindow):
         self.back_btn.setVisible(False)
         h.addWidget(self.back_btn)
 
-        self.stop_inspection_btn = QToolButton()
-        self.stop_inspection_btn.setText("Stop Inspection")
-        self.stop_inspection_btn.setIcon(load_header_icon("stop.png"))
-        self.stop_inspection_btn.setIconSize(QSize(self.s(15), self.s(15)))
-        self.stop_inspection_btn.setCursor(Qt.PointingHandCursor)
-        self.stop_inspection_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.stop_inspection_btn.setFixedHeight(max(self.s(31), 29))
-        self.stop_inspection_btn.setStyleSheet("""
-            QToolButton {
-                padding:0 13px; color:#FFFFFF; background:#DC2626;
-                border:1px solid #DC2626; border-radius:7px;
-                font:700 11px 'Segoe UI';
-            }
-            QToolButton:hover { background:#B91C1C; border-color:#B91C1C; }
-            QToolButton:disabled {
-                color:#94A3B8; background:#F1F5F9; border-color:#CBD5E1;
-            }
-        """)
-        self.stop_inspection_btn.clicked.connect(
-            self.request_stop_continuous_inspection
-        )
-        self.stop_inspection_btn.setVisible(
-            self._has_permission(Permission.INSPECTION_RUN)
-        )
-        self.stop_inspection_btn.setEnabled(False)
-        h.addWidget(self.stop_inspection_btn)
-
         self.auto_start_btn = QToolButton()
         self.auto_start_btn.setText("Auto Start")
         self.auto_start_btn.setIcon(load_header_icon("play.png"))
@@ -2389,7 +2227,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Inspection Active",
                 "Cannot sign out while an inspection cycle is active.\n\n"
-                "Use the Stop Inspection button and wait until Live reports STOPPED.",
+                "Stop or complete the inspection first.",
             )
             return
 
@@ -3054,15 +2892,6 @@ class MainWindow(QMainWindow):
     
     @permission_required(Permission.INSPECTION_RUN)
     def capture_image(self):
-        if self._inspection_is_active():
-            QMessageBox.information(
-                self,
-                "Live Inspection Active",
-                "Live inspection is already running or stopping.\n\n"
-                "Use the Stop Inspection button and wait for the stopped "
-                "message before selecting another SKU.",
-            )
-            return
         self.open_live_selection_dialog()
     
     @permission_required(Permission.SKU_MANAGE)
@@ -3389,7 +3218,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Inspection Active",
                 "Cannot exit while an inspection cycle is active.\n\n"
-                "Use the Stop Inspection button and wait until Live reports STOPPED.",
+                "Stop or complete the inspection first.",
             )
             return
 
@@ -3440,7 +3269,7 @@ class MainWindow(QMainWindow):
                     self,
                     "Inspection Active",
                     "Cannot exit while an inspection cycle is active.\n\n"
-                    "Use the Stop Inspection button and wait until Live reports STOPPED.",
+                    "Stop or complete the inspection first.",
                 )
                 event.ignore()
                 return
