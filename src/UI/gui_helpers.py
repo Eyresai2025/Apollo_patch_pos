@@ -90,16 +90,33 @@ class ThreadManager:
             thread.start()
             return True
 
-    def stop_all(self, timeout=5000):
+    def stop_all(self, timeout=15000):
+        # First ask workers to stop so blocking camera/PLC calls are released.
         with self._lock:
-            for name, thread in list(self.active_threads.items()):
-                if thread.isRunning():
-                    thread.quit()
+            items = [
+                (name, self.active_workers.get(name), thread)
+                for name, thread in list(self.active_threads.items())
+            ]
 
-                    if not thread.wait(timeout):
-                        thread.terminate()
-                        thread.wait()
+        for name, worker, thread in items:
+            if worker is not None and hasattr(worker, "stop"):
+                try:
+                    worker.stop()
+                except Exception as error:
+                    logger.warning("Worker '%s' stop warning: %s", name, error)
 
+        for name, worker, thread in items:
+            if thread.isRunning():
+                thread.quit()
+                if not thread.wait(timeout):
+                    logger.error(
+                        "Thread '%s' did not stop within %sms; forcing termination",
+                        name, timeout,
+                    )
+                    thread.terminate()
+                    thread.wait(2000)
+
+        with self._lock:
             self.active_threads.clear()
             self.active_workers.clear()
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import traceback
 import tempfile
 from pathlib import Path
@@ -12,7 +11,6 @@ import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal  # type: ignore
 
 from .ai_team_pipeline import detect_and_crop_utils as dc
-from .ai_team_pipeline import detect_and_crop_fast as dcf
 from .ai_team_pipeline import r_locator_fast as rlf
 
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
@@ -86,28 +84,16 @@ def create_fast_recipe(
     raw_folder: Path,
     template_path: Path,
     output_dir: Path,
-    patch_height: int = 6000,
-    patch_width: int = 4096,
-    match_threshold: float = 0.50,
+    match_threshold: float = 0.30,
     fast_score_threshold: float = 0.40,
-    left_edge_inset_px: int = 0,
 ) -> Dict[str, Any]:
-    """Create one fast-R recipe and retain its useful debugging artifacts.
+    """Create one fast-R recipe JSON in the dedicated R_Recipe folder.
 
-    The dedicated sidewall output folder contains:
-
-    * ``<SKU>_<role>_fast_recipe.json``
-    * ``<SKU>_<role>_R_template.png``
-    * ``<SKU>_<role>_golden_stretched.png``
-    * Fast-locator debug PNG files such as ``P0_boundary.png``,
-      ``P1_first_rev.png`` and ``P2_expected_window.png``.
-
-    Recipe verification still runs internally using a temporary preview image.
-    That separate ``verify.png`` is deliberately not copied to the recipe
-    folder. This avoids the Windows copy error while keeping the verification
-    score and pass/fail check unchanged.
+    All intermediate golden/verification/template files are created in a
+    temporary directory and removed automatically. The final folder contains
+    only ``<SKU>_<role>_fast_recipe.json``. The recipe points to the permanent
+    Template Extractor image, which the live runtime already validates.
     """
-    left_edge_inset_px = max(0, int(left_edge_inset_px))
     golden = find_golden_image(raw_folder)
     raw = cv2.imread(str(golden), cv2.IMREAD_UNCHANGED)
     if raw is None:
@@ -117,8 +103,8 @@ def create_fast_recipe(
     boxes, bands, metadata = dc.detect_r_bands(
         raw_image=raw,
         template_blurred=r_template,
-        patch_height=int(patch_height),
-        patch_width=int(patch_width),
+        patch_height=9000,
+        patch_width=4096,
         match_threshold=float(match_threshold),
         minimum_band_height=20,
         row_gap=5,
@@ -143,11 +129,7 @@ def create_fast_recipe(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     recipe_path = output_dir / f'{sku}_{role}_fast_recipe.json'
-    permanent_template_path = output_dir / f'{sku}_{role}_R_template.png'
-    golden_stretched_path = output_dir / f'{sku}_{role}_golden_stretched.png'
     model_name = f'{sku}_{role}_FAST_R'
-    saved_debug_artifacts: list[str] = []
-    debug_result: Dict[str, Any] = {}
 
     with tempfile.TemporaryDirectory(prefix='apollo_fast_r_') as temp_name:
         temp_dir = Path(temp_name)
@@ -168,26 +150,6 @@ def create_fast_recipe(
             use_gradient=False,
             auto_first_half=True,
             first_half_thr=0.18,
-            left_edge_inset_px=left_edge_inset_px,
-        )
-
-        # Save the same boundary/search-window debug images produced by the
-        # AI team's standalone teach_fast_recipe.py flow.
-        debug_dir = temp_dir / 'debug'
-        taught_template = cv2.imread(recipe.template_path, cv2.IMREAD_GRAYSCALE)
-        if taught_template is None:
-            raise FileNotFoundError(f'Taught R template missing: {recipe.template_path}')
-
-        debug_result = rlf.locate_two_revolutions(
-            stretched,
-            recipe,
-            circumference_px=circumference_px,
-            second_pad=600,
-            x_pad=100,
-            template=taught_template,
-            verbose=False,
-            debug=True,
-            debug_dir=debug_dir,
         )
 
         verify = rlf.verify_recipe(stretched_path, recipe, annotate_path=preview_path)
@@ -197,47 +159,10 @@ def create_fast_recipe(
                 f'is below threshold {fast_score_threshold:.4f}.'
             )
 
-        # Persist all debugging artifacts only after verification succeeds.
-        # Copying the existing Template Extractor image byte-for-byte keeps
-        # production template pixels unchanged; only its permanent location
-        # becomes self-contained inside this R_Recipe sidewall folder.
-        shutil.copy2(template_path, permanent_template_path)
-        shutil.copy2(stretched_path, golden_stretched_path)
-
-        # Copy only the fast-locator debug PNGs. The temporary verification
-        # preview is intentionally not copied.
-        if debug_dir.exists():
-            for debug_file in sorted(debug_dir.glob('*.png')):
-                destination = output_dir / debug_file.name
-                shutil.copy2(debug_file, destination)
-                saved_debug_artifacts.append(str(destination.resolve()))
-
-        recipe.template_path = str(permanent_template_path.resolve())
+        # Runtime resolves this permanent template path and no extra R-recipe
+        # images are needed beside the JSON.
+        recipe.template_path = str(template_path.resolve())
         recipe.save(recipe_path)
-
-        # Exercise the exact production adapter on the golden image.
-        # This is traceability-only and does not change the existing
-        # recipe creation pass/fail rule or downstream output schema.
-        try:
-            fast_boxes, fast_bands, fast_metadata = dcf.detect_r_bands_fast(
-                raw,
-                recipe,
-                scale=1,
-                verbose=False,
-            )
-            runtime_fast_verify_ok = len(fast_bands) >= 2
-        except Exception as exc:
-            # Keep the original recipe creation success rule unchanged. The
-            # production-path check is reported for validation, not used as a
-            # new gate that could reject recipes accepted by the old tab.
-            fast_boxes = []
-            fast_bands = []
-            fast_metadata = {
-                'method': 'taught_recipe_two_revolution',
-                'verification_error': f'{type(exc).__name__}: {exc}',
-            }
-            runtime_fast_verify_ok = False
-
         r_anchor = _inject_r_anchor(
             recipe_path=recipe_path,
             golden_image=golden,
@@ -254,36 +179,11 @@ def create_fast_recipe(
         'role': role,
         'raw_folder': str(raw_folder),
         'golden_image': str(golden),
-        'source_r_template_path': str(template_path.resolve()),
-        'r_template_path': str(permanent_template_path.resolve()),
+        'r_template_path': str(template_path.resolve()),
         'recipe_path': str(recipe_path.resolve()),
-        'golden_stretched_path': str(golden_stretched_path.resolve()),
-        'saved_artifacts': [
-            str(recipe_path.resolve()),
-            str(permanent_template_path.resolve()),
-            str(golden_stretched_path.resolve()),
-            *saved_debug_artifacts,
-        ],
-        'debug_artifact_paths': saved_debug_artifacts,
-        'debug_boundary_path': next(
-            (path for path in saved_debug_artifacts if path.endswith('P0_boundary.png')),
-            None,
-        ),
         'verify_score': float(verify.get('score', 0.0)),
         'match_score': float(top_box.get('score', 0.0)),
-        'detection_settings': {
-            'R_DETECTION_PATCH_HEIGHT': int(patch_height),
-            'R_DETECTION_PATCH_WIDTH': int(patch_width),
-            'R_MATCH_THRESHOLD': float(match_threshold),
-            'LEFT_EDGE_INSET_PX': int(left_edge_inset_px),
-        },
         'circumference_px': circumference_px,
-        'left_edge_inset_px': int(left_edge_inset_px),
-        'runtime_fast_verify_ok': bool(runtime_fast_verify_ok),
-        'runtime_fast_band_count': int(len(fast_bands)),
-        'runtime_fast_boxes': _json_safe(fast_boxes),
-        'runtime_fast_detection_metadata': _json_safe(fast_metadata),
-        'debug_locator_result': _json_safe(debug_result),
         'roi': list(roi),
         'r_anchor': r_anchor,
         'r1_top_y': int(r_anchor['R1_top_y']),
@@ -291,7 +191,7 @@ def create_fast_recipe(
         'one_rev_height': int(r_anchor['one_rev_height']),
         'detection_metadata': metadata,
         'dedicated_recipe_folder': str(output_dir.resolve()),
-        'recipe_folder_contains_json_only': False,
+        'recipe_folder_contains_json_only': True,
     }
     return result
 
@@ -309,7 +209,7 @@ class FastRecipeWorker(QThread):
         try:
             self.progress.emit('Running tiled R detector on the golden image...')
             result = create_fast_recipe(**self.kwargs)
-            self.progress.emit('Fast R recipe and debugging images saved successfully.')
+            self.progress.emit('Fast R recipe created and verified successfully.')
             self.succeeded.emit(result)
         except Exception as exc:
             self.failed.emit(f'{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}')

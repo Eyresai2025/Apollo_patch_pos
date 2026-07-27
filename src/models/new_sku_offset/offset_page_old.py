@@ -182,8 +182,9 @@ class OffsetCalculationPage(QWidget):
         "sidewall2": "Sidewall 2",
     }
 
-    # Detection defaults are exposed per target role and passed directly to
-    # the backend. Each Inner/Tread/Bead tab keeps an independent setting state.
+    # Detection parameters remain fixed in the backend. They are intentionally
+    # not exposed on the operator page so the Offset Calculation UI contains
+    # only the inputs and patch-processing settings required for each SKU.
     DEFAULT_R_MATCH_THRESHOLD = 0.50
     DEFAULT_TARGET_MATCH_THRESHOLD = 0.50
     DEFAULT_SAVE_DIAGNOSTICS = True
@@ -420,16 +421,23 @@ class OffsetCalculationPage(QWidget):
         self._add_path_row(4, "output_json", "Output Calibration JSON", "save_json")
 
         # --------------------------------------------------------------
-        # Detection settings (stored independently for Inner/Tread/Bead)
+        # Processing settings
         # --------------------------------------------------------------
-        detection_panel = QFrame()
-        detection_panel.setObjectName("OffsetDetectionSettings")
-        detection_panel.setMinimumHeight(150)
-        detection_panel.setMaximumHeight(150)
-        detection_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        detection_panel.setStyleSheet(
+        # Keep these settings in a dedicated modern card instead of placing
+        # many compact spin boxes directly in the main form. This keeps the
+        # operator page readable while preserving every pipeline parameter.
+        processing_panel = QFrame()
+        processing_panel.setObjectName("OffsetProcessingSettings")
+        # Keep the settings area at a guaranteed visible height. Without an
+        # explicit minimum/fixed height, the parent form can compress this
+        # nested frame to only its header when the status panel takes the
+        # remaining vertical space.
+        processing_panel.setMinimumHeight(224)
+        processing_panel.setMaximumHeight(224)
+        processing_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        processing_panel.setStyleSheet(
             """
-            QFrame#OffsetDetectionSettings {
+            QFrame#OffsetProcessingSettings {
                 background:#faf7fd;
                 border:1px solid #e6dced;
                 border-radius:12px;
@@ -439,94 +447,159 @@ class OffsetCalculationPage(QWidget):
                 border:1px solid #e7deef;
                 border-radius:10px;
             }
+            QFrame#OffsetSettingField:hover {
+                border:1px solid #cdb9dd;
+            }
             """
         )
-        detection_layout = QVBoxLayout(detection_panel)
-        detection_layout.setContentsMargins(12, 10, 12, 12)
-        detection_layout.setSpacing(10)
+        processing_layout = QVBoxLayout(processing_panel)
+        processing_layout.setContentsMargins(12, 10, 12, 14)
+        processing_layout.setSpacing(12)
 
-        detection_header = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(1)
-        detection_title = QLabel("Detection Settings")
-        detection_title.setStyleSheet("font:700 9.5pt 'Segoe UI'; color:#571c86; border:none;")
-        detection_hint = QLabel(
-            "Applied directly to marker detection for the selected Inner Side, Tread or Bead calibration."
+        processing_header = QHBoxLayout()
+        processing_header.setSpacing(8)
+
+        processing_title_box = QVBoxLayout()
+        processing_title_box.setSpacing(1)
+        processing_title = QLabel("Processing Settings")
+        processing_title.setStyleSheet(
+            "font:700 9.5pt 'Segoe UI'; color:#571c86; border:none;"
         )
-        detection_hint.setStyleSheet("font:500 8pt 'Segoe UI'; color:#8a7f94; border:none;")
-        title_box.addWidget(detection_title)
-        title_box.addWidget(detection_hint)
-        detection_header.addLayout(title_box)
-        detection_header.addStretch(1)
-        badge = QLabel("DETECTION")
-        badge.setAlignment(Qt.AlignCenter)
-        badge.setFixedHeight(24)
-        badge.setStyleSheet(
+        processing_hint = QLabel(
+            "Resize and patch preparation values stored with this SKU calibration."
+        )
+        processing_hint.setStyleSheet(
+            "font:500 8pt 'Segoe UI'; color:#8a7f94; border:none;"
+        )
+        processing_title_box.addWidget(processing_title)
+        processing_title_box.addWidget(processing_hint)
+        processing_header.addLayout(processing_title_box)
+        processing_header.addStretch(1)
+
+        processing_badge = QLabel("PATCH PREPARATION")
+        processing_badge.setAlignment(Qt.AlignCenter)
+        processing_badge.setFixedHeight(24)
+        processing_badge.setStyleSheet(
             "background:#f1e9f8; color:#571c86; border:1px solid #dfd1ec; "
             "border-radius:12px; padding:0 10px; font:700 7.7pt 'Segoe UI';"
         )
-        detection_header.addWidget(badge)
-        detection_layout.addLayout(detection_header)
+        processing_header.addWidget(processing_badge)
+        processing_layout.addLayout(processing_header)
 
-        def _int_detection_setting(default: int) -> QSpinBox:
+        settings_grid = QGridLayout()
+        settings_grid.setContentsMargins(0, 0, 0, 0)
+        settings_grid.setHorizontalSpacing(12)
+        settings_grid.setVerticalSpacing(12)
+
+        def _integer_setting(minimum: int, maximum: int) -> QSpinBox:
             spin = NoWheelSpinBox()
-            spin.setRange(1, 100000)
-            spin.setValue(default)
+            spin.setRange(minimum, maximum)
             spin.setSuffix(" px")
             spin.setAlignment(Qt.AlignCenter)
             spin.setFixedHeight(32)
+            spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             spin.valueChanged.connect(self._store_widget_values)
             return spin
 
-        def _threshold_setting(default: float) -> QDoubleSpinBox:
-            spin = NoWheelDoubleSpinBox()
-            spin.setRange(0.01, 1.00)
-            spin.setDecimals(2)
-            spin.setSingleStep(0.01)
-            spin.setValue(default)
-            spin.setAlignment(Qt.AlignCenter)
-            spin.setFixedHeight(32)
-            spin.valueChanged.connect(self._store_widget_values)
-            return spin
-
-        def _setting_card(title_text: str, widget: QWidget, note: str) -> QFrame:
+        def _setting_card(title_text: str, widget: QWidget, note: str = "") -> QFrame:
             field = QFrame()
             field.setObjectName("OffsetSettingField")
-            field.setFixedHeight(64)
-            field.setToolTip(note)
-            layout = QVBoxLayout(field)
-            layout.setContentsMargins(10, 6, 10, 7)
-            layout.setSpacing(4)
-            label = QLabel(title_text)
-            label.setStyleSheet("font:700 8.2pt 'Segoe UI'; color:#5d287f; border:none;")
-            layout.addWidget(label)
-            layout.addWidget(widget)
+            field.setFixedHeight(68)
+            field.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            if note:
+                field.setToolTip(note)
+
+            field_layout = QVBoxLayout(field)
+            field_layout.setContentsMargins(10, 7, 10, 8)
+            field_layout.setSpacing(5)
+
+            field_title = QLabel(title_text)
+            field_title.setStyleSheet(
+                "font:700 8.2pt 'Segoe UI'; color:#5d287f; border:none;"
+            )
+            field_layout.addWidget(field_title)
+            field_layout.addWidget(widget)
             return field
 
-        self.detection_patch_h_spin = _int_detection_setting(6000)
-        self.detection_patch_w_spin = _int_detection_setting(4096)
-        self.r_match_threshold_spin = _threshold_setting(0.50)
-        self.tape_match_threshold_spin = _threshold_setting(0.50)
+        self.resize_width_spin = _integer_setting(1, 100000)
+        self.resize_height_spin = _integer_setting(1, 100000)
+        self.patch_width_spin = _integer_setting(1, 10000)
+        self.patch_height_spin = _integer_setting(1, 10000)
+        self.patch_stride_x_spin = _integer_setting(1, 10000)
+        self.patch_stride_y_spin = _integer_setting(1, 10000)
 
-        detection_grid = QGridLayout()
-        detection_grid.setContentsMargins(0, 0, 0, 0)
-        detection_grid.setHorizontalSpacing(12)
-        detection_grid.addWidget(
-            _setting_card("Patch Height", self.detection_patch_h_spin, "PATCH_H used by tiled detection"), 0, 0
+        self.percentile_spin = NoWheelDoubleSpinBox()
+        self.percentile_spin.setRange(0.01, 100.0)
+        self.percentile_spin.setDecimals(2)
+        self.percentile_spin.setSingleStep(0.10)
+        self.percentile_spin.setSuffix(" %")
+        self.percentile_spin.setAlignment(Qt.AlignCenter)
+        self.percentile_spin.setFixedHeight(32)
+        self.percentile_spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.percentile_spin.valueChanged.connect(self._store_widget_values)
+
+        self.cover_complete_check = QCheckBox("Cover final image edges")
+        self.cover_complete_check.setStyleSheet(
+            "QCheckBox { color:#5f5669; font:600 8.2pt 'Segoe UI'; border:none; }"
         )
-        detection_grid.addWidget(
-            _setting_card("Patch Width", self.detection_patch_w_spin, "PATCH_W used by tiled detection"), 0, 1
+        self.cover_complete_check.stateChanged.connect(self._store_widget_values)
+
+        cover_widget = QWidget()
+        cover_widget.setStyleSheet("background:transparent; border:none;")
+        cover_layout = QVBoxLayout(cover_widget)
+        cover_layout.setContentsMargins(0, 0, 0, 0)
+        cover_layout.addStretch(1)
+        cover_layout.addWidget(self.cover_complete_check)
+        cover_layout.addStretch(1)
+
+        settings_grid.addWidget(
+            _setting_card("Resize Width", self.resize_width_spin, "Final target width"),
+            0,
+            0,
         )
-        detection_grid.addWidget(
-            _setting_card("R Match Threshold", self.r_match_threshold_spin, "R_MATCH_THRESHOLD stored with calibration"), 0, 2
+        settings_grid.addWidget(
+            _setting_card("Resize Height", self.resize_height_spin, "Final target height"),
+            0,
+            1,
         )
-        detection_grid.addWidget(
-            _setting_card("Tape Match Threshold", self.tape_match_threshold_spin, "TAPE_MATCH_THRESHOLD used for target marker detection"), 0, 3
+        settings_grid.addWidget(
+            _setting_card("Patch Width", self.patch_width_spin, "Patch extraction width"),
+            0,
+            2,
         )
+        settings_grid.addWidget(
+            _setting_card("Patch Height", self.patch_height_spin, "Patch extraction height"),
+            0,
+            3,
+        )
+        settings_grid.addWidget(
+            _setting_card("Stride X", self.patch_stride_x_spin, "Horizontal patch step"),
+            1,
+            0,
+        )
+        settings_grid.addWidget(
+            _setting_card("Stride Y", self.patch_stride_y_spin, "Vertical patch step"),
+            1,
+            1,
+        )
+        settings_grid.addWidget(
+            _setting_card("Percentile", self.percentile_spin, "Threshold percentile"),
+            1,
+            2,
+        )
+        settings_grid.addWidget(
+            _setting_card("Edge Coverage", cover_widget, "Include shifted final patches"),
+            1,
+            3,
+        )
+
         for column in range(4):
-            detection_grid.setColumnStretch(column, 1)
-        detection_layout.addLayout(detection_grid)
-        self.config_grid.addWidget(detection_panel, 6, 0, 1, 3)
+            settings_grid.setColumnStretch(column, 1)
+        settings_grid.setRowMinimumHeight(0, 68)
+        settings_grid.setRowMinimumHeight(1, 68)
+
+        processing_layout.addLayout(settings_grid)
+        self.config_grid.addWidget(processing_panel, 6, 0, 1, 3)
 
         self.config_grid.setColumnStretch(1, 1)
         body_layout.addWidget(config_card)
@@ -742,10 +815,6 @@ class OffsetCalculationPage(QWidget):
             "patch_stride_y": 448,
             "cover_complete": True,
             "percentile": 99.0,
-            "detection_patch_h": 6000,
-            "detection_patch_w": 4096,
-            "r_match_threshold": 0.50,
-            "tape_match_threshold": 0.50,
             "result": {},
         }
 
@@ -855,10 +924,16 @@ class OffsetCalculationPage(QWidget):
                 edit.setText(str(state.get(key) or ""))
             anchor = str(state.get("anchor_role") or "sidewall1")
             self.anchor_combo.setCurrentIndex(max(0, self.anchor_combo.findData(anchor)))
-            self.detection_patch_h_spin.setValue(int(state.get("detection_patch_h", 6000)))
-            self.detection_patch_w_spin.setValue(int(state.get("detection_patch_w", 4096)))
-            self.r_match_threshold_spin.setValue(float(state.get("r_match_threshold", 0.50)))
-            self.tape_match_threshold_spin.setValue(float(state.get("tape_match_threshold", 0.50)))
+            self.resize_width_spin.setValue(int(state.get("resize_width", 4032)))
+            self.resize_height_spin.setValue(int(state.get("resize_height", 23296)))
+            self.patch_width_spin.setValue(int(state.get("patch_width", 448)))
+            self.patch_height_spin.setValue(int(state.get("patch_height", 448)))
+            self.patch_stride_x_spin.setValue(int(state.get("patch_stride_x", 448)))
+            self.patch_stride_y_spin.setValue(int(state.get("patch_stride_y", 448)))
+            self.cover_complete_check.setChecked(
+                bool(state.get("cover_complete", True))
+            )
+            self.percentile_spin.setValue(float(state.get("percentile", 99.0)))
             self._show_result(dict(state.get("result") or {}))
         finally:
             self._loading = False
@@ -870,10 +945,14 @@ class OffsetCalculationPage(QWidget):
         for key, edit in self.path_edits.items():
             state[key] = edit.text().strip()
         state["anchor_role"] = str(self.anchor_combo.currentData() or "sidewall1")
-        state["detection_patch_h"] = int(self.detection_patch_h_spin.value())
-        state["detection_patch_w"] = int(self.detection_patch_w_spin.value())
-        state["r_match_threshold"] = float(self.r_match_threshold_spin.value())
-        state["tape_match_threshold"] = float(self.tape_match_threshold_spin.value())
+        state["resize_width"] = int(self.resize_width_spin.value())
+        state["resize_height"] = int(self.resize_height_spin.value())
+        state["patch_width"] = int(self.patch_width_spin.value())
+        state["patch_height"] = int(self.patch_height_spin.value())
+        state["patch_stride_x"] = int(self.patch_stride_x_spin.value())
+        state["patch_stride_y"] = int(self.patch_stride_y_spin.value())
+        state["cover_complete"] = bool(self.cover_complete_check.isChecked())
+        state["percentile"] = float(self.percentile_spin.value())
 
     def _on_anchor_changed(self) -> None:
         if self._loading:
@@ -983,10 +1062,7 @@ class OffsetCalculationPage(QWidget):
             "patch_stride_y": int(state.get("patch_stride_y", 448)),
             "cover_complete": bool(state.get("cover_complete", True)),
             "percentile": float(state.get("percentile", 99.0)),
-            "detection_patch_h": int(state.get("detection_patch_h", 6000)),
-            "detection_patch_w": int(state.get("detection_patch_w", 4096)),
-            "r_match_threshold": float(state.get("r_match_threshold", 0.50)),
-            "target_match_threshold": float(state.get("tape_match_threshold", 0.50)),
+            "target_match_threshold": self.DEFAULT_TARGET_MATCH_THRESHOLD,
             "save_diagnostics": self.DEFAULT_SAVE_DIAGNOSTICS,
         }
 
@@ -1106,10 +1182,10 @@ class OffsetCalculationPage(QWidget):
             f"Scale factor: {float(result.get('scale_factor', 0.0)):.8f}   |   "
             f"Sidewall revolution: {result.get('one_rev_sidewall_px')} px   |   "
             f"Target revolution: {result.get('one_rev_target_px')} px\n"
-            f"Detection patch: {result.get('detection_patch_w', 4096)} × "
-            f"{result.get('detection_patch_h', 6000)} px   |   "
-            f"R threshold: {result.get('r_match_threshold', 0.50)}   |   "
-            f"Tape threshold: {result.get('target_match_threshold', 0.50)}"
+            f"Resize: {result.get('resize_width')} × {result.get('resize_height')}   |   "
+            f"Patch: {result.get('patch_width')} × {result.get('patch_height')}   |   "
+            f"Stride: {result.get('patch_stride_x')} × {result.get('patch_stride_y')}   |   "
+            f"Percentile: {result.get('percentile')}"
         )
         self.result_pill.setText("COMPLETED")
         self.result_pill.setStyleSheet(
@@ -1123,10 +1199,14 @@ class OffsetCalculationPage(QWidget):
         for _label, _edit, button in self.path_rows.values():
             button.setEnabled(enabled)
         self.anchor_combo.setEnabled(enabled)
-        self.detection_patch_h_spin.setEnabled(enabled)
-        self.detection_patch_w_spin.setEnabled(enabled)
-        self.r_match_threshold_spin.setEnabled(enabled)
-        self.tape_match_threshold_spin.setEnabled(enabled)
+        self.resize_width_spin.setEnabled(enabled)
+        self.resize_height_spin.setEnabled(enabled)
+        self.patch_width_spin.setEnabled(enabled)
+        self.patch_height_spin.setEnabled(enabled)
+        self.patch_stride_x_spin.setEnabled(enabled)
+        self.patch_stride_y_spin.setEnabled(enabled)
+        self.cover_complete_check.setEnabled(enabled)
+        self.percentile_spin.setEnabled(enabled)
         self.run_button.setEnabled(enabled)
         self.next_button.setEnabled(enabled)
 

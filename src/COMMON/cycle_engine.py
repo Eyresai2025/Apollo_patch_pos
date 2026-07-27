@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -114,16 +115,41 @@ def _get_today_capture_root(media_root: str, sku_name: str = "UNKNOWN_SKU") -> s
     return today_dir
 
 
-def _next_cycle_number(today_capture_root: str) -> int:
+_CYCLE_DIRECTORY_LOCK = threading.Lock()
+
+
+def _cycle_numbers_from_root(root: str) -> List[int]:
     values: List[int] = []
-    for name in os.listdir(today_capture_root):
-        path = os.path.join(today_capture_root, name)
+    if not os.path.isdir(root):
+        return values
+    for name in os.listdir(root):
+        path = os.path.join(root, name)
         if not os.path.isdir(path) or not name.startswith("Cycle_"):
             continue
         try:
             values.append(int(name.split("_", 1)[1]))
         except (IndexError, ValueError):
             continue
+    return values
+
+
+def _next_cycle_number(media_root: str, sku_name: str, date_str: str) -> int:
+    """
+    Choose a cycle number that is unique across raw captures, AI output and
+    timing reports.
+
+    The old implementation inspected only Capture_Input. If a downstream stage
+    moved or cleaned that folder, the next tyre was incorrectly created again
+    as Cycle_1 and could overwrite the previous tyre's Output/Cycle_1 results.
+    """
+    roots = (
+        os.path.join(media_root, "Capture_Input", sku_name, date_str),
+        os.path.join(media_root, "Output", sku_name, date_str),
+        os.path.join(media_root, "cycle_time_breakdown", sku_name, date_str),
+    )
+    values: List[int] = []
+    for root in roots:
+        values.extend(_cycle_numbers_from_root(root))
     return max(values) + 1 if values else 1
 
 
@@ -131,11 +157,31 @@ def build_cycle_capture_dir(
     media_root: str,
     sku_name: str = "UNKNOWN_SKU",
 ) -> tuple[str, str]:
+    date_str = datetime.now().strftime("%d-%m-%Y")
     today_root = _get_today_capture_root(media_root, sku_name)
-    cycle_id = f"Cycle_{_next_cycle_number(today_root)}"
-    cycle_dir = os.path.join(today_root, cycle_id)
-    os.makedirs(cycle_dir, exist_ok=True)
-    return cycle_dir, cycle_id
+
+    # A lock avoids two callers choosing the same cycle number in the same
+    # process. The existence loop also protects against folders created by
+    # another process between number selection and directory creation.
+    with _CYCLE_DIRECTORY_LOCK:
+        cycle_number = _next_cycle_number(media_root, sku_name, date_str)
+        while True:
+            cycle_id = f"Cycle_{cycle_number}"
+            cycle_dir = os.path.join(today_root, cycle_id)
+            output_dir = os.path.join(
+                media_root, "Output", sku_name, date_str, cycle_id
+            )
+            timing_dir = os.path.join(
+                media_root, "cycle_time_breakdown", sku_name, date_str, cycle_id
+            )
+            if not (
+                os.path.exists(cycle_dir)
+                or os.path.exists(output_dir)
+                or os.path.exists(timing_dir)
+            ):
+                os.makedirs(cycle_dir, exist_ok=False)
+                return cycle_dir, cycle_id
+            cycle_number += 1
 
 
 def _camera_serial_folder(cycle_capture_dir: str, serial: str) -> str:

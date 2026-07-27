@@ -63,27 +63,24 @@ def enable_console_logging(level: int = logging.INFO) -> None:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Recipe:
-    model: str                       # SKU / tyre model identifier
-    template_path: str               # stored R / R14 crop for this model
-    band_cols: tuple[int, int]       # (x0, x1) size-text band -> search restricted here
-    expected_center: tuple[int, int] # (cx, cy) where R sat at teach time
-    roi_side: str = "left"           # which tyre half the ROI was taught in -> search that half ("left"/"right")
-    search_margin_y: int = 120       # vertical tolerance around expected R (px)
-    use_gradient: bool = True        # match on Sobel magnitude (recommended for relief)
-    score_threshold: float = 0.45    # PASS gate; CALIBRATE per model on real tyres
+    model: str
+    template_path: str
+    band_cols: tuple[int, int]
+    expected_center: tuple[int, int]
+
+    roi_side: str = "left"
+    search_margin_y: int = 120
+    use_gradient: bool = True
+    score_threshold: float = 0.45
     method: int = cv2.TM_CCOEFF_NORMED
-    auto_first_half: bool = False    # detect tyre boundary -> search only bead-side half
-    first_half_thr: float = 0.18     # energy fraction for boundary detection
-    circumference_px: int | None = None  # px per revolution for THIS camera/model
-    blur_kernel: tuple[int, int] = (5, 5)  # Gaussian blur applied to template + search
-    # window before matching, same as the proven tiled detector
-    # (detect_and_crop_utils.py). Confirmed by direct A/B test: without this
-    # blur, match scores on real tyre images drop from ~0.91 to ~0.52 for the
-    # exact same template/image/location -- this is not optional for score
-    # parity with the existing production detector.
-    # (line-scan pixels-per-revolution depends on line rate, which differs
-    # between camera setups e.g. sidewall vs tread -- don't share one default
-    # across models/cameras. Measured explicitly at teach time.)
+    auto_first_half: bool = False
+    first_half_thr: float = 0.18
+
+    # Move only the detected left tyre edge inward.
+    left_edge_inset_px: int = 0
+
+    circumference_px: int | None = None
+    blur_kernel: tuple[int, int] = (5, 5)
 
     # ---- persistence ----
     def save(self, path: str | Path) -> None:
@@ -120,33 +117,183 @@ def grad_mag(img: np.ndarray) -> np.ndarray:
     return cv2.convertScaleAbs(cv2.magnitude(gx, gy))
 
 
-def detect_first_half(img: np.ndarray, row_step: int = 25, smooth: int = 51,
-                      thr_frac: float = 0.18) -> dict:
-    """Find the tyre's radial boundary (tyre vs background across the WIDTH) and
-    return the bead-side FIRST HALF to search.
-
-    Background is flat (low gradient energy); tyre material is textured (high).
-    We profile gradient energy per column, take the first/last columns above a
-    relative threshold as the left/right tyre edges, and split at the midpoint.
-    The letters live in [left_edge, mid].
-
-    Returns: left_edge, right_edge, mid, band=(left_edge, mid).
+def detect_first_half(
+    img: np.ndarray,
+    row_step: int = 10,
+    smooth: int = 81,
+    core_thr: float = 0.18,
+    edge_thr: float = 0.06,
+    close_gap: int = 41,
+    edge_pad: int = 10,
+) -> dict:
     """
-    sub = img[::row_step, :]
-    gx = cv2.Sobel(sub, cv2.CV_32F, 1, 0, 3)
-    gy = cv2.Sobel(sub, cv2.CV_32F, 0, 1, 3)
-    energy = cv2.magnitude(gx, gy).mean(axis=0)
-    energy = cv2.GaussianBlur(energy.reshape(1, -1), (1, smooth), 0).ravel()
+    Detect the main tyre region using hysteresis-style thresholds.
 
-    e = (energy - energy.min()) / (energy.max() - energy.min() + 1e-6)
-    active = np.where(e > thr_frac)[0]
-    if active.size == 0:
-        left_edge, right_edge = 0, img.shape[1] - 1
+    core_thr:
+        Strong texture threshold used to identify the tyre body.
+
+    edge_thr:
+        Lower threshold used to extend from the tyre body toward its edges.
+
+    This avoids treating isolated noisy columns at the image border as the tyre.
+    """
+
+    if smooth % 2 == 0:
+        smooth += 1
+
+    if close_gap % 2 == 0:
+        close_gap += 1
+
+    height, width = img.shape[:2]
+
+    # Sample rows to reduce calculation.
+    sampled = img[::row_step, :]
+
+    gx = cv2.Sobel(
+        sampled,
+        cv2.CV_32F,
+        1,
+        0,
+        ksize=3,
+    )
+
+    gy = cv2.Sobel(
+        sampled,
+        cv2.CV_32F,
+        0,
+        1,
+        ksize=3,
+    )
+
+    energy = cv2.magnitude(gx, gy).mean(axis=0)
+
+    # Important: horizontal smoothing uses (smooth, 1).
+    energy = cv2.GaussianBlur(
+        energy.reshape(1, -1),
+        (smooth, 1),
+        0,
+    ).ravel()
+
+    energy_min = float(energy.min())
+    energy_max = float(energy.max())
+
+    normalized = (
+        energy - energy_min
+    ) / (
+        energy_max - energy_min + 1e-6
+    )
+
+    # Strong mask identifies definite tyre material.
+    strong_mask = normalized >= core_thr
+
+    # Weak mask includes the lower-energy tyre edges.
+    weak_mask = (
+        normalized >= edge_thr
+    ).astype(np.uint8)
+
+    # Fill small gaps inside the tyre region.
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (close_gap, 1),
+    )
+
+    weak_mask = cv2.morphologyEx(
+        weak_mask.reshape(1, -1),
+        cv2.MORPH_CLOSE,
+        kernel,
+    ).ravel()
+
+    # Find all continuous weak-mask regions.
+    padded = np.concatenate(
+        (
+            np.array([0], dtype=np.uint8),
+            weak_mask,
+            np.array([0], dtype=np.uint8),
+        )
+    )
+
+    changes = np.diff(padded.astype(np.int16))
+
+    starts = np.where(changes == 1)[0]
+    ends = np.where(changes == -1)[0] - 1
+
+    candidates = []
+
+    for start, end in zip(starts, ends):
+        start = int(start)
+        end = int(end)
+
+        strong_count = int(
+            strong_mask[start:end + 1].sum()
+        )
+
+        segment_width = end - start + 1
+        contains_center = start <= width // 2 <= end
+
+        if strong_count == 0:
+            continue
+
+        candidates.append(
+            {
+                "start": start,
+                "end": end,
+                "strong_count": strong_count,
+                "width": segment_width,
+                "contains_center": contains_center,
+            }
+        )
+
+    if not candidates:
+        left_edge = 0
+        right_edge = width - 1
+
     else:
-        left_edge, right_edge = int(active[0]), int(active[-1])
-    mid = (left_edge + right_edge) // 2
-    return {"left_edge": left_edge, "right_edge": right_edge, "mid": mid,
-            "band": (left_edge, mid)}
+        center_candidates = [
+            item
+            for item in candidates
+            if item["contains_center"]
+        ]
+
+        usable = (
+            center_candidates
+            if center_candidates
+            else candidates
+        )
+
+        # Prefer the region with the most strong tyre texture.
+        selected = max(
+            usable,
+            key=lambda item: (
+                item["strong_count"],
+                item["width"],
+            ),
+        )
+
+        left_edge = max(
+            0,
+            selected["start"] - edge_pad,
+        )
+
+        right_edge = min(
+            width - 1,
+            selected["end"] + edge_pad,
+        )
+
+    mid = (
+        left_edge + right_edge
+    ) // 2
+
+    return {
+        "left_edge": int(left_edge),
+        "right_edge": int(right_edge),
+        "mid": int(mid),
+        "band": (
+            int(left_edge),
+            int(mid),
+        ),
+        "core_thr": float(core_thr),
+        "edge_thr": float(edge_thr),
+    }
 
 
 def measure_circumference_px(
@@ -468,9 +615,42 @@ def locate_two_revolutions(image_path, recipe,
         raise FileNotFoundError(f"Template missing: {recipe.template_path}")
     th, tw = tpl.shape
 
-    boundary = detect_first_half(img, thr_frac=recipe.first_half_thr)
+    boundary = detect_first_half(
+    img,
+    row_step=10,
+    smooth=81,
+    core_thr=recipe.first_half_thr,
+    edge_thr=0.06,
+    close_gap=41,
+    edge_pad=10,
+)
+
+    # Keep the detected right edge unchanged.
+    original_left_edge = int(boundary["left_edge"])
+    right_edge = int(boundary["right_edge"])
+
+    left_inset = max(
+        0,
+        int(getattr(recipe, "left_edge_inset_px", 0)),
+    )
+
+    adjusted_left_edge = min(
+        original_left_edge + left_inset,
+        right_edge - 1,
+    )
+
+    boundary["raw_left_edge"] = original_left_edge
+    boundary["left_edge"] = adjusted_left_edge
+    boundary["mid"] = (
+        adjusted_left_edge + right_edge
+    ) // 2
+
+    boundary["band"] = (
+        adjusted_left_edge,
+        boundary["mid"],
+    )
     side = getattr(recipe, "roi_side", "left")
-    img_mid = W // 2
+    img_mid = boundary["mid"]
     if side == "right":
         hl, hr = img_mid, boundary["right_edge"]
     else:

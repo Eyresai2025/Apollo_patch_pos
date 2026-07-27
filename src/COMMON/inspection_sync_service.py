@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from src.COMMON.config import get_config
 from src.COMMON.inspection_outbox import InspectionOutbox
+from src.COMMON.inspection_activity_gate import database_activity, production_is_active
 from src.COMMON.structured_logging import get_logger
 
 logger = get_logger(__name__, component="INSPECTION_SYNC")
@@ -94,6 +95,14 @@ class InspectionSyncService:
     def sync_once(self) -> Dict[str, Any]:
         if not self.config.offline_outbox_enabled:
             return {"attempted": 0, "synced": 0, "failed": 0, "pending": 0}
+        if production_is_active():
+            return {
+                "attempted": 0,
+                "synced": 0,
+                "failed": 0,
+                "pending": self.outbox.pending_count(),
+                "deferred_for_production": True,
+            }
         if not self._run_lock.acquire(blocking=False):
             return {
                 "attempted": 0,
@@ -117,17 +126,28 @@ class InspectionSyncService:
                 attempted += 1
                 payload = record.get("payload") or {}
                 try:
-                    response = self.repository.save_cycle(
-                        payload.get("result") or {},
-                        operator=payload.get("operator") or {},
-                        plc_status=payload.get("plc_status") or {},
-                        final_result=payload.get("final_result"),
-                        recipe=payload.get("recipe") or {},
-                        lifecycle_status=payload.get("lifecycle_status") or "COMPLETED",
-                        store_images=payload.get("store_images"),
-                        allow_outbox=False,
-                        recovered_from_outbox=True,
-                    )
+                    # Never start outbox PostgreSQL work during capture/AI.
+                    # Each record gets a short metadata-only DB slot so a new
+                    # production cycle can take priority between records.
+                    with database_activity(timeout=0.25) as acquired:
+                        if not acquired:
+                            self.outbox.mark_failed(
+                                record["id"],
+                                "Deferred while production capture/AI is active",
+                                max(float(self.config.sync_interval_sec), 1.0),
+                            )
+                            break
+                        response = self.repository.save_cycle(
+                            payload.get("result") or {},
+                            operator=payload.get("operator") or {},
+                            plc_status=payload.get("plc_status") or {},
+                            final_result=payload.get("final_result"),
+                            recipe=payload.get("recipe") or {},
+                            lifecycle_status=payload.get("lifecycle_status") or "COMPLETED",
+                            store_images=False,
+                            allow_outbox=False,
+                            recovered_from_outbox=True,
+                        )
                     if not response.get("success"):
                         raise RuntimeError(str(response))
                     self.outbox.mark_synced(record["id"])

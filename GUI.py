@@ -23,6 +23,7 @@ from src.COMMON.db import (
     get_inspection_sync_service,
     get_alarm_service,
 )
+from src.COMMON.inspection_activity_gate import database_activity
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import subprocess
@@ -1250,18 +1251,9 @@ class MainWindow(QMainWindow):
         """Stop continuous inspection gracefully"""
         try:
             if self.continuous_worker:
+                # Worker.stop() now synchronously releases PLC waits and Arena
+                # buffers before its QObject/QThread can be deleted.
                 self.continuous_worker.stop()
-
-            # Extra safety: directly stop camera manager also
-            if self.multi_cam is not None:
-                if hasattr(self.multi_cam, "_stop_event"):
-                    self.multi_cam._stop_event.set()
-
-                if hasattr(self.multi_cam, "stop_all_streams"):
-                    threading.Thread(
-                        target=self.multi_cam.stop_all_streams,
-                        daemon=True,
-                    ).start()
 
         except Exception as e:
             logger.warning(f"[EXIT] continuous inspection stop warning: {e}")
@@ -1306,14 +1298,21 @@ class MainWindow(QMainWindow):
 
         def persist():
             try:
-                response = save_cycle_metadata(
-                    result_payload,
-                    operator=operator_payload,
-                    plc_status=plc_payload,
-                    final_result=final_value,
-                    recipe=recipe_payload,
-                    lifecycle_status="COMPLETED",
-                )
+                # Wait until camera capture, FFC, local image saving, AI and
+                # visualization generation are completely idle. The PLC result
+                # has already been sent before this function is queued.
+                with database_activity(timeout=None) as acquired:
+                    if not acquired:
+                        raise RuntimeError("Database activity slot was not acquired")
+                    response = save_cycle_metadata(
+                        result_payload,
+                        operator=operator_payload,
+                        plc_status=plc_payload,
+                        final_result=final_value,
+                        recipe=recipe_payload,
+                        lifecycle_status="COMPLETED",
+                        store_images=False,
+                    )
                 logger.info(
                     "Inspection record finalized after PLC result",
                     extra={
@@ -3336,7 +3335,7 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-            self.thread_manager.stop_all(timeout=3000)
+            self.thread_manager.stop_all(timeout=15000)
 
             sync_service = getattr(self, "inspection_sync_service", None)
             if sync_service is not None:

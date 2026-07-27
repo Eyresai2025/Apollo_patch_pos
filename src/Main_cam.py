@@ -1,8 +1,11 @@
 import os
+import gc
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.COMMON.structured_logging import get_logger
 logger = get_logger(__name__, component="INSPECTION")
+from src.COMMON.cycle_timing_reporter import save_cycle_timing_report
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
 import traceback
@@ -10,6 +13,7 @@ import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
  
 from src.COMMON.db import save_cycle_metadata
+from src.COMMON.inspection_activity_gate import begin_production, end_production
 from src.COMMON.cycle_engine import (
     DEVICE,
     CAMERA_CAPTURE_ENABLED,
@@ -35,6 +39,9 @@ from src.COMMON.cycle_engine import (
  
 from src.camera.HARDWARE_TRIGGER import (
     TRIGGER_MODE,
+    BEAD_TRIGGER_DB,
+    BEAD_TRIGGER_BYTE,
+    BEAD_TRIGGER_BIT,
     get_camera_to_side_map,
     get_side_to_camera_map,
 )
@@ -124,6 +131,7 @@ class ContinuousCycleWorker(QObject):
         self.require_ready_confirmation = True
         self._ready_confirm_event = threading.Event()
         self._stop_event = threading.Event()
+        self._stopping = False
         self._is_running = False
         self._cleanup_lock = threading.Lock()
         self._cleanup_done = False
@@ -236,30 +244,49 @@ class ContinuousCycleWorker(QObject):
             self.status_update.emit(" Waiting for PLC software trigger signal...")
  
         # MAIN LOOP - capture_all() blocks internally based on CAM_TRIGGER_MODE
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and not self._stopping:
             try:
                 should_capture = False
  
-                # capture_all() blocks internally until PLC/software trigger capture is completed.
+                # PLC mode should re-enter the fresh LOW->HIGH wait immediately
+                # after the previous cycle and camera preparation are complete.
+                # The interval guard remains only for non-PLC test modes.
                 current_time = time.time()
-                if current_time - last_capture_time >= self.min_capture_interval:
+                if TRIGGER_MODE == "plc_software":
+                    should_capture = True
+                elif current_time - last_capture_time >= self.min_capture_interval:
                     should_capture = True
  
                 if should_capture:
                     capture_count += 1
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
- 
+                    wait_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
                     self.status_update.emit("")
-                    self.status_update.emit(f" ═══ INSPECTION TRIGGER #{capture_count} ═══")
-                    self.status_update.emit(f"   Time: {timestamp}")
-                    self.capture_started.emit(timestamp)
- 
-                    capture_success = self._execute_capture(capture_count, timestamp)
- 
+                    self.status_update.emit(
+                        f" Waiting for BEAD trigger for cycle #{capture_count}..."
+                    )
+
+                    capture_success = self._execute_capture(
+                        capture_count,
+                        wait_timestamp,
+                    )
+
+                    if self._stop_event.is_set() or self._stopping:
+                        break
+
                     if capture_success:
                         last_capture_time = time.time()
                     else:
-                        self.status_update.emit("  Capture skipped or failed")
+                        # Do not automatically enter another trigger cycle with
+                        # cameras in ERROR/not-ready state. Require operator restart.
+                        message = (
+                            "Capture failed. Continuous inspection stopped to prevent "
+                            "repeated invalid cycles. Re-open Live after camera recovery."
+                        )
+                        self.status_update.emit(f"  {message}")
+                        self.processing_error.emit(message)
+                        self._stop_event.set()
+                        break
  
             except Exception as e:
                 error_msg = f"Continuous cycle error: {e}"
@@ -270,8 +297,12 @@ class ContinuousCycleWorker(QObject):
        
         self._cleanup()
         self._is_running = False
-        self.status_update.emit(" Continuous cycle stopped")
-        self.finished.emit()
+        try:
+            self.status_update.emit(" Continuous cycle stopped")
+            self.finished.emit()
+        except RuntimeError:
+            # GUI object may already be closing; never crash during shutdown.
+            pass
    
     def confirm_ready_to_start(self):
         self._ready_confirm_event.set()
@@ -382,103 +413,246 @@ class ContinuousCycleWorker(QObject):
             extra={"event_code": "PERFORMANCE_TIMING", "operation": "inspection_cycle"},
         )
 
-    def _execute_capture(self, capture_count: int, timestamp: str) -> bool:
+    def _log_camera_timing_summary(self, capture_count: int) -> None:
+        camera_timing = getattr(self.multi_camera_manager, "last_capture_timing", None)
+        if not isinstance(camera_timing, dict):
+            return
+
+        for key, value in camera_timing.items():
+            if key == "sides":
+                continue
+            self._timing_log(
+                f"CAMERA_CYCLE | capture_count={capture_count} | {key}={value}"
+            )
+
+        sides = camera_timing.get("sides", {})
+        if not isinstance(sides, dict):
+            return
+
+        for side_name, side_timing in sides.items():
+            if not isinstance(side_timing, dict):
+                continue
+            chunks = side_timing.get("chunks", [])
+            get_wait_values = [
+                float(item.get("get_wait_ms", 0.0) or 0.0)
+                for item in chunks
+                if isinstance(item, dict)
+            ]
+            convert_values = [
+                float(item.get("convert_copy_ms", 0.0) or 0.0)
+                for item in chunks
+                if isinstance(item, dict)
+            ]
+            self._timing_log(
+                f"CAMERA_SIDE | capture_count={capture_count} | side={side_name} | "
+                f"status={side_timing.get('status', '-')} | "
+                f"plc_to_trigger={float(side_timing.get('plc_to_trigger_sec', 0.0) or 0.0):.3f}s | "
+                f"capture={float(side_timing.get('camera_capture_sec', 0.0) or 0.0):.3f}s | "
+                f"ffc={float(side_timing.get('ffc_sec', 0.0) or 0.0):.3f}s | "
+                f"chunks={len(chunks)} | "
+                f"avg_get_wait_ms={(sum(get_wait_values) / len(get_wait_values)) if get_wait_values else 0.0:.1f} | "
+                f"max_get_wait_ms={max(get_wait_values) if get_wait_values else 0.0:.1f} | "
+                f"avg_convert_copy_ms={(sum(convert_values) / len(convert_values)) if convert_values else 0.0:.1f}"
+            )
+
+    def _log_process_memory(self, stage: str) -> None:
+        """Best-effort RAM telemetry; psutil is optional."""
+        try:
+            import psutil
+
+            process = psutil.Process(os.getpid())
+            info = process.memory_info()
+            vm = psutil.virtual_memory()
+            self._timing_log(
+                f"MEMORY | stage={stage} | "
+                f"rss_gib={info.rss / (1024 ** 3):.3f} | "
+                f"vms_gib={info.vms / (1024 ** 3):.3f} | "
+                f"system_available_gib={vm.available / (1024 ** 3):.3f} | "
+                f"system_percent={vm.percent:.1f}"
+            )
+        except Exception:
+            return
+
+    def _build_capture_signal_payload(
+        self,
+        images: Dict[str, np.ndarray],
+    ) -> Dict[str, np.ndarray]:
+        """Build bounded GUI previews without changing saved/AI image resolution."""
+        mode = str(os.getenv("APOLLO_CAPTURE_SIGNAL_MODE", "preview")).strip().lower()
+        if mode == "off":
+            return {}
+        if mode == "full":
+            return images
+
+        try:
+            max_pixels = max(100_000, int(os.getenv(
+                "APOLLO_CAPTURE_PREVIEW_MAX_PIXELS",
+                "2000000",
+            )))
+        except (TypeError, ValueError):
+            max_pixels = 2_000_000
+
+        previews: Dict[str, np.ndarray] = {}
+        for side_name, image in images.items():
+            if image is None or not isinstance(image, np.ndarray) or image.ndim < 2:
+                continue
+
+            height, width = image.shape[:2]
+            pixel_count = max(1, int(height) * int(width))
+            if pixel_count <= max_pixels:
+                previews[side_name] = image.copy()
+                continue
+
+            scale = (pixel_count / float(max_pixels)) ** 0.5
+            row_step = max(1, int(scale))
+            col_step = max(1, int(scale))
+            preview = image[::row_step, ::col_step]
+            while preview.shape[0] * preview.shape[1] > max_pixels:
+                if preview.shape[0] >= preview.shape[1]:
+                    row_step += 1
+                else:
+                    col_step += 1
+                preview = image[::row_step, ::col_step]
+            previews[side_name] = np.ascontiguousarray(preview)
+
+        return previews
+
+    def _release_cycle_images(
+        self,
+        images: Optional[Dict[str, np.ndarray]],
+    ) -> None:
+        if isinstance(images, dict):
+            images.clear()
+        gc.collect()
+
+    def _execute_capture(self, capture_count: int, wait_timestamp: str) -> bool:
+        """Execute capture, saving and AI; cycle timing begins at BEAD trigger."""
         if self._stop_event.is_set():
             self.status_update.emit(" Capture cancelled because stop was requested.")
             return False
-        """Execute a complete capture + process cycle"""
+
+        begin_production(f"capture_ai_cycle_{capture_count}")
+
+        execute_started_ts = time.perf_counter()
+        execute_start_wall = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        cycle_t0: Optional[float] = None
+        cycle_start_wall: Optional[str] = None
+        trigger_timestamp = wait_timestamp
+        capture_call_wait_inclusive_sec = 0.0
+        capture_after_trigger_sec = 0.0
+        save_sec = 0.0
+        pipeline_sec = 0.0
+        prep_wait_sec = 0.0
+        result = None
+
         try:
             set_live_progress(
                 phase="CAPTURING",
                 active_zone="All Zones",
                 images_captured=0,
                 total_images=len(self.capture_sides),
-                message="Capturing images from cameras",
+                message="Waiting for BEAD trigger",
             )
- 
-            cycle_t0 = time.perf_counter()
-            cycle_start_wall = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
             self._timing_log(
-                f"CYCLE_START | capture_count={capture_count} | "
-                f"wall_time={cycle_start_wall} | "
-                f"note=timer starts before capture_all call"
+                f"TRIGGER_WAIT_START | capture_count={capture_count} | "
+                f"wall_time={execute_start_wall} | "
+                f"tag=DB{BEAD_TRIGGER_DB}.DBX{BEAD_TRIGGER_BYTE}.{BEAD_TRIGGER_BIT}"
             )
+
+            def on_cycle_trigger(info: Dict[str, Any]) -> None:
+                nonlocal cycle_t0, cycle_start_wall, trigger_timestamp
+                cycle_t0 = float(info.get("perf_ts", time.perf_counter()))
+                cycle_start_wall = str(
+                    info.get("wall_time")
+                    or datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                )
+                trigger_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+                self.status_update.emit("")
+                self.status_update.emit(
+                    f" ═══ INSPECTION TRIGGER #{capture_count} RECEIVED ═══"
+                )
+                self.status_update.emit(f"   Time: {cycle_start_wall}")
+                self.capture_started.emit(trigger_timestamp)
+                set_live_progress(
+                    phase="CAPTURING",
+                    active_zone="All Zones",
+                    images_captured=0,
+                    total_images=len(self.capture_sides),
+                    message="BEAD trigger received; capturing images",
+                )
+                self._timing_log(
+                    f"CYCLE_START | capture_count={capture_count} | "
+                    f"wall_time={cycle_start_wall} | source={info.get('source', '-')} | "
+                    f"pre_trigger_wait={float(info.get('wait_before_trigger_sec', 0.0) or 0.0):.3f}s | "
+                    "note=all cycle totals exclude PLC trigger waiting"
+                )
+                self._log_process_memory("cycle_trigger")
 
             self.status_update.emit(
-                f" Capturing images from {len(self.multi_camera_manager.cameras)} cameras..."
+                f" Cameras ready. Waiting to capture {len(self.capture_sides)} views..."
             )
 
-            capture_t0 = time.perf_counter()
-            self._timing_log(
-                f"CAPTURE_CALL_START | capture_count={capture_count} | "
-                f"sides={','.join(self.capture_sides)}"
+            capture_call_t0 = time.perf_counter()
+            images = self.multi_camera_manager.capture_all(
+                sides_to_capture=self.capture_sides,
+                on_cycle_trigger=on_cycle_trigger,
             )
+            capture_return_ts = time.perf_counter()
+            capture_call_wait_inclusive_sec = capture_return_ts - capture_call_t0
 
-            try:
-                images = self.multi_camera_manager.capture_all(
-                    sides_to_capture=self.capture_sides,
+            if cycle_t0 is None:
+                camera_timing = getattr(
+                    self.multi_camera_manager,
+                    "last_capture_timing",
+                    {},
                 )
-
-                capture_sec = time.perf_counter() - capture_t0
-                self._timing_log(
-                    f"CAPTURE_CALL_DONE | capture_count={capture_count} | "
-                    f"time={capture_sec:.3f}s | "
-                    f"note=includes trigger wait if capture_all waits internally"
+                trigger_value = (
+                    camera_timing.get("trigger_started_ts")
+                    if isinstance(camera_timing, dict)
+                    else None
                 )
-
-                # Optional: if HARDWARE_TRIGGER.py exposes exact internal timings,
-                # this will print them also.
-                camera_timing = getattr(self.multi_camera_manager, "last_capture_timing", None)
-                if isinstance(camera_timing, dict):
-                    for k, v in camera_timing.items():
-                        self._timing_log(
-                            f"CAMERA_INTERNAL | capture_count={capture_count} | {k}={v}"
-                        )
-
-             
-                if self._stop_event.is_set():
-                    self.status_update.emit(" Capture stopped during camera acquisition.")
-                    return False
-                missing_capture_sides = [
-                    side for side in self.capture_sides
-                    if side not in images or images.get(side) is None
-                ]
-
-                if missing_capture_sides:
+                if trigger_value is None:
                     raise RuntimeError(
-                        "Camera capture failed / missing images for: "
-                        + ", ".join(missing_capture_sides)
+                        "Capture returned without an actual trigger timestamp"
                     )
-                
-            except TypeError:
-                images = self.multi_camera_manager.capture_all()
-
-                capture_sec = time.perf_counter() - capture_t0
-                self._timing_log(
-                    f"CAPTURE_CALL_DONE | capture_count={capture_count} | "
-                    f"time={capture_sec:.3f}s | "
-                    f"mode=old_capture_all_signature"
+                cycle_t0 = float(trigger_value)
+                cycle_start_wall = str(
+                    camera_timing.get("trigger_wall_time")
+                    or datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 )
 
-                camera_timing = getattr(self.multi_camera_manager, "last_capture_timing", None)
-                if isinstance(camera_timing, dict):
-                    for k, v in camera_timing.items():
-                        self._timing_log(
-                            f"CAMERA_INTERNAL | capture_count={capture_count} | {k}={v}"
-                        )
+            capture_after_trigger_sec = max(0.0, capture_return_ts - cycle_t0)
+            trigger_wait_sec = max(0.0, cycle_t0 - capture_call_t0)
+            self._timing_log(
+                f"CAPTURE_DONE | capture_count={capture_count} | "
+                f"after_trigger={capture_after_trigger_sec:.3f}s | "
+                f"pre_trigger_wait={trigger_wait_sec:.3f}s | "
+                f"wait_inclusive_call={capture_call_wait_inclusive_sec:.3f}s"
+            )
+            self._log_camera_timing_summary(capture_count)
 
-                if self._stop_event.is_set():
-                    self.status_update.emit(" Capture stopped during camera acquisition.")
-                    return False
-           
+            if self._stop_event.is_set():
+                self.status_update.emit(" Capture stopped during camera acquisition.")
+                return False
+
+            missing_capture_sides = [
+                side for side in self.capture_sides
+                if side not in images or images.get(side) is None
+            ]
+            if missing_capture_sides:
+                raise RuntimeError(
+                    "Camera capture failed / missing images for: "
+                    + ", ".join(missing_capture_sides)
+                )
+
             if not images or not any(img is not None for img in images.values()):
                 self.status_update.emit(" Capture failed - no images received")
                 self.processing_error.emit("No images captured")
                 return False
-           
+
             success_count = sum(1 for img in images.values() if img is not None)
- 
             set_live_progress(
                 phase="CAPTURING",
                 active_zone="All Zones",
@@ -486,10 +660,14 @@ class ContinuousCycleWorker(QObject):
                 total_images=len(self.capture_sides),
                 message=f"Captured {success_count}/{len(self.capture_sides)} images",
             )
- 
-            self.status_update.emit(f"   Captured: {success_count}/{len(images)} cameras")
-            self.capture_completed.emit(images)
-           
+            self.status_update.emit(
+                f"   Captured: {success_count}/{len(images)} cameras"
+            )
+            self._log_process_memory("after_capture_ffc")
+            capture_signal_payload = self._build_capture_signal_payload(images)
+            self.capture_completed.emit(capture_signal_payload)
+            del capture_signal_payload
+
             cycle_capture_dir, cycle_id = build_cycle_capture_dir(
                 self.media_root,
                 sku_name=self.sku_name,
@@ -506,25 +684,30 @@ class ContinuousCycleWorker(QObject):
                     "details": {"capture_count": capture_count},
                 },
             )
-           
-            self.status_update.emit(" Saving images...")
 
+            self.status_update.emit(" Saving images...")
             save_t0 = time.perf_counter()
             image_map = self._save_images_to_cycle(images, cycle_capture_dir)
             save_sec = time.perf_counter() - save_t0
-
             self._timing_log(
                 f"IMAGE_SAVE_DONE | cycle_id={cycle_id} | "
                 f"time={save_sec:.3f}s | saved_sides={len(image_map)}"
             )
-           
+
             if not image_map:
                 self.status_update.emit(" No images saved to cycle directory")
                 self.processing_error.emit("Failed to save images")
                 return False
-           
+
             self.images_saved.emit(image_map)
- 
+
+            # AI consumes the saved file paths, not these NumPy arrays. Release
+            # the full-resolution capture payload before inference allocates its
+            # own images. This prevents RAM/pagefile growth across cycles.
+            self._release_cycle_images(images)
+            images = {}
+            self._log_process_memory("after_image_release_before_ai")
+
             set_live_progress(
                 phase="CAPTURING",
                 active_zone="All Zones",
@@ -532,12 +715,12 @@ class ContinuousCycleWorker(QObject):
                 total_images=len(self.sides_to_run),
                 message=f"Saved {len(image_map)}/{len(self.sides_to_run)} inspection images",
             )
- 
-            self.status_update.emit(f"   Saved {len(image_map)} sides: {', '.join(image_map.keys())}")
-           
+            self.status_update.emit(
+                f"   Saved {len(image_map)} sides: {', '.join(image_map.keys())}"
+            )
+
             self.processing_started.emit(cycle_id)
             self.status_update.emit(f" Starting inspection stage for {cycle_id}...")
-           
             set_live_progress(
                 phase="INFERENCE",
                 active_zone="All Zones",
@@ -546,79 +729,190 @@ class ContinuousCycleWorker(QObject):
                 message=f"Inspection stage started for {cycle_id}",
             )
             if self._stop_event.is_set():
-                self.status_update.emit(" Inspection stage skipped because stop was requested.")
+                self.status_update.emit(
+                    " Inspection stage skipped because stop was requested."
+                )
                 return False
-            pipeline_t0 = time.perf_counter()
-            result = self._run_ai_pipeline(image_map, cycle_id, cycle_capture_dir)
-            pipeline_sec = time.perf_counter() - pipeline_t0
 
+            pipeline_t0 = time.perf_counter()
+            result = self._run_ai_pipeline(
+                image_map,
+                cycle_id,
+                cycle_capture_dir,
+            )
+            pipeline_sec = time.perf_counter() - pipeline_t0
             self._timing_log(
                 f"INSPECTION_PIPELINE_DONE | cycle_id={cycle_id} | "
                 f"time={pipeline_sec:.3f}s"
             )
-           
-            if result:
-                total_cycle_sec = time.perf_counter() - cycle_t0
 
-                result["timing_capture_call_sec"] = round(capture_sec, 3)
-                result["timing_image_save_sec"] = round(save_sec, 3)
-                result["timing_inspection_pipeline_sec"] = round(pipeline_sec, 3)
-                result["timing_total_from_capture_call_sec"] = round(total_cycle_sec, 3)
+            gc.collect()
+            self._log_process_memory("after_ai_pipeline")
 
-                self._timing_log(
-                    f"CYCLE_TOTAL | cycle_id={cycle_id} | "
-                    f"capture_call={capture_sec:.3f}s | "
-                    f"save={save_sec:.3f}s | "
-                    f"pipeline={pipeline_sec:.3f}s | "
-                    f"total={total_cycle_sec:.3f}s"
-                )
-                set_live_progress(
-                    phase="COMPLETED",
-                    active_zone="All Zones",
-                    images_captured=len(self.sides_to_run),
-                    total_images=len(self.sides_to_run),
-                    message=f"Cycle completed: {result.get('final_label', 'Unknown')}",
-                )
- 
-                self.processing_completed.emit(result)
-                final_label = result.get('final_label', 'Unknown')
-                logger.info(
-                    "Inspection cycle completed",
-                    extra={
-                        "event_code": "INSPECTION_CYCLE_COMPLETED",
-                        "cycle_id": cycle_id,
-                        "tyre_id": self.tyre_name,
-                        "sku_name": self.sku_name,
-                        "status": final_label,
-                        "duration_ms": round(total_cycle_sec * 1000.0, 3),
-                    },
-                )
-                cycle_time = result.get(
-                    'timing_total_from_capture_call_sec',
-                    result.get('cycle_latency_sec', 0)
-                )
-               
-                self.status_update.emit("")
-                self.status_update.emit(f" ═══ CYCLE #{capture_count} COMPLETE ═══")
-                self.status_update.emit(f"   Cycle ID: {cycle_id}")
-                self.status_update.emit(f"   Result: {final_label}")
-                self.status_update.emit(f"   Time: {cycle_time:.2f}s")
-                self.status_update.emit("─" * 40)
-                self.status_update.emit(" Waiting for next trigger...")
-            else:
+            if not result:
                 self.processing_error.emit("Inspection stage returned no result")
                 return False
-           
+
+            # Camera preparation has already overlapped FFC, saving and AI. Only
+            # now, at the cycle boundary, verify that all cameras are ready before
+            # displaying/entering the next PLC trigger wait.
+            prep_wait_t0 = time.perf_counter()
+            if hasattr(self.multi_camera_manager, "wait_for_next_cycle_ready"):
+                self.status_update.emit(" Confirming cameras ready for next tyre...")
+                self.multi_camera_manager.wait_for_next_cycle_ready(
+                    raise_on_error=True,
+                    log_wait=True,
+                )
+            prep_wait_sec = time.perf_counter() - prep_wait_t0
+            prep_state = (
+                self.multi_camera_manager.get_next_cycle_preparation_status()
+                if hasattr(
+                    self.multi_camera_manager,
+                    "get_next_cycle_preparation_status",
+                )
+                else {}
+            )
+            self._timing_log(
+                f"NEXT_CYCLE_READY | cycle_id={cycle_id} | "
+                f"boundary_wait={prep_wait_sec:.3f}s | "
+                f"background_prep={float(prep_state.get('elapsed_sec', 0.0) or 0.0):.3f}s | "
+                f"status={'OK' if prep_state.get('ok', True) else 'ERROR'}"
+            )
+
+            total_cycle_sec = time.perf_counter() - cycle_t0
+            result["timing_capture_call_sec"] = round(capture_after_trigger_sec, 3)
+            result["timing_capture_after_trigger_sec"] = round(
+                capture_after_trigger_sec,
+                3,
+            )
+            result["timing_capture_wait_inclusive_sec"] = round(
+                capture_call_wait_inclusive_sec,
+                3,
+            )
+            result["timing_image_save_sec"] = round(save_sec, 3)
+            result["timing_inspection_pipeline_sec"] = round(pipeline_sec, 3)
+            result["timing_next_cycle_ready_wait_sec"] = round(prep_wait_sec, 3)
+            result["timing_total_from_trigger_sec"] = round(total_cycle_sec, 3)
+            # Preserve legacy key used by the GUI, but its value is now correctly
+            # measured from the actual BEAD trigger rather than before capture_all.
+            result["timing_total_from_capture_call_sec"] = round(total_cycle_sec, 3)
+
+            timing_files = save_cycle_timing_report(
+                media_root=self.media_root,
+                sku_name=self.sku_name,
+                cycle_id=cycle_id,
+                cycle_wall_start=cycle_start_wall or execute_start_wall,
+                overall={
+                    "pre_trigger_wait_sec": max(0.0, cycle_t0 - execute_started_ts),
+                    "capture_after_trigger_sec": capture_after_trigger_sec,
+                    "capture_call_wait_inclusive_sec": capture_call_wait_inclusive_sec,
+                    "image_save_sec": save_sec,
+                    "inspection_pipeline_sec": pipeline_sec,
+                    "next_cycle_ready_boundary_wait_sec": prep_wait_sec,
+                    "next_cycle_background_prep_sec": float(
+                        prep_state.get("elapsed_sec", 0.0) or 0.0
+                    ),
+                    "total_cycle_from_trigger_sec": total_cycle_sec,
+                },
+                camera_timing=getattr(
+                    self.multi_camera_manager,
+                    "last_capture_timing",
+                    {},
+                ),
+                image_save_timing=getattr(
+                    self,
+                    "_last_image_save_timing",
+                    {},
+                ),
+                ai_result=result,
+                status=str(result.get("pipeline_status") or "COMPLETED"),
+            )
+            result["cycle_timing_files"] = timing_files
+            self._timing_log(
+                f"TIMING_REPORT_SAVED | cycle_id={cycle_id} | "
+                f"folder={timing_files.get('cycle_dir', '')}"
+            )
+            self._timing_log(
+                f"CYCLE_TOTAL_FROM_TRIGGER | cycle_id={cycle_id} | "
+                f"capture={capture_after_trigger_sec:.3f}s | "
+                f"save={save_sec:.3f}s | pipeline={pipeline_sec:.3f}s | "
+                f"camera_ready_wait={prep_wait_sec:.3f}s | "
+                f"total={total_cycle_sec:.3f}s"
+            )
+
+            set_live_progress(
+                phase="COMPLETED",
+                active_zone="All Zones",
+                images_captured=len(self.sides_to_run),
+                total_images=len(self.sides_to_run),
+                message=f"Cycle completed: {result.get('final_label', 'Unknown')}",
+            )
+            self.processing_completed.emit(result)
+            final_label = result.get("final_label", "Unknown")
+            logger.info(
+                "Inspection cycle completed",
+                extra={
+                    "event_code": "INSPECTION_CYCLE_COMPLETED",
+                    "cycle_id": cycle_id,
+                    "tyre_id": self.tyre_name,
+                    "sku_name": self.sku_name,
+                    "status": final_label,
+                    "duration_ms": round(total_cycle_sec * 1000.0, 3),
+                },
+            )
+
+            self.status_update.emit("")
+            self.status_update.emit(f" ═══ CYCLE #{capture_count} COMPLETE ═══")
+            self.status_update.emit(f"   Cycle ID: {cycle_id}")
+            self.status_update.emit(f"   Result: {final_label}")
+            self.status_update.emit(
+                f"   Time from trigger: {total_cycle_sec:.2f}s"
+            )
+            self.status_update.emit("─" * 40)
+            self.status_update.emit(" Cameras ready - waiting for next trigger...")
             return True
-           
-        except Exception as e:
+
+        except Exception as error:
+            try:
+                failure_cycle_id = locals().get("cycle_id") or f"Capture_{capture_count}"
+                failure_wall = cycle_start_wall or execute_start_wall
+                failure_total = (
+                    max(0.0, time.perf_counter() - cycle_t0)
+                    if cycle_t0 is not None
+                    else 0.0
+                )
+                save_cycle_timing_report(
+                    media_root=self.media_root,
+                    sku_name=self.sku_name,
+                    cycle_id=failure_cycle_id,
+                    cycle_wall_start=failure_wall,
+                    overall={
+                        "total_cycle_from_trigger_sec": failure_total,
+                        "trigger_received": cycle_t0 is not None,
+                    },
+                    camera_timing=getattr(
+                        self.multi_camera_manager,
+                        "last_capture_timing",
+                        {},
+                    ),
+                    image_save_timing=getattr(
+                        self,
+                        "_last_image_save_timing",
+                        {},
+                    ),
+                    ai_result=result if isinstance(result, dict) else {},
+                    status="FAILED",
+                    error=str(error),
+                )
+            except Exception:
+                logger.exception("Unable to save failed-cycle timing report")
+
             set_live_progress(
                 phase="FAILED",
                 active_zone="-",
-                message=f"Capture cycle error: {e}",
+                message=f"Capture cycle error: {error}",
             )
- 
-            error_msg = f"Capture cycle error: {e}"
+            error_msg = f"Capture cycle error: {error}"
             self.status_update.emit(f" {error_msg}")
             self.processing_error.emit(error_msg)
             logger.exception(
@@ -632,22 +926,59 @@ class ContinuousCycleWorker(QObject):
                 },
             )
             return False
-   
+        finally:
+            try:
+                self._release_cycle_images(locals().get("images"))
+            except Exception:
+                pass
+            self._log_process_memory("cycle_finally")
+
+            # PostgreSQL/outbox work is released only after local saving, AI and
+            # the next-cycle camera readiness boundary have completed.
+            end_production()
+
     def _save_images_to_cycle(self, images: Dict[str, np.ndarray], cycle_dir: str) -> Dict[str, str]:
         """
-        Save captured numpy arrays to cycle directory.
+        Save captured numpy arrays to the cycle directory.
 
-        Supports both old serial-keyed result:
+        The image format, PNG compression, folder layout and AI hand-off remain
+        unchanged. Only independent image writes are parallelized, with a hard
+        maximum of two workers to avoid excessive RAM, CPU and disk pressure.
+
+        Supports both old serial-keyed results::
+
             {"254901432": image}
 
-        and new role/side-keyed result from updated HARDWARE_TRIGGER.py:
+        and new role/side-keyed results from HARDWARE_TRIGGER.py::
+
             {"sidewall1": image, "innerwall": image, "bead": image}
         """
         import cv2
 
-        image_map = {}
-        known_sides = set(self.side_to_camera.keys()) | set(self.sides_to_run)
+        # Same lossless PNG compression used by the Capture tab.
+        live_png_compression = max(
+            0,
+            min(9, int(os.getenv("APOLLO_PNG_COMPRESSION", "0"))),
+        )
+        live_png_params = [
+            cv2.IMWRITE_PNG_COMPRESSION,
+            live_png_compression,
+        ]
 
+        # Production-safe limit requested for the large 4096 x 90000 images.
+        # Set APOLLO_IMAGE_SAVE_WORKERS=1 to immediately restore sequential save.
+        try:
+            configured_workers = int(os.getenv("APOLLO_IMAGE_SAVE_WORKERS", "2"))
+        except (TypeError, ValueError):
+            configured_workers = 2
+        save_workers = max(1, min(2, configured_workers))
+
+        self._last_image_save_timing = {}
+        known_sides = set(self.side_to_camera.keys()) | set(self.sides_to_run)
+        save_jobs = []
+
+        # Resolve all side names and paths first. This keeps mapping behavior
+        # identical to the previous sequential implementation.
         for image_key, img_array in images.items():
             image_key = str(image_key)
 
@@ -655,13 +986,10 @@ class ContinuousCycleWorker(QObject):
                 self.status_update.emit(f"     No image from {image_key}")
                 continue
 
-            # New camera manager returns side names directly.
             if image_key in known_sides:
                 side_name = image_key
             else:
-                # Backward compatibility: old camera manager returned serial numbers.
                 side_name = self.camera_to_side.get(image_key)
-
                 if side_name is None:
                     for cam_serial, side in self.camera_to_side.items():
                         if image_key in str(cam_serial) or str(cam_serial) in image_key:
@@ -674,48 +1002,117 @@ class ContinuousCycleWorker(QObject):
 
             side_dir = os.path.join(cycle_dir, side_name)
             os.makedirs(side_dir, exist_ok=True)
-
             img_path = os.path.join(side_dir, f"{side_name}.png")
+            save_jobs.append((side_name, img_array, img_path))
 
-            try:
-                if img_array.dtype == np.uint16:
-                    cv2.imwrite(img_path, img_array)
+        if not save_jobs:
+            return {}
 
-                elif img_array.dtype == np.uint8:
-                    if len(img_array.shape) == 2:
-                        cv2.imwrite(img_path, img_array)
-                    elif len(img_array.shape) == 3 and img_array.shape[2] == 1:
-                        cv2.imwrite(img_path, img_array[:, :, 0])
-                    else:
-                        cv2.imwrite(img_path, cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY))
+        actual_workers = min(save_workers, len(save_jobs))
+        self.status_update.emit(
+            f"   Parallel image save: {actual_workers} worker(s), "
+            f"PNG compression={live_png_compression}"
+        )
+        self._timing_log(
+            f"IMAGE_SAVE_START | images={len(save_jobs)} | workers={actual_workers} | "
+            f"png_compression={live_png_compression}"
+        )
 
+        def save_one(job):
+            side_name, img_array, img_path = job
+            side_save_t0 = time.perf_counter()
+
+            if img_array.dtype == np.uint16:
+                image_to_save = img_array
+            elif img_array.dtype == np.uint8:
+                if len(img_array.shape) == 2:
+                    image_to_save = img_array
+                elif len(img_array.shape) == 3 and img_array.shape[2] == 1:
+                    image_to_save = img_array[:, :, 0]
                 else:
-                    img_8bit = img_array.astype(np.uint8)
-                    if len(img_8bit.shape) == 2:
-                        cv2.imwrite(img_path, img_8bit)
-                    elif len(img_8bit.shape) == 3 and img_8bit.shape[2] == 1:
-                        cv2.imwrite(img_path, img_8bit[:, :, 0])
-                    else:
-                        cv2.imwrite(img_path, cv2.cvtColor(img_8bit, cv2.COLOR_RGB2GRAY))
+                    image_to_save = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            else:
+                img_8bit = img_array.astype(np.uint8)
+                if len(img_8bit.shape) == 2:
+                    image_to_save = img_8bit
+                elif len(img_8bit.shape) == 3 and img_8bit.shape[2] == 1:
+                    image_to_save = img_8bit[:, :, 0]
+                else:
+                    image_to_save = cv2.cvtColor(img_8bit, cv2.COLOR_RGB2GRAY)
 
-                if os.path.exists(img_path):
-                    file_size = os.path.getsize(img_path) / 1024
+            write_ok = cv2.imwrite(img_path, image_to_save, live_png_params)
+            if not write_ok or not os.path.isfile(img_path):
+                raise IOError(f"cv2.imwrite failed for {side_name}: {img_path}")
 
-                    if side_name in self.sides_to_run:
-                        image_map[side_name] = img_path
+            file_size_bytes = os.path.getsize(img_path)
+            return {
+                "side_name": side_name,
+                "path": img_path,
+                "shape": tuple(img_array.shape),
+                "dtype": str(img_array.dtype),
+                "duration_sec": time.perf_counter() - side_save_t0,
+                "file_size_bytes": file_size_bytes,
+                "selected_for_ai": side_name in self.sides_to_run,
+            }
+
+        completed = {}
+        errors = {}
+        with ThreadPoolExecutor(
+            max_workers=actual_workers,
+            thread_name_prefix="apollo-image-save",
+        ) as executor:
+            future_to_side = {
+                executor.submit(save_one, job): job[0]
+                for job in save_jobs
+            }
+            for future in as_completed(future_to_side):
+                side_name = future_to_side[future]
+                try:
+                    result = future.result()
+                    completed[side_name] = result
+                    file_size_kb = result["file_size_bytes"] / 1024
+                    if result["selected_for_ai"]:
                         self.status_update.emit(
-                            f"    {side_name} saved ({img_array.shape}, {file_size:.1f}KB)"
+                            f"    {side_name} saved "
+                            f"(shape={result['shape']}, dtype={result['dtype']}, "
+                            f"png_compression={live_png_compression}, "
+                            f"size={file_size_kb:.1f}KB, "
+                            f"time={result['duration_sec']:.2f}s)"
                         )
                     else:
                         self.status_update.emit(
-                            f"    {side_name} saved but not selected for AI ({img_array.shape}, {file_size:.1f}KB)"
+                            f"    {side_name} saved but not selected for AI "
+                            f"({result['shape']}, {file_size_kb:.1f}KB, "
+                            f"time={result['duration_sec']:.2f}s)"
                         )
+                except Exception as exc:
+                    errors[side_name] = str(exc)
+                    self.status_update.emit(f"    Error saving {side_name}: {exc}")
 
-            except Exception as e:
-                self.status_update.emit(f"    Error saving {side_name}: {e}")
+        # Rebuild dictionaries in original capture order for deterministic
+        # downstream behavior, even though writes complete out of order.
+        image_map = {}
+        for side_name, _img_array, _img_path in save_jobs:
+            result = completed.get(side_name)
+            if result is None:
+                continue
+            self._last_image_save_timing[side_name] = {
+                "duration_sec": result["duration_sec"],
+                "file_size_bytes": result["file_size_bytes"],
+                "path": result["path"],
+                "worker_count": actual_workers,
+            }
+            if result["selected_for_ai"]:
+                image_map[side_name] = result["path"]
+
+        if errors:
+            self._timing_log(
+                "IMAGE_SAVE_ERRORS | "
+                + "; ".join(f"{side}={message}" for side, message in errors.items())
+            )
 
         return image_map
-   
+
     def _run_ai_pipeline(self, image_map: Dict[str, str], cycle_id: str, cycle_capture_dir: str) -> Optional[Dict[str, Any]]:
         """Run the configured inspection stage on captured images"""
         try:
@@ -781,23 +1178,10 @@ class ContinuousCycleWorker(QObject):
                 result.setdefault("timing", {})
                 result["timing"]["runtime_ready_sec"] = round(runtime_sec, 3)
                 result["timing"]["run_cycle_sec"] = round(run_cycle_sec, 3)
-            try:
-                save_cycle_metadata(
-                    result,
-                    lifecycle_status="CAPTURE_COMPLETED",
-                )
-            except Exception:
-                logger.exception(
-                    "Inspection metadata save failed",
-                    extra={
-                        "event_code": "INSPECTION_STAGE_SAVE_FAILED",
-                        "error_code": "DB-INSPECTION-003",
-                        "cycle_id": cycle_id,
-                        "tyre_id": self.tyre_name,
-                        "sku_name": self.sku_name,
-                    },
-                )
-           
+            # PostgreSQL persistence is intentionally deferred to GUI.py.
+            # The GUI sends the PLC result first, then performs one metadata-only
+            # save after production activity has ended.
+
             side_results = result.get('side_results', {})
             for side_name in self.sides_to_run:
                 side_result = side_results.get(side_name, {})
@@ -859,8 +1243,14 @@ class ContinuousCycleWorker(QObject):
         self.status_update.emit(" Live inspection cleanup completed")
    
     def stop(self):
-        """Signal the worker to stop and unblock camera/PLC waits."""
-        self.status_update.emit(" Stop signal received...")
+        """Signal the worker to stop and synchronously unblock all waits."""
+        if self._stopping:
+            return
+        self._stopping = True
+        try:
+            self.status_update.emit(" Stop signal received...")
+        except RuntimeError:
+            pass
 
         # Stop main worker loop
         self._stop_event.set()
@@ -879,14 +1269,9 @@ class ContinuousCycleWorker(QObject):
         except Exception:
             pass
 
-        # Run cleanup in background so GUI does not freeze while closing
-        try:
-            threading.Thread(
-                target=self._cleanup,
-                daemon=True,
-            ).start()
-        except Exception:
-            self._cleanup()
+        # Cleanup must finish before the QThread/QObject is destroyed. Camera
+        # stream stop interrupts Arena GetBuffer and PLC waits.
+        self._cleanup()
    
     def is_running(self) -> bool:
         """Check if worker is running"""

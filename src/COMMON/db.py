@@ -431,7 +431,7 @@ def save_cycle_metadata(
     final_result: Optional[str] = None,
     recipe: Optional[Dict[str, Any]] = None,
     lifecycle_status: str = "AI_COMPLETED",
-    store_images: Optional[bool] = None,
+    store_images: Optional[bool] = False,
 ):
     """Upsert one inspection cycle into PostgreSQL.
 

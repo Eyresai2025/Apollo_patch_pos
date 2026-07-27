@@ -34,6 +34,11 @@ from PyQt5.QtWidgets import (
 from arena_api.system import system
 from arena_api.buffer import BufferFactory
 
+try:
+    from src.Pages.laser_capture_tab import LaserCaptureTab
+except ImportError:
+    from Pages.laser_capture_tab import LaserCaptureTab
+
 
 def open_output_folder_path(path_text: str, parent=None) -> bool:
     """Create and open the output folder selected in the Capture page."""
@@ -722,7 +727,7 @@ class ManualCameraCaptureTab(QWidget):
         # SAVE SETTINGS
         # Keep this small for 4 cameras, because every full image is very large.
         self.save_queue_spin = self.make_spin(1, 10000, 8)
-        self.png_compression_spin = self.make_spin(0, 9, 0)
+        self.png_compression_spin = self.make_spin(0, 9, 3)
 
         # CAPTURE COUNT
         self.num_images_spin = self.make_spin(1, 1000, 1)
@@ -1174,7 +1179,7 @@ class AutoPLCFFCProcessTab(QWidget):
         self.buffer_timeout_spin = self.make_spin(1000, 300000, 30000)
         self.packet_size_spin = self.make_spin(576, 9014, 9000)
         self.packet_delay_spin = self.make_spin(0, 100000, 1000)
-        self.png_compression_spin = self.make_spin(0, 9, 0)
+        self.png_compression_spin = self.make_spin(0, 9, 3)
 
         self.plc_ip_edit = QLineEdit("192.168.10.1")
         self.plc_rack_spin = self.make_spin(0, 10, 0)
@@ -1941,11 +1946,13 @@ class AutoPLCFFCProcessTab(QWidget):
 # WRAPPER PAGE USED BY GUI.py
 # =========================================================
 class CameraCaptureSettingsTab(QWidget):
-    """Main camera page: only the production Capture tab is exposed."""
+    """Capture page containing separate Camera and Laser production tabs."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.capture_page: Optional[AutoPLCFFCProcessTab] = None
+        self.laser_page: Optional[LaserCaptureTab] = None
+        self.tabs: Optional[QTabWidget] = None
         self.build_ui()
 
     def build_ui(self):
@@ -1953,33 +1960,48 @@ class CameraCaptureSettingsTab(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        tabs = QTabWidget()
-        tabs.setDocumentMode(True)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         self.capture_page = AutoPLCFFCProcessTab(parent=self)
-        tabs.addTab(self.capture_page, "Capture")
+        self.laser_page = LaserCaptureTab(parent=self)
 
-        tabs.setStyleSheet("""
+        # Match the Camera / Laser layout shown in the supplied reference.
+        self.tabs.addTab(self.capture_page, "Camera")
+        self.tabs.addTab(self.laser_page, "Laser")
+        self.tabs.setCurrentIndex(0)
+
+        self.tabs.setStyleSheet("""
             QTabWidget::pane {
                 border: 1px solid #dedede;
                 background: #f7f7f9;
+                top: -1px;
             }
             QTabBar::tab {
-                background: #6d2fa0;
-                color: white;
-                padding: 10px 26px;
+                background: #ffffff;
+                color: #5b168b;
+                padding: 10px 30px;
                 border: 1px solid #dedede;
                 border-bottom: none;
                 font-weight: bold;
                 min-width: 120px;
             }
+            QTabBar::tab:selected {
+                background: #6d2fa0;
+                color: white;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #f1e9f8;
+            }
         """)
 
-        root.addWidget(tabs)
+        root.addWidget(self.tabs)
 
     def shutdown(self) -> None:
         """May be called by the main application during global cleanup."""
         if self.capture_page is not None:
             self.capture_page.stop_process(wait_for_exit=True)
+        if self.laser_page is not None:
+            self.laser_page.shutdown()
 
     def closeEvent(self, event):
         try:

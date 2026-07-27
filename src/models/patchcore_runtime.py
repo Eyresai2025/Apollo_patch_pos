@@ -1409,8 +1409,14 @@ class PatchCoreSideRuntime:
         self, raw_image_path: str | os.PathLike[str], output_dir: str | os.PathLike[str]
     ) -> dict:
         started = time.perf_counter()
+        stage_timings: Dict[str, float] = {}
+        stage_t0 = time.perf_counter()
         raw_path, raw_image = self._read_raw(raw_image_path)
+        stage_timings["read_image_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         side_output, final_dir = self._prepare_output(output_dir)
+        stage_timings["prepare_output_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
 
         if self.r_detection_method == "fast":
             assert self.fast_r_recipe is not None
@@ -1486,6 +1492,7 @@ class PatchCoreSideRuntime:
                     "search_x_start_ratio": float(first_pass_metadata.get("search_x_start_ratio", self.r_search_x_start_ratio)),
                     "search_x_end_ratio": float(first_pass_metadata.get("search_x_end_ratio", self.r_search_x_end_ratio)),
                 }
+        stage_timings["r_detection_sec"] = time.perf_counter() - stage_t0
         if len(r_bands) < 2:
             failure_preview = dc.draw_r_detection_preview(raw_image, match_boxes)
             failure_preview_path = side_output / "00_R_MAPPING_FAILED_PREVIEW.png"
@@ -1514,16 +1521,23 @@ class PatchCoreSideRuntime:
                 f"Saved R detection debug: {failure_preview_path}"
             )
 
+        stage_t0 = time.perf_counter()
         raw_crop, y_start, y_end, top_band, bottom_band = dc.crop_between_first_two_r_bands(
             raw_image, r_bands
         )
+        stage_timings["crop_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         prepared = cv2.resize(raw_crop, (self.resize_width, self.resize_height))
+        stage_timings["resize_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         patches, patch_io_metadata = self._score_prepared(
             prepared,
             side_output,
             prepared_stem=f"{self.side_name}_{raw_path.stem}_resized_crop",
         )
 
+        stage_timings["patchcore_score_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         scale_x = raw_crop.shape[1] / float(self.resize_width)
         scale_y = raw_crop.shape[0] / float(self.resize_height)
         detection = _draw_patch_boxes(
@@ -1536,6 +1550,7 @@ class PatchCoreSideRuntime:
         )
         final_path = final_dir / f"{self.side_name}_crop_detection.jpg"
         _save_result_preview(final_path, detection, self.result_jpeg_quality, self.result_preview_scale)
+        stage_timings["visualization_save_sec"] = time.perf_counter() - stage_t0
 
         r_anchor = {
             "R1_top_y": int(y_start),
@@ -1568,6 +1583,10 @@ class PatchCoreSideRuntime:
                 "R_crop_y_start": int(y_start),
                 "R_crop_y_end_exclusive": int(y_end),
                 "R_anchor": r_anchor,
+                "stage_timings": {
+                    **{k: round(v, 6) for k, v in stage_timings.items()},
+                    "total_ai_side_sec": round(time.perf_counter() - started, 6),
+                },
                 **patch_io_metadata,
             },
         )
@@ -1586,8 +1605,14 @@ class PatchCoreSideRuntime:
             )
 
         started = time.perf_counter()
+        stage_timings: Dict[str, float] = {}
+        stage_t0 = time.perf_counter()
         raw_path, raw_image = self._read_raw(raw_image_path)
+        stage_timings["read_image_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         side_output, final_dir = self._prepare_output(output_dir)
+        stage_timings["prepare_output_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
 
         anchor = {
             "R1_top_y": int(r_anchor["R1_top_y"]),
@@ -1610,18 +1635,26 @@ class PatchCoreSideRuntime:
             one_rev_target_px=one_rev_target,
         )
 
+        stage_timings["offset_window_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         target_crop = raw_image[start_y:end_y, :].copy()
         if target_crop.size == 0:
             raise RuntimeError(
                 f"Calculated {self.side_name} crop is empty: start={start_y}, end={end_y}"
             )
+        stage_timings["crop_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         prepared = cv2.resize(target_crop, (self.resize_width, self.resize_height))
+        stage_timings["resize_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         patches, patch_io_metadata = self._score_prepared(
             prepared,
             side_output,
             prepared_stem=f"{self.side_name}_{raw_path.stem}_resized_crop",
         )
 
+        stage_timings["patchcore_score_sec"] = time.perf_counter() - stage_t0
+        stage_t0 = time.perf_counter()
         scale_x = target_crop.shape[1] / float(self.resize_width)
         scale_y = target_crop.shape[0] / float(self.resize_height)
         detection = _draw_patch_boxes(
@@ -1634,6 +1667,7 @@ class PatchCoreSideRuntime:
         )
         final_path = final_dir / f"{self.side_name}_crop_detection.jpg"
         _save_result_preview(final_path, detection, self.result_jpeg_quality, self.result_preview_scale)
+        stage_timings["visualization_save_sec"] = time.perf_counter() - stage_t0
 
         return self._finalize_result(
             raw_path=raw_path,
@@ -1654,6 +1688,10 @@ class PatchCoreSideRuntime:
                 "crop_end_y": int(end_y),
                 "offset_ratio": float(calibration["offset_ratio"]),
                 "one_rev_target_px": int(one_rev_target),
+                "stage_timings": {
+                    **{k: round(v, 6) for k, v in stage_timings.items()},
+                    "total_ai_side_sec": round(time.perf_counter() - started, 6),
+                },
                 **patch_io_metadata,
             },
         )

@@ -11,7 +11,7 @@
 #   - Bead trigger       : PLC DB74.DBX86.0
 #   - Main group trigger : PLC DB74.DBX0.3
 #   - Camera trigger     : TriggerSoftware after PLC rising edge
-#   - Captures 60000 height image using 4 chunks of 15000
+#   - Captures 90000 height image using 4 chunks of 15000
 #   - Saves BOTH:
 #       1) raw Mono8/Mono16 image
 #       2) software FFC-corrected image
@@ -107,9 +107,9 @@ SAVE_DIR = os.environ.get(
 NUM_FULL_IMAGES = 1
 NUM_BEAD_IMAGES = 1
 
-# 60000 final image = 4 buffers/chunks of 15000 height.
+# 90000 final image = 4 buffers/chunks of 15000 height.
 CAMERA_HEIGHT = 15000
-FINAL_HEIGHT = 60000
+FINAL_HEIGHT = 90000
 
 # HEIGHT_BASED = present logic: capture until FINAL_HEIGHT rows
 # TIME_BASED   = capture continuously for TIME_CAPTURE_SEC seconds
@@ -132,7 +132,8 @@ OVERLAP_SHARED_REARM = True
 NUM_STREAM_BUFFERS = 16
 BUFFER_TIMEOUT_MS = 30000
 
-PNG_COMPRESSION = 0
+# Match Live inference lossless PNG compression.
+PNG_COMPRESSION = 3
 
 # True  = save output PNG as 8-bit single-channel
 # False = save output PNG as 16-bit single-channel
@@ -140,7 +141,7 @@ SAVE_AS_8BIT = True
 
 # png or bmp
 SAVE_IMAGE_FORMAT = "png"
-# Keep this small because each 4K x 60000 image is large.
+# Keep this small because each 4K x 90000 image is large.
 SAVE_QUEUE_SIZE = 4
 
 PACKET_SIZE = 9000
@@ -250,7 +251,7 @@ CAMERA_CONFIGS: Dict[str, Dict[str, Any]] = {
         "camera_name": "sidewall2",
         "width": 4096,
         "camera_height": 15000,
-        "final_height": 60000,
+        "final_height": 90000,
         "continuous_stream": False,
         "frame_trigger_stream": False,
         "pixel_format": "Mono8",
@@ -266,7 +267,7 @@ CAMERA_CONFIGS: Dict[str, Dict[str, Any]] = {
         "camera_name": "sidewall1",
         "width": 4096,
         "camera_height": 15000,
-        "final_height": 60000,
+        "final_height": 90000,
         "continuous_stream": False,
         "frame_trigger_stream": False,
         "pixel_format": "Mono8",
@@ -282,7 +283,7 @@ CAMERA_CONFIGS: Dict[str, Dict[str, Any]] = {
         "camera_name": "tread",
         "width": 4096,
         "camera_height": 15000,
-        "final_height": 60000,
+        "final_height": 90000,
         "continuous_stream": False,
         "frame_trigger_stream": False,
         "pixel_format": "Mono8",
@@ -298,7 +299,7 @@ CAMERA_CONFIGS: Dict[str, Dict[str, Any]] = {
         "camera_name": "inner_camera_used_for_inner_and_bead",
         "width": 4096,
         "camera_height": 15000,
-        "final_height": 60000,
+        "final_height": 90000,
         "continuous_stream": False,
         "frame_trigger_stream": False,
         "pixel_format": "Mono8",

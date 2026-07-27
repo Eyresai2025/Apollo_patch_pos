@@ -238,14 +238,10 @@ class InspectionRepository:
         self.ensure_indexes()
         started = time.perf_counter()
 
-        should_store_images = (
-            bool(store_images)
-            if store_images is not None
-            else (
-                self.config.gridfs_enabled
-                and str(lifecycle_status or "").upper() == "COMPLETED"
-            )
-        )
+        # Production inspection is metadata/path-only by default. Binary image
+        # persistence is performed only by an explicit maintenance/migration
+        # caller passing store_images=True.
+        should_store_images = bool(store_images is True and self.config.gridfs_enabled)
         image_refs: Dict[str, Any] = {}
         if should_store_images and self.image_store is not None:
             try:

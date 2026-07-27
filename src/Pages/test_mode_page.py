@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap
 
 from src.COMMON.full_hardware_check import start_full_hardware_check_from_test_page
+from src.COMMON.plc_result_sender import test_plc_result_bit
 from src.COMMON.db import save_test_mode_result, get_alarm_service
 from src.COMMON.security import Permission, SessionContext
 from src.Pages.alarm_center_page import AlarmCenterPage
@@ -321,6 +322,24 @@ class HardwareTestTab(QWidget):
 
         btn_row.addWidget(
             mkbtn(
+                "Test ACCEPT Bit",
+                "#2f9e44",
+                "#26813a",
+                lambda: self.test_result_bit("ACCEPT")
+            )
+        )
+
+        btn_row.addWidget(
+            mkbtn(
+                "Test REJECT Bit",
+                "#e03131",
+                "#c92a2a",
+                lambda: self.test_result_bit("REJECT")
+            )
+        )
+
+        btn_row.addWidget(
+            mkbtn(
                 "Emergency Stop",
                 "#7C19EE",
                 "#873DDD",
@@ -433,6 +452,77 @@ class HardwareTestTab(QWidget):
             test_page=self,
             media_path=self.media_path,
         )
+
+    def test_result_bit(self, decision: str):
+        """Pulse the configured PLC ACCEPT/REJECT bit and verify read-back."""
+        decision = str(decision or "").strip().upper()
+
+        answer = QMessageBox.question(
+            self,
+            f"Test {decision} PLC Bit",
+            f"This will pulse the real PLC {decision} output using the current "
+            f".env configuration.\n\n"
+            f"ACCEPT: DB74.DBX0.1\n"
+            f"REJECT: DB74.DBX0.2\n"
+            f"Pulse: 300 ms\n\n"
+            f"Confirm the machine is in a safe test condition. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self.p_label.setText(f"System Status: TESTING PLC {decision} BIT")
+        self.pbar.setRange(0, 0)
+        _set(
+            self.m99_dot,
+            self.m99_txt,
+            "warn",
+            f"Testing real PLC {decision} result bit...",
+        )
+
+        try:
+            result = test_plc_result_bit(decision)
+        except Exception as exc:
+            result = {
+                "sent": False,
+                "display": "PLC Test Failed",
+                "detail": str(exc),
+            }
+
+        self.pbar.setRange(0, 100)
+        self.pbar.setValue(100 if result.get("sent") else 0)
+
+        if result.get("sent"):
+            _set(
+                self.m99_dot,
+                self.m99_txt,
+                "ok",
+                f"{result.get('display')}\n{result.get('detail')}",
+            )
+            self.p_label.setText(
+                f"System Status: PLC {decision} BIT VERIFIED"
+            )
+            QMessageBox.information(
+                self,
+                f"{decision} Test Passed",
+                f"{result.get('display')}\n\n{result.get('detail')}",
+            )
+        else:
+            _set(
+                self.m99_dot,
+                self.m99_txt,
+                "err",
+                f"{result.get('display')}\n{result.get('detail')}",
+            )
+            self.p_label.setText(
+                f"System Status: PLC {decision} BIT TEST FAILED"
+            )
+            QMessageBox.critical(
+                self,
+                f"{decision} Test Failed",
+                f"{result.get('display')}\n\n{result.get('detail')}",
+            )
 
     def emergency_stop(self):
         _set(self.m99_dot, self.m99_txt, "warn", "Emergency stop requested from Test Mode page.")

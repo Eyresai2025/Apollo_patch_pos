@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """PostgreSQL chunked persistence for Apollo inspection-cycle images.
 
-Phase 4A stores new input/output image binaries in PostgreSQL using
-``file_assets`` + ``file_asset_chunks`` and maps them through
-``inspection_images``. Existing MongoDB GridFS references remain readable as a
-fallback through the Inspection History service.
+Binary storage remains available only for explicit maintenance/migration
+callers. Normal Live inspection now saves metadata and local file paths only,
+so this module is not invoked from the production cycle. Existing historical
+asset references remain readable through the Inspection History service.
 """
 
 import mimetypes

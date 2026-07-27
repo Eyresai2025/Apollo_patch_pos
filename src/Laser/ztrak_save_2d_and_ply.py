@@ -209,43 +209,36 @@ def decode_coord3d_cr16(raw_path: Path, meta: dict):
 
 
 def save_2d_images(output_dir, stem, c_channel, r_channel, invalid_mask):
+    """Save only the required production height images.
+
+    Output files created:
+      1) *_2d_height_8bit.png
+      2) *_2d_height_16bit.png
+
+    Reflectance images and preview-named files are intentionally skipped.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    r_preview_png = output_dir / f"{stem}_2d_reflectance_preview_8bit.png"
-    c_preview_png = output_dir / f"{stem}_2d_height_preview_8bit.png"
+    height_8bit_png = output_dir / f"{stem}_2d_height_8bit.png"
+    height_16bit_png = output_dir / f"{stem}_2d_height_16bit.png"
 
-    r_u8 = normalize_to_uint8(r_channel, invalid_mask)
-    c_u8 = normalize_to_uint8(c_channel, invalid_mask)
+    height_u8 = normalize_to_uint8(c_channel, invalid_mask)
 
-    cv2.imwrite(str(r_preview_png), r_u8)
-    cv2.imwrite(str(c_preview_png), c_u8)
+    height_16 = c_channel.copy().astype(np.uint16)
+    height_16[invalid_mask] = 0
 
-    r16 = r_channel.copy().astype(np.uint16)
-    c16 = c_channel.copy().astype(np.uint16)
+    cv2.imwrite(str(height_8bit_png), height_u8)
+    cv2.imwrite(str(height_16bit_png), height_16)
 
-    r16[invalid_mask] = 0
-    c16[invalid_mask] = 0
-
-    r16_png = output_dir / f"{stem}_2d_reflectance_16bit.png"
-    c16_png = output_dir / f"{stem}_2d_height_16bit.png"
-
-    cv2.imwrite(str(r16_png), r16)
-    cv2.imwrite(str(c16_png), c16)
-
-    print("\n[2D SAVED]")
-    print(r_preview_png)
-    print(c_preview_png)
-    print(r16_png)
-    print(c16_png)
+    print("\n[2D SAVED - PRODUCTION ONLY]")
+    print(height_8bit_png)
+    print(height_16bit_png)
 
     return {
-        "reflectance_preview_8bit": r_preview_png,
-        "height_preview_8bit": c_preview_png,
-        "reflectance_16bit": r16_png,
-        "height_16bit": c16_png,
+        "height_8bit": height_8bit_png,
+        "height_16bit": height_16bit_png,
     }
-
 
 def _prepare_points(
     c_channel,
@@ -345,18 +338,15 @@ def save_ascii_ply(ply_path, x, y, z, gray, chunk_size=500000):
         "end_header\n"
     )
 
+    # Stream lines directly to file to keep memory stable for large full-resolution PLY.
     with open(ply_path, "w", encoding="ascii", newline="\n") as f:
         f.write(header)
-
         for start in range(0, point_count, chunk_size):
             end = min(start + chunk_size, point_count)
-            lines = [
-                f"{x[i]:.6f} {y[i]:.6f} {z[i]:.6f} {int(gray[i])} {int(gray[i])} {int(gray[i])}\n"
-                for i in range(start, end)
-            ]
-            f.writelines(lines)
+            for i in range(start, end):
+                g = int(gray[i])
+                f.write(f"{x[i]:.6f} {y[i]:.6f} {z[i]:.6f} {g} {g} {g}\n")
             print(f"[PLY ASCII WRITE] {end}/{point_count}")
-
 
 def save_ply(
     output_dir,
@@ -498,24 +488,9 @@ def convert_raw_to_outputs(
     output_paths = {}
     output_paths.update(image_paths)
     output_paths["ply"] = ply_path
-    output_paths["raw"] = raw_path
-    output_paths["meta"] = meta_path
 
-    converter_config = {
-        "full_resolution_ply": full_resolution_ply,
-        "debug_ply_step": debug_ply_step,
-        "ply_format": ply_format,
-        "center_z": center_z,
-        "invalid_c_value": invalid_c_value,
-        "x_scaler_um": x_scaler_um,
-        "z_scaler_um": z_scaler_um,
-        "y_step_mm": y_step_mm,
-    }
-
-    summary_path = save_summary(output_dir, stem, meta, output_paths, converter_config)
-    output_paths["summary"] = summary_path
-
-    print("\n[SUCCESS] 2D image and PLY generated")
+    # Production mode: do not create extra summary file here.
+    print("\n[SUCCESS] Production outputs generated: height_8bit, height_16bit, ply")
     return output_paths
 
 

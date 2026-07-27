@@ -2,6 +2,9 @@ import os
 import time
 import ctypes
 import traceback
+import json
+import sys
+import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -29,23 +32,25 @@ OUT_ROOT = Path(__file__).resolve().parent / "ztrak_multilaser_output"
 OUT_ROOT.mkdir(exist_ok=True, parents=True)
 
 # Set 1 for one laser, 2 for two lasers.
-LASER_COUNT_TO_CAPTURE = 2
+LASER_COUNT_TO_CAPTURE = 1
 
 # "SEQUENTIAL" = one by one. "PARALLEL" = both at same time for bandwidth test.
 MULTI_CAPTURE_MODE = "PARALLEL"
 
 # Capture these serials in this order. Empty list means first N detected lasers.
-TARGET_SERIALS_IN_ORDER = ["M0006674", "M0006994"]
+TARGET_SERIALS_IN_ORDER = ["M0006674"]
 
 KEEP_RAW_FILE = False
-KEEP_META_FILE = True
+KEEP_META_FILE = False
 NUM_BUFFERS = 4
 WAIT_TIMEOUT_MS = 60000
 
 DEFAULT_CONVERTER = {
-    "full_resolution_ply": False,
-    "debug_ply_step": 4,
-    "ply_format": "binary",      # "binary" for debug, "ascii" for big AI/Sherlock PLY
+    # Production default: save original full-resolution ASCII PLY.
+    # This is intentionally large and matches the full point-cloud requirement.
+    "full_resolution_ply": True,
+    "debug_ply_step": 1,
+    "ply_format": "ascii",
     "center_z": True,
     "invalid_c_value": 65535,
     "x_scaler_um": 10.0,
@@ -82,9 +87,9 @@ LASER_CONFIGS = {
             "Gain": 4.0,
         },
         "converter": {
-            "full_resolution_ply": False,
-            "debug_ply_step": 4,
-            "ply_format": "binary",
+            "full_resolution_ply": True,
+            "debug_ply_step": 1,
+            "ply_format": "ascii",
             "center_z": True,
             "invalid_c_value": 65535,
             "x_scaler_um": 10.0,
@@ -116,9 +121,9 @@ LASER_CONFIGS = {
             "ExposureTime": 200.0,
         },
         "converter": {
-            "full_resolution_ply": False,
-            "debug_ply_step": 4,
-            "ply_format": "binary",
+            "full_resolution_ply": True,
+            "debug_ply_step": 1,
+            "ply_format": "ascii",
             "center_z": True,
             "invalid_c_value": 65535,
             "x_scaler_um": 10.0,
@@ -127,6 +132,179 @@ LASER_CONFIGS = {
         },
     },
 }
+
+
+# =============================================================================
+# GUI / ENVIRONMENT OVERRIDES
+# =============================================================================
+
+def _env_bool(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on", "enabled"}
+
+
+def _env_int(name, default, minimum=None, maximum=None):
+    try:
+        value = int(float(os.environ.get(name, default)))
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
+def _env_float(name, default, minimum=None, maximum=None):
+    try:
+        value = float(os.environ.get(name, default))
+    except Exception:
+        value = float(default)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    if maximum is not None:
+        value = min(float(maximum), value)
+    return value
+
+
+def _apply_environment_overrides():
+    global OUT_ROOT
+    global LASER_COUNT_TO_CAPTURE
+    global MULTI_CAPTURE_MODE
+    global TARGET_SERIALS_IN_ORDER
+    global KEEP_RAW_FILE
+    global KEEP_META_FILE
+    global NUM_BUFFERS
+    global WAIT_TIMEOUT_MS
+    global GLOBAL_FULL_ASCII_PLY_FOR_ALL
+    global LASER_CONFIGS
+    global LASER_RUN_MODE
+    global PLC_IP
+    global PLC_RACK
+    global PLC_SLOT
+    global PLC_DB
+    global PLC_BYTE
+    global PLC_BIT
+    global PLC_POLL_SEC
+    global PLC_RECONNECT_SEC
+
+    output_root = os.environ.get("APOLLO_LASER_OUT_ROOT", "").strip()
+    if output_root:
+        OUT_ROOT = Path(output_root).expanduser().resolve()
+    OUT_ROOT.mkdir(exist_ok=True, parents=True)
+
+    LASER_COUNT_TO_CAPTURE = _env_int(
+        "APOLLO_LASER_COUNT", LASER_COUNT_TO_CAPTURE, minimum=1, maximum=32
+    )
+    MULTI_CAPTURE_MODE = os.environ.get(
+        "APOLLO_LASER_CAPTURE_MODE", MULTI_CAPTURE_MODE
+    ).strip().upper()
+
+    target_text = os.environ.get("APOLLO_LASER_TARGET_SERIALS")
+    if target_text is not None:
+        TARGET_SERIALS_IN_ORDER = [
+            part.strip()
+            for part in target_text.replace(";", ",").split(",")
+            if part.strip()
+        ]
+
+    KEEP_RAW_FILE = _env_bool("APOLLO_LASER_KEEP_RAW", KEEP_RAW_FILE)
+    KEEP_META_FILE = _env_bool("APOLLO_LASER_KEEP_META", KEEP_META_FILE)
+    NUM_BUFFERS = _env_int("APOLLO_LASER_NUM_BUFFERS", NUM_BUFFERS, 1, 128)
+    WAIT_TIMEOUT_MS = _env_int(
+        "APOLLO_LASER_WAIT_TIMEOUT_MS", WAIT_TIMEOUT_MS, 1000, 600000
+    )
+
+    DEFAULT_CONVERTER.update(
+        {
+            "full_resolution_ply": _env_bool(
+                "APOLLO_LASER_FULL_ASCII_PLY",
+                DEFAULT_CONVERTER.get("full_resolution_ply", True),
+            ),
+            "debug_ply_step": _env_int(
+                "APOLLO_LASER_DEBUG_PLY_STEP",
+                DEFAULT_CONVERTER.get("debug_ply_step", 1),
+                1,
+                10000,
+            ),
+            "ply_format": os.environ.get(
+                "APOLLO_LASER_PLY_FORMAT",
+                DEFAULT_CONVERTER.get("ply_format", "ascii"),
+            ).strip().lower(),
+            "center_z": _env_bool(
+                "APOLLO_LASER_CENTER_Z", DEFAULT_CONVERTER.get("center_z", True)
+            ),
+            "invalid_c_value": _env_int(
+                "APOLLO_LASER_INVALID_C_VALUE",
+                DEFAULT_CONVERTER.get("invalid_c_value", 65535),
+                0,
+                65535,
+            ),
+            "x_scaler_um": _env_float(
+                "APOLLO_LASER_X_SCALER_UM",
+                DEFAULT_CONVERTER.get("x_scaler_um", 10.0),
+                0.000001,
+            ),
+            "z_scaler_um": _env_float(
+                "APOLLO_LASER_Z_SCALER_UM",
+                DEFAULT_CONVERTER.get("z_scaler_um", 5.0),
+                0.000001,
+            ),
+            "y_step_mm": _env_float(
+                "APOLLO_LASER_Y_STEP_MM",
+                DEFAULT_CONVERTER.get("y_step_mm", 1.0),
+                0.000001,
+            ),
+        }
+    )
+
+    GLOBAL_FULL_ASCII_PLY_FOR_ALL = _env_bool(
+        "APOLLO_LASER_FULL_ASCII_PLY", GLOBAL_FULL_ASCII_PLY_FOR_ALL
+    )
+
+    raw_configs = os.environ.get("APOLLO_LASER_CONFIGS_JSON", "").strip()
+    if raw_configs:
+        try:
+            parsed = json.loads(raw_configs)
+            if not isinstance(parsed, dict) or not parsed:
+                raise ValueError("configuration JSON must be a non-empty object")
+            LASER_CONFIGS = parsed
+        except Exception as error:
+            raise RuntimeError(
+                f"Invalid APOLLO_LASER_CONFIGS_JSON: {error}"
+            ) from error
+
+    # Merge common output values into every configuration without replacing
+    # laser-specific feature values supplied by the UI.
+    for cfg in LASER_CONFIGS.values():
+        if not isinstance(cfg, dict):
+            continue
+        converter = DEFAULT_CONVERTER.copy()
+        converter.update(cfg.get("converter", {}) or {})
+        cfg["converter"] = converter
+
+    LASER_RUN_MODE = os.environ.get("APOLLO_LASER_RUN_MODE", "FREE").strip().upper()
+    if LASER_RUN_MODE not in {"FREE", "PLC_SOFTWARE"}:
+        raise ValueError(
+            "APOLLO_LASER_RUN_MODE must be FREE or PLC_SOFTWARE"
+        )
+
+    PLC_IP = os.environ.get("APOLLO_LASER_PLC_IP", "192.168.10.1").strip()
+    PLC_RACK = _env_int("APOLLO_LASER_PLC_RACK", 0, 0, 10)
+    PLC_SLOT = _env_int("APOLLO_LASER_PLC_SLOT", 1, 0, 10)
+    PLC_DB = _env_int("APOLLO_LASER_PLC_DB", 74, 1, 65535)
+    PLC_BYTE = _env_int("APOLLO_LASER_PLC_BYTE", 0, 0, 1000000)
+    PLC_BIT = _env_int("APOLLO_LASER_PLC_BIT", 3, 0, 7)
+    PLC_POLL_SEC = _env_float("APOLLO_LASER_PLC_POLL_SEC", 0.005, 0.001, 60.0)
+    PLC_RECONNECT_SEC = _env_float(
+        "APOLLO_LASER_PLC_RECONNECT_SEC", 2.0, 0.1, 300.0
+    )
+
+
+_apply_environment_overrides()
+STOP_EVENT = threading.Event()
 
 
 # =============================================================================
@@ -328,16 +506,13 @@ def order_and_limit_devices(devices):
     ordered = []
 
     if TARGET_SERIALS_IN_ORDER:
+        # Production-safe behavior: never replace a missing requested laser with
+        # an unrelated detected device.  Capture only the serials selected in UI.
         for serial in TARGET_SERIALS_IN_ORDER:
             if serial in by_serial:
                 ordered.append(by_serial[serial])
             else:
                 print(f"[WARN] Target serial not detected: {serial}")
-
-        if len(ordered) < LASER_COUNT_TO_CAPTURE:
-            for d in devices:
-                if d not in ordered:
-                    ordered.append(d)
     else:
         ordered = devices
 
@@ -582,6 +757,20 @@ def dump_raw_buffer(buffer, output_dir, serial, cfg):
 
 def capture_one_laser(device, capture_index, run_dir):
     serial = device["serial"]
+
+    if STOP_EVENT.is_set():
+        return {
+            "success": False,
+            "serial": serial,
+            "label": get_laser_config(serial, capture_index).get("label"),
+            "folder": str(run_dir),
+            "capture_sec": None,
+            "total_sec": 0.0,
+            "raw_mb": None,
+            "capture_mbps": None,
+            "outputs": {},
+            "error": "Capture cancelled before Sapera acquisition started",
+        }
     cfg = get_laser_config(serial, capture_index)
     label = safe_folder_name(cfg.get("label", f"laser_{capture_index}_{serial}"))
     laser_dir = Path(run_dir) / f"{capture_index:02d}_{label}"
@@ -685,9 +874,9 @@ def capture_one_laser(device, capture_index, run_dir):
             raw_path=raw_path,
             meta_path=meta_path,
             output_dir=laser_dir,
-            full_resolution_ply=conv.get("full_resolution_ply", False),
-            debug_ply_step=conv.get("debug_ply_step", 4),
-            ply_format=conv.get("ply_format", "binary"),
+            full_resolution_ply=conv.get("full_resolution_ply", True),
+            debug_ply_step=conv.get("debug_ply_step", 1),
+            ply_format=conv.get("ply_format", "ascii"),
             center_z=conv.get("center_z", True),
             invalid_c_value=conv.get("invalid_c_value", 65535),
             x_scaler_um=conv.get("x_scaler_um", 10.0),
@@ -787,47 +976,244 @@ def capture_one_laser(device, capture_index, run_dir):
 # =============================================================================
 
 def write_run_summary(run_dir, results, wall_sec):
-    summary_path = Path(run_dir) / "multi_laser_run_summary.txt"
+    """Production mode: no summary TXT file is saved.
 
-    with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("[MULTI LASER RUN SUMMARY]\n\n")
-        f.write(f"mode={MULTI_CAPTURE_MODE}\n")
-        f.write(f"laser_count_requested={LASER_COUNT_TO_CAPTURE}\n")
-        f.write(f"wall_sec={wall_sec:.6f}\n")
-        f.write(f"keep_raw_file={KEEP_RAW_FILE}\n")
-        f.write(f"keep_meta_file={KEEP_META_FILE}\n\n")
+    User requested only:
+      - height 8-bit PNG
+      - height 16-bit PNG
+      - one full-resolution PLY
+    So this function only prints a compact console summary and returns None.
+    """
+    successful = sum(1 for result in results if result.get("success"))
+    total_raw_mb = sum(float(result.get("raw_mb") or 0.0) for result in results)
+    print(
+        f"[RUN SUMMARY] success={successful}/{len(results)} "
+        f"wall_sec={wall_sec:.3f} total_raw_mb={total_raw_mb:.3f}",
+        flush=True,
+    )
+    print("[RUN SUMMARY] Summary TXT save skipped for production output-only mode", flush=True)
+    return None
 
-        total_raw_mb = 0.0
-        successful = 0
 
-        for r in results:
-            f.write("=" * 80 + "\n")
-            f.write(f"serial={r.get('serial')}\n")
-            f.write(f"label={r.get('label')}\n")
-            f.write(f"success={r.get('success')}\n")
-            f.write(f"folder={r.get('folder')}\n")
-            f.write(f"capture_sec={r.get('capture_sec')}\n")
-            f.write(f"total_sec={r.get('total_sec')}\n")
-            f.write(f"raw_mb={r.get('raw_mb')}\n")
-            f.write(f"capture_mbps={r.get('capture_mbps')}\n")
-            f.write(f"error={r.get('error')}\n")
-            f.write("[OUTPUTS]\n")
-            for k, v in r.get("outputs", {}).items():
-                f.write(f"{k}={v}\n")
-            f.write("\n")
+# =============================================================================
+# PROCESS STOP + PLC SOFTWARE TRIGGER
+# =============================================================================
 
-            if r.get("success"):
-                successful += 1
-                if r.get("raw_mb"):
-                    total_raw_mb += float(r["raw_mb"])
+def _stdin_stop_monitor():
+    """Receive the GUI's STOP line without blocking the capture loop."""
+    try:
+        while not STOP_EVENT.is_set():
+            line = sys.stdin.readline()
+            if line == "":
+                return
+            command = line.strip().upper()
+            if command in {"STOP", "QUIT", "EXIT"}:
+                print("[STOP] Graceful stop command received from GUI", flush=True)
+                STOP_EVENT.set()
+                return
+    except Exception as error:
+        print(f"[STOP MONITOR WARNING] {error}", flush=True)
 
-        f.write("=" * 80 + "\n")
-        f.write(f"successful={successful}/{len(results)}\n")
-        f.write(f"total_raw_mb={total_raw_mb:.3f}\n")
-        f.write(f"aggregate_raw_mbps_vs_wall={total_raw_mb / wall_sec if wall_sec > 0 else 0.0:.3f}\n")
 
-    print("[RUN SUMMARY SAVED]", summary_path)
-    return summary_path
+class PLCSoftwareTrigger:
+    """Small reconnecting Siemens S7 DB-bit reader for LOW-to-HIGH capture edges."""
+
+    def __init__(self):
+        self.client = None
+
+    def connect(self):
+        self.close()
+        try:
+            import snap7
+        except ImportError as error:
+            raise RuntimeError(
+                "PLC_SOFTWARE mode requires python-snap7 in the current environment"
+            ) from error
+
+        self.client = snap7.client.Client()
+        print(
+            f"[PLC] Connecting to {PLC_IP} rack={PLC_RACK} slot={PLC_SLOT}",
+            flush=True,
+        )
+        self.client.connect(PLC_IP, PLC_RACK, PLC_SLOT)
+
+        connected = True
+        try:
+            connected = bool(self.client.get_connected())
+        except Exception:
+            pass
+        if not connected:
+            raise RuntimeError(f"PLC connection failed: {PLC_IP}")
+
+        print(
+            f"[PLC] Connected. Trigger=DB{PLC_DB}.DBX{PLC_BYTE}.{PLC_BIT}",
+            flush=True,
+        )
+
+    def read_trigger(self):
+        if self.client is None:
+            raise RuntimeError("PLC client is not connected")
+        data = self.client.db_read(PLC_DB, PLC_BYTE, 1)
+        if not data:
+            raise RuntimeError("PLC DB read returned no data")
+        return bool((int(data[0]) >> PLC_BIT) & 0x01)
+
+    def close(self):
+        client = self.client
+        self.client = None
+        if client is None:
+            return
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+        try:
+            client.destroy()
+        except Exception:
+            pass
+        print("[PLC] Disconnected", flush=True)
+
+
+def run_capture_cycle(devices, cycle_index):
+    """Capture one complete multi-laser cycle using the existing Sapera logic."""
+    run_dir = OUT_ROOT / f"run_{now_stamp()}_cycle_{cycle_index:04d}"
+    run_dir.mkdir(exist_ok=True, parents=True)
+
+    print("\n" + "=" * 100, flush=True)
+    print(
+        f"[LASER CYCLE {cycle_index}] mode={MULTI_CAPTURE_MODE} folder={run_dir}",
+        flush=True,
+    )
+    print("=" * 100, flush=True)
+
+    t0 = time.perf_counter()
+    results = []
+    mode = MULTI_CAPTURE_MODE.strip().upper()
+
+    if mode == "SEQUENTIAL":
+        print("\n[MULTI CAPTURE MODE] SEQUENTIAL", flush=True)
+        for idx, device in enumerate(devices, start=1):
+            if STOP_EVENT.is_set():
+                print("[STOP] Remaining sequential captures cancelled", flush=True)
+                break
+            results.append(capture_one_laser(device, idx, run_dir))
+
+    elif mode == "PARALLEL":
+        print("\n[MULTI CAPTURE MODE] PARALLEL", flush=True)
+        if STOP_EVENT.is_set():
+            return []
+
+        with ThreadPoolExecutor(max_workers=max(1, len(devices))) as executor:
+            future_map = {
+                executor.submit(capture_one_laser, device, idx, run_dir): (idx, device)
+                for idx, device in enumerate(devices, start=1)
+            }
+            for future in as_completed(future_map):
+                try:
+                    results.append(future.result())
+                except Exception as error:
+                    idx, device = future_map[future]
+                    results.append(
+                        {
+                            "success": False,
+                            "serial": device.get("serial"),
+                            "label": f"laser_{idx}_{device.get('serial')}",
+                            "folder": str(run_dir),
+                            "capture_sec": None,
+                            "total_sec": None,
+                            "raw_mb": None,
+                            "capture_mbps": None,
+                            "outputs": {},
+                            "error": str(error),
+                        }
+                    )
+
+        order = {d["serial"]: i for i, d in enumerate(devices, start=1)}
+        results.sort(key=lambda result: order.get(result.get("serial"), 999))
+
+    else:
+        raise ValueError("MULTI_CAPTURE_MODE must be SEQUENTIAL or PARALLEL")
+
+    wall_sec = time.perf_counter() - t0
+    write_run_summary(run_dir, results, wall_sec)
+
+    print("\n[FINAL MULTI-LASER RESULT]", flush=True)
+    for result in results:
+        print(
+            f"serial={result.get('serial')} success={result.get('success')} "
+            f"capture_sec={result.get('capture_sec')} raw_mb={result.get('raw_mb')} "
+            f"mbps={result.get('capture_mbps')} folder={result.get('folder')}",
+            flush=True,
+        )
+
+    successful = sum(1 for result in results if result.get("success"))
+    print(
+        f"[LASER CYCLE {cycle_index} COMPLETE] success={successful}/{len(results)} "
+        f"wall_sec={wall_sec:.3f}",
+        flush=True,
+    )
+    print("[RUN FOLDER]", run_dir, flush=True)
+    return results
+
+
+def run_plc_software_loop(devices):
+    plc = PLCSoftwareTrigger()
+    cycle_index = 0
+    armed = False
+    last_state = None
+
+    print(
+        f"[PLC MODE] Waiting for fresh LOW-to-HIGH edges at "
+        f"DB{PLC_DB}.DBX{PLC_BYTE}.{PLC_BIT}",
+        flush=True,
+    )
+
+    try:
+        while not STOP_EVENT.is_set():
+            try:
+                if plc.client is None:
+                    plc.connect()
+                    last_state = plc.read_trigger()
+                    armed = not last_state
+                    if last_state:
+                        print(
+                            "[PLC] Trigger is already HIGH. Waiting for LOW before arming.",
+                            flush=True,
+                        )
+                    else:
+                        print("[PLC] Trigger LOW; capture edge armed", flush=True)
+
+                state = plc.read_trigger()
+
+                if not state:
+                    if not armed:
+                        print("[PLC] Trigger returned LOW; next rising edge armed", flush=True)
+                    armed = True
+
+                if state and armed and not bool(last_state):
+                    armed = False
+                    cycle_index += 1
+                    print(
+                        f"\n[PLC RISING EDGE] Starting laser cycle {cycle_index}",
+                        flush=True,
+                    )
+                    run_capture_cycle(devices, cycle_index)
+                    if STOP_EVENT.is_set():
+                        break
+                    print("[PLC] Capture complete; waiting for trigger LOW", flush=True)
+
+                last_state = state
+                STOP_EVENT.wait(PLC_POLL_SEC)
+
+            except Exception as error:
+                print(f"[PLC ERROR] {error}", flush=True)
+                plc.close()
+                if STOP_EVENT.wait(PLC_RECONNECT_SEC):
+                    break
+                print("[PLC] Retrying connection...", flush=True)
+
+    finally:
+        plc.close()
 
 
 # =============================================================================
@@ -835,62 +1221,55 @@ def write_run_summary(run_dir, results, wall_sec):
 # =============================================================================
 
 def main():
-    print("\n[OK] Sapera SDK loaded")
+    print("\n[OK] Sapera SDK loaded", flush=True)
+    print(
+        f"[RUNTIME] run_mode={LASER_RUN_MODE} capture_mode={MULTI_CAPTURE_MODE} "
+        f"laser_count={LASER_COUNT_TO_CAPTURE} output={OUT_ROOT}",
+        flush=True,
+    )
+    print(
+        f"[RUNTIME] targets={TARGET_SERIALS_IN_ORDER} buffers={NUM_BUFFERS} "
+        f"timeout_ms={WAIT_TIMEOUT_MS} keep_raw={KEEP_RAW_FILE} "
+        f"keep_meta={KEEP_META_FILE}",
+        flush=True,
+    )
+
+    stop_thread = threading.Thread(
+        target=_stdin_stop_monitor,
+        name="laser-stdin-stop-monitor",
+        daemon=True,
+    )
+    stop_thread.start()
+
     apply_global_ply_mode_to_all_configs()
-
-    run_dir = OUT_ROOT / f"run_{now_stamp()}"
-    run_dir.mkdir(exist_ok=True, parents=True)
-
     devices = discover_lasers()
 
     if not devices:
-        raise RuntimeError("No available laser devices found.")
-
+        raise RuntimeError("No available laser devices found")
     if len(devices) < LASER_COUNT_TO_CAPTURE:
-        print(f"[WARN] Requested {LASER_COUNT_TO_CAPTURE} lasers, but only found {len(devices)}.")
-
-    t0 = time.perf_counter()
-    results = []
-    mode = MULTI_CAPTURE_MODE.strip().upper()
-
-    if mode == "SEQUENTIAL":
-        print("\n[MULTI CAPTURE MODE] SEQUENTIAL")
-        for idx, device in enumerate(devices, start=1):
-            results.append(capture_one_laser(device, idx, run_dir))
-
-    elif mode == "PARALLEL":
-        print("\n[MULTI CAPTURE MODE] PARALLEL")
-        print("[INFO] Use only after sequential mode works for both lasers.")
-
-        with ThreadPoolExecutor(max_workers=len(devices)) as executor:
-            future_map = {
-                executor.submit(capture_one_laser, device, idx, run_dir): (idx, device)
-                for idx, device in enumerate(devices, start=1)
-            }
-
-            for future in as_completed(future_map):
-                results.append(future.result())
-
-        order = {d["serial"]: i for i, d in enumerate(devices, start=1)}
-        results.sort(key=lambda r: order.get(r["serial"], 999))
-
-    else:
-        raise ValueError("MULTI_CAPTURE_MODE must be 'SEQUENTIAL' or 'PARALLEL'.")
-
-    wall_sec = time.perf_counter() - t0
-    write_run_summary(run_dir, results, wall_sec)
-
-    print("\n[FINAL MULTI-LASER RESULT]")
-    for r in results:
         print(
-            f"serial={r['serial']} success={r['success']} "
-            f"capture_sec={r.get('capture_sec')} raw_mb={r.get('raw_mb')} "
-            f"mbps={r.get('capture_mbps')} folder={r.get('folder')}"
+            f"[WARN] Requested {LASER_COUNT_TO_CAPTURE} lasers, "
+            f"but only found {len(devices)}",
+            flush=True,
         )
 
-    print("\n[DONE] Multi-laser capture completed.")
-    print("[RUN FOLDER]", run_dir)
+    if LASER_RUN_MODE == "FREE":
+        run_capture_cycle(devices, 1)
+    elif LASER_RUN_MODE == "PLC_SOFTWARE":
+        run_plc_software_loop(devices)
+    else:
+        raise ValueError("LASER_RUN_MODE must be FREE or PLC_SOFTWARE")
+
+    print("\n[DONE] Laser capture runner exited cleanly", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        STOP_EVENT.set()
+        print("\n[STOP] Keyboard interrupt received", flush=True)
+    except Exception as error:
+        print(f"\n[FATAL] {error}", flush=True)
+        traceback.print_exc()
+        raise

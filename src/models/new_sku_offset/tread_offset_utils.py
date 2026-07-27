@@ -21,11 +21,11 @@ import numpy as np
 # ============================================================
 # DETECTION SETTINGS
 # ============================================================
-PATCH_H = 4200
+PATCH_H = 6000
 PATCH_W = 4096
 
-R_MATCH_THRESHOLD    = 0.70
-TAPE_MATCH_THRESHOLD = 0.70
+R_MATCH_THRESHOLD    = 0.50
+TAPE_MATCH_THRESHOLD = 0.50
 
 MIN_BAND_HEIGHT = 20
 ROW_GAP         = 5
@@ -345,12 +345,23 @@ def calculate_tread_crop_window(
          → go above R1:  start_y = R1 - abs(offset) * one_rev
       3. above-R1 start_y < 0  (edge case)
          → go below R1 again
+      4. still out of bounds  (both anchored positions overflow)
+         → clamp start_y into [0, image_height - one_rev_tread_px], no padding.
+           Crop height stays exactly one_rev_tread_px; every pixel is real
+           image data, just shifted off the R1-anchored offset by whatever
+           overflow remained.
     """
     r1_y           = int(r_anchor["R1_top_y"])
     one_rev_height = int(r_anchor["one_rev_height"])
 
     if one_rev_height <= 0:
         raise RuntimeError(f"Invalid one_rev_height: {one_rev_height}")
+
+    if one_rev_tread_px > tread_img_height:
+        raise RuntimeError(
+            f"one_rev_tread_px ({one_rev_tread_px}) exceeds image height "
+            f"({tread_img_height}) — crop cannot fit at any position."
+        )
 
     start_y = int(round(r1_y + offset_ratio * one_rev_height))
 
@@ -370,16 +381,15 @@ def calculate_tread_crop_window(
             end_y   = start_y + one_rev_tread_px
             print(f"[WARN] above-R1 start_y negative — fallback: go below R1, start_y={start_y}, end_y={end_y}")
 
-    if start_y < 0:
-        raise RuntimeError(
-            f"Tread crop start_y is negative after all fallbacks: {start_y}"
+    if start_y < 0 or end_y > tread_img_height:
+        clamped_start = max(0, min(start_y, tread_img_height - one_rev_tread_px))
+        clamped_end   = clamped_start + one_rev_tread_px
+        print(
+            f"[WARN] All anchored fallbacks out of bounds — clamping to fit "
+            f"(no padding): start_y={clamped_start}, end_y={clamped_end} "
+            f"(shifted {clamped_start - start_y}px from anchored position)"
         )
-
-    if end_y > tread_img_height:
-        raise RuntimeError(
-            f"Tread crop end_y exceeds image height after all fallbacks: "
-            f"end_y={end_y}, image_height={tread_img_height}"
-        )
+        start_y, end_y = clamped_start, clamped_end
 
     return int(start_y), int(end_y)
 

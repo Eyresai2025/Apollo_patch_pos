@@ -231,9 +231,6 @@ def calculate_offset_calibration(
     patch_stride_y: int = 448,
     cover_complete: bool = True,
     percentile: float = 99.0,
-    detection_patch_h: int = 6000,
-    detection_patch_w: int = 4096,
-    r_match_threshold: float = 0.50,
     target_match_threshold: float = 0.50,
     save_diagnostics: bool = True,
     status_callback: StatusCallback = None,
@@ -269,25 +266,8 @@ def calculate_offset_calibration(
     _emit_progress(progress_callback, 5, "Loading fast R recipe")
     r_anchor = _read_recipe_anchor(r_recipe_path)
 
-    detection_patch_h = int(detection_patch_h)
-    detection_patch_w = int(detection_patch_w)
-    r_match_threshold = float(r_match_threshold)
-    target_match_threshold = float(target_match_threshold)
-    if detection_patch_h <= 0 or detection_patch_w <= 0:
-        raise ValueError("Detection patch height and width must be greater than zero")
-    if not 0.0 < r_match_threshold <= 1.0:
-        raise ValueError("R match threshold must be in the range (0, 1]")
-    if not 0.0 < target_match_threshold <= 1.0:
-        raise ValueError("Tape match threshold must be in the range (0, 1]")
-
-    old_patch_h = tu.PATCH_H
-    old_patch_w = tu.PATCH_W
-    old_r_threshold = tu.R_MATCH_THRESHOLD
     old_target_threshold = tu.TAPE_MATCH_THRESHOLD
-    tu.PATCH_H = detection_patch_h
-    tu.PATCH_W = detection_patch_w
-    tu.R_MATCH_THRESHOLD = r_match_threshold
-    tu.TAPE_MATCH_THRESHOLD = target_match_threshold
+    tu.TAPE_MATCH_THRESHOLD = float(target_match_threshold)
     try:
         target_template = tu.load_tape_template(str(target_marker_template))
         target_files = tu._list_images(str(target_input), exclude=[str(target_marker_template)])
@@ -352,18 +332,8 @@ def calculate_offset_calibration(
             "r_recipe_path": str(r_recipe_path), "r_anchor_source": r_anchor["source"],
             "r_anchor": r_anchor, "source_target_input": str(target_input),
             "target_marker_template": str(target_marker_template),
-            "detection_patch_h": detection_patch_h,
-            "detection_patch_w": detection_patch_w,
-            "r_match_threshold": r_match_threshold,
-            "target_match_threshold": target_match_threshold,
-            **settings,
-            "detection_settings": {
-                "PATCH_H": detection_patch_h,
-                "PATCH_W": detection_patch_w,
-                "R_MATCH_THRESHOLD": r_match_threshold,
-                "TAPE_MATCH_THRESHOLD": target_match_threshold,
-            },
-            "processing_settings": dict(settings),
+            "target_match_threshold": float(target_match_threshold),
+            **settings, "processing_settings": dict(settings),
             "one_rev_sidewall_px": sidewall_rev, "sw_r1_top_y": r1_top,
             "sw_r2_top_y": int(r_anchor["R2_top_y"]), "sw_images_averaged": 0,
             "one_rev_target_px": int(avg_target_rev),
@@ -404,17 +374,10 @@ def calculate_offset_calibration(
             "resized_target_folder": payload["resized_target_folder"],
             "resized_target_image_count": len(successes),
             "sku_resize_configuration_path": payload["sku_resize_configuration_path"],
-            "detection_patch_h": detection_patch_h,
-            "detection_patch_w": detection_patch_w,
-            "r_match_threshold": r_match_threshold,
-            "target_match_threshold": target_match_threshold,
             **settings,
         }
         _emit_progress(progress_callback, 100, "Offset calibration completed")
         _emit_status(status_callback, f"{display_name} offset calibration saved successfully.")
         return result
     finally:
-        tu.PATCH_H = old_patch_h
-        tu.PATCH_W = old_patch_w
-        tu.R_MATCH_THRESHOLD = old_r_threshold
         tu.TAPE_MATCH_THRESHOLD = old_target_threshold

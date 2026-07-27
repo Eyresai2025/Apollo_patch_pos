@@ -26,8 +26,12 @@ from time import perf_counter
 import cv2
 import numpy as np
 
-from . import detect_and_crop_utils as dc
-from . import r_locator_fast as rlf
+try:
+    from . import detect_and_crop_utils as dc
+    from . import r_locator_fast as rlf
+except ImportError:  # standalone execution from the pipeline folder
+    import detect_and_crop_utils as dc
+    import r_locator_fast as rlf
 
 
 def detect_r_bands_fast(
