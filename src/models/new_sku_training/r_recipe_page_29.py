@@ -333,7 +333,7 @@ class RRecipeCreationPage(QWidget):
 
             patch_h = QSpinBox()
             patch_h.setRange(1, 100000)
-            patch_h.setValue(7500 if role == 'sidewall2' else 6000)
+            patch_h.setValue(6000)
             patch_h.setSuffix(' px')
             patch_h.setSingleStep(100)
             patch_h.setAlignment(Qt.AlignCenter)
@@ -349,7 +349,7 @@ class RRecipeCreationPage(QWidget):
             threshold.setRange(0.01, 1.00)
             threshold.setDecimals(2)
             threshold.setSingleStep(0.01)
-            threshold.setValue(0.60 if role == 'sidewall2' else 0.50)
+            threshold.setValue(0.50)
             threshold.setAlignment(Qt.AlignCenter)
 
             left_edge_inset = QSpinBox()
@@ -359,47 +359,17 @@ class RRecipeCreationPage(QWidget):
             left_edge_inset.setSingleStep(10)
             left_edge_inset.setAlignment(Qt.AlignCenter)
             left_edge_inset.setToolTip(
-                'SIDEWALL1 only: moves the detected left tyre boundary inward '
-                'before the left/right half search split.'
+                'Moves only the detected left tyre boundary inward before '
+                'the left/right half search split. Keep 0 unless validation '
+                'shows unwanted background inside the detected tyre boundary.'
             )
 
-            left_edge_outset = QSpinBox()
-            left_edge_outset.setRange(0, 10000)
-            left_edge_outset.setValue(500)
-            left_edge_outset.setSuffix(' px')
-            left_edge_outset.setSingleStep(10)
-            left_edge_outset.setAlignment(Qt.AlignCenter)
-            left_edge_outset.setToolTip(
-                'SIDEWALL2 only: moves the detected left red boundary outward '
-                'toward the image border.'
+            setting_items = (
+                ('Patch Height', patch_h),
+                ('Patch Width', patch_w),
+                ('R Match Threshold', threshold),
+                ('Left Edge Inset', left_edge_inset),
             )
-
-            right_edge_inset = QSpinBox()
-            right_edge_inset.setRange(0, 10000)
-            right_edge_inset.setValue(500)
-            right_edge_inset.setSuffix(' px')
-            right_edge_inset.setSingleStep(10)
-            right_edge_inset.setAlignment(Qt.AlignCenter)
-            right_edge_inset.setToolTip(
-                'SIDEWALL2 only: moves the detected right red boundary inward '
-                'toward the tyre centre.'
-            )
-
-            if role == 'sidewall2':
-                setting_items = (
-                    ('Patch Height', patch_h),
-                    ('Patch Width', patch_w),
-                    ('R Match Threshold', threshold),
-                    ('Left Edge Outset', left_edge_outset),
-                    ('Right Edge Inset', right_edge_inset),
-                )
-            else:
-                setting_items = (
-                    ('Patch Height', patch_h),
-                    ('Patch Width', patch_w),
-                    ('R Match Threshold', threshold),
-                    ('Left Edge Inset', left_edge_inset),
-                )
 
             for column, (caption, widget) in enumerate(
                 setting_items
@@ -432,8 +402,6 @@ class RRecipeCreationPage(QWidget):
                 'patch_width': patch_w,
                 'match_threshold': threshold,
                 'left_edge_inset_px': left_edge_inset,
-                'left_edge_outset_px': left_edge_outset,
-                'right_edge_inset_px': right_edge_inset,
             }
 
             action_row = QHBoxLayout()
@@ -531,31 +499,14 @@ class RRecipeCreationPage(QWidget):
             if recipe.is_file():
                 try:
                     payload = json.loads(recipe.read_text(encoding='utf-8'))
-                    if role == 'sidewall2':
-                        self.setting_widgets[role]['left_edge_outset_px'].setValue(
-                            max(0, int(payload.get('left_edge_outset_px', 500)))
-                        )
-                        self.setting_widgets[role]['right_edge_inset_px'].setValue(
-                            max(0, int(payload.get('right_edge_inset_px', 500)))
-                        )
-                    else:
-                        self.setting_widgets[role]['left_edge_inset_px'].setValue(
-                            max(0, int(payload.get('left_edge_inset_px', 0)))
-                        )
+                    inset = max(0, int(payload.get('left_edge_inset_px', 0)))
+                    self.setting_widgets[role]['left_edge_inset_px'].setValue(inset)
                 except Exception:
-                    if role == 'sidewall2':
-                        self.setting_widgets[role]['left_edge_outset_px'].setValue(500)
-                        self.setting_widgets[role]['right_edge_inset_px'].setValue(500)
-                    else:
-                        self.setting_widgets[role]['left_edge_inset_px'].setValue(0)
+                    self.setting_widgets[role]['left_edge_inset_px'].setValue(0)
                 self.status[role].setText('Created')
                 self.status[role].setStyleSheet('color:#26733a;font:700 8.5pt Segoe UI;border:none;')
             else:
-                if role == 'sidewall2':
-                    self.setting_widgets[role]['left_edge_outset_px'].setValue(500)
-                    self.setting_widgets[role]['right_edge_inset_px'].setValue(500)
-                else:
-                    self.setting_widgets[role]['left_edge_inset_px'].setValue(0)
+                self.setting_widgets[role]['left_edge_inset_px'].setValue(0)
                 self.status[role].setText('Not created')
 
     def _set_busy(self, busy: bool):
@@ -576,31 +527,14 @@ class RRecipeCreationPage(QWidget):
         self.status[role].setText('Creating...')
         self.log.appendPlainText(f'Creating {self.ROLE_LABELS[role]} fast R recipe...')
         settings = self.setting_widgets[role]
-        worker_kwargs = {
-            'sku': self._sku(),
-            'role': role,
-            'raw_folder': raw,
-            'template_path': template,
-            'output_dir': recipe.parent,
-            'patch_height': int(settings['patch_height'].value()),
-            'patch_width': int(settings['patch_width'].value()),
-            'match_threshold': float(settings['match_threshold'].value()),
-        }
-        if role == 'sidewall2':
-            worker_kwargs.update({
-                'left_edge_outset_px': int(
-                    settings['left_edge_outset_px'].value()
-                ),
-                'right_edge_inset_px': int(
-                    settings['right_edge_inset_px'].value()
-                ),
-            })
-        else:
-            worker_kwargs['left_edge_inset_px'] = int(
-                settings['left_edge_inset_px'].value()
-            )
-
-        self.worker = FastRecipeWorker(**worker_kwargs)
+        self.worker = FastRecipeWorker(
+            sku=self._sku(), role=role, raw_folder=raw, template_path=template,
+            output_dir=recipe.parent,
+            patch_height=int(settings['patch_height'].value()),
+            patch_width=int(settings['patch_width'].value()),
+            match_threshold=float(settings['match_threshold'].value()),
+            left_edge_inset_px=int(settings['left_edge_inset_px'].value()),
+        )
         self.worker.progress.connect(self.log.appendPlainText)
         self.worker.succeeded.connect(lambda result, r=role: self._done(r, result))
         self.worker.failed.connect(lambda error, r=role: self._failed(r, error))
@@ -611,22 +545,11 @@ class RRecipeCreationPage(QWidget):
         self.status[role].setText('Created')
         self.status[role].setStyleSheet('color:#26733a;font:700 8.5pt Segoe UI;border:none;')
         self.edits[role]['recipe'].setText(str(result.get('recipe_path', '')))
-        if role == 'sidewall2':
-            edge_summary = (
-                f"left outset={result.get('left_edge_outset_px', 0)} px | "
-                f"right inset={result.get('right_edge_inset_px', 0)} px"
-            )
-        else:
-            edge_summary = (
-                f"left inset={result.get('left_edge_inset_px', 0)} px"
-            )
-
         self.log.appendPlainText(
             f"Created: {result.get('recipe_path')} | "
-            f"detector={result.get('detector_variant', '-')} | "
             f"verify score={result.get('verify_score', 0):.4f} | "
             f"production fast bands={result.get('runtime_fast_band_count', 0)} | "
-            f"{edge_summary}"
+            f"left inset={result.get('left_edge_inset_px', 0)} px"
         )
         self.recipeSaved.emit(role, result)
         QMessageBox.information(self, 'R Recipe Creation', f"{self.ROLE_LABELS[role]} recipe created successfully.\n\n{result.get('recipe_path')}")

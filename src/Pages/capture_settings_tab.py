@@ -23,9 +23,9 @@ import cv2
 import numpy as np
 
 from PyQt5.QtCore import (
-    Qt, QThread, pyqtSignal, QProcess, QTimer, QProcessEnvironment, QUrl
+    Qt, QThread, pyqtSignal, QProcess, QTimer, QProcessEnvironment, QUrl, QPointF
 )
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QDesktopServices, QCursor, QPainter, QPen, QColor
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QProgressBar, QComboBox,
@@ -40,6 +40,74 @@ try:
     from src.Pages.laser_capture_tab import LaserCaptureTab
 except ImportError:
     from Pages.laser_capture_tab import LaserCaptureTab
+
+
+class StrictWheelComboBox(QComboBox):
+    """Wheel-safe combo box with a consistently visible chevron.
+
+    A closed combo box never changes selection from the mouse wheel.  This lets the
+    enclosing page scroll safely even when the pointer passes over a field.  Wheel
+    navigation is enabled only while the user has explicitly opened the drop-down.
+    """
+
+    def wheelEvent(self, event):
+        popup_open = bool(self.view() is not None and self.view().isVisible())
+        if popup_open:
+            super().wheelEvent(event)
+            return
+        event.ignore()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        # Draw the drop-down chevron ourselves so it is visible with every OS theme.
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        if not self.isEnabled():
+            arrow_color = QColor("#a8afb8")
+        elif self.hasFocus() or self.underMouse():
+            arrow_color = QColor("#6d2fa0")
+        else:
+            arrow_color = QColor("#5f6670")
+
+        pen = QPen(arrow_color)
+        pen.setWidthF(1.7)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+
+        center_x = float(self.width() - 12)
+        center_y = float(self.height()) / 2.0 - 1.0
+        painter.drawLine(
+            QPointF(center_x - 4.0, center_y - 1.5),
+            QPointF(center_x, center_y + 2.5),
+        )
+        painter.drawLine(
+            QPointF(center_x, center_y + 2.5),
+            QPointF(center_x + 4.0, center_y - 1.5),
+        )
+        painter.end()
+
+
+class StrictWheelSpinBox(QSpinBox):
+    """Never change an integer setting from page-wheel scrolling.
+
+    Operators can still type a value or use the spin buttons/keyboard arrows.
+    """
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class StrictWheelDoubleSpinBox(QDoubleSpinBox):
+    """Never change a decimal setting from page-wheel scrolling.
+
+    Operators can still type a value or use the spin buttons/keyboard arrows.
+    """
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 def open_output_folder_path(path_text: str, parent=None) -> bool:
@@ -1103,12 +1171,17 @@ class AutoPLCFFCProcessTab(QWidget):
         def panel(title_text):
             frame = QFrame()
             frame.setObjectName("InnerPanel")
+            frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
             layout = QVBoxLayout(frame)
             layout.setContentsMargins(12, 10, 12, 10)
             layout.setSpacing(8)
+            layout.setAlignment(Qt.AlignTop)
             heading = QLabel(title_text)
             heading.setObjectName("PanelTitle")
-            layout.addWidget(heading)
+            heading.setFixedHeight(18)
+            heading.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            heading.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(heading, 0, Qt.AlignTop)
             return frame, layout
 
         # ---------------- PAGE HEADER ----------------
@@ -1130,12 +1203,6 @@ class AutoPLCFFCProcessTab(QWidget):
         header_l.addLayout(header_text_l)
         header_l.addStretch()
 
-        mode_badge = QLabel("PLC SOFTWARE")
-        mode_badge.setObjectName("ModeBadge")
-        core_badge = QLabel("VALIDATED CORE")
-        core_badge.setObjectName("CoreBadge")
-        header_l.addWidget(mode_badge)
-        header_l.addWidget(core_badge)
         main.addWidget(header)
 
         # ---------------- PROFILE + PATHS ----------------
@@ -1149,15 +1216,19 @@ class AutoPLCFFCProcessTab(QWidget):
         sku_layout.setHorizontalSpacing(8)
         sku_layout.setVerticalSpacing(8)
 
-        self.sku_combo = QComboBox()
-        self.sku_combo.setEditable(True)
-        self.sku_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.sku_combo.setPlaceholderText("Select or enter SKU")
-        self.sku_combo.setMinimumWidth(220)
+        self.sku_combo = StrictWheelComboBox()
+        self.sku_combo.setEditable(False)
+        self.sku_combo.setPlaceholderText("Select an available SKU profile")
+        self.sku_combo.setMinimumWidth(240)
+        self.sku_combo.setMinimumContentsLength(22)
+        self.sku_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.sku_combo.setToolTip(
+            "SKU profiles found under media/Camera_Profiles/<SKU>/camera_profile.json"
+        )
 
-        self.refresh_sku_btn = QPushButton("Refresh")
+        self.refresh_sku_btn = QPushButton("Refresh List")
         self.refresh_sku_btn.setObjectName("SecondaryButton")
-        self.refresh_sku_btn.setFixedWidth(90)
+        self.refresh_sku_btn.setFixedWidth(104)
         self.load_sku_profile_btn = QPushButton("Load Profile")
         self.load_sku_profile_btn.setObjectName("PrimaryButton")
         self.load_sku_profile_btn.setFixedWidth(116)
@@ -1232,29 +1303,30 @@ class AutoPLCFFCProcessTab(QWidget):
 
         cap_columns = QHBoxLayout()
         cap_columns.setSpacing(8)
+        cap_columns.setAlignment(Qt.AlignTop)
 
         operation_panel, operation_l = panel("Operation")
         operation_form = compact_form()
 
-        self.mode_combo = QComboBox()
+        self.mode_combo = StrictWheelComboBox()
         self.mode_combo.addItems(["PLC_SOFTWARE", "SOFTWARE", "FREE"])
         self.mode_combo.setCurrentText("PLC_SOFTWARE")
         self.num_main_spin = self.make_spin(1, 1000, 1)
         self.num_bead_spin = self.make_spin(0, 1000, 1)
         self.num_main_spin.valueChanged.connect(self.num_bead_spin.setValue)
 
-        self.capture_build_mode_combo = QComboBox()
+        self.capture_build_mode_combo = StrictWheelComboBox()
         self.capture_build_mode_combo.addItems(["HEIGHT_BASED", "TIME_BASED"])
         self.capture_build_mode_combo.setCurrentText("HEIGHT_BASED")
         self.time_capture_sec_spin = self.make_double(0.1, 120.0, 2.0, 2)
 
-        self.pixel_format_combo = QComboBox()
+        self.pixel_format_combo = StrictWheelComboBox()
         self.pixel_format_combo.addItems(["Mono16", "Mono8"])
         self.pixel_format_combo.setCurrentText("Mono8")
-        self.output_bit_depth_combo = QComboBox()
+        self.output_bit_depth_combo = StrictWheelComboBox()
         self.output_bit_depth_combo.addItems(["8-bit", "16-bit"])
         self.output_bit_depth_combo.setCurrentText("8-bit")
-        self.save_format_combo = QComboBox()
+        self.save_format_combo = StrictWheelComboBox()
         self.save_format_combo.addItems(["PNG", "BMP"])
         self.save_format_combo.setCurrentText("PNG")
 
@@ -1381,9 +1453,10 @@ class AutoPLCFFCProcessTab(QWidget):
             "Buffers", "Packet", "Delay"
         ])
         header = self.camera_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setStretchLastSection(True)
-        header.setMinimumSectionSize(58)
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(68)
+        header.setDefaultAlignment(Qt.AlignCenter)
         self.camera_table.verticalHeader().setDefaultSectionSize(30)
         self.camera_table.verticalHeader().setFixedWidth(28)
         self.camera_table.setAlternatingRowColors(True)
@@ -1395,9 +1468,6 @@ class AutoPLCFFCProcessTab(QWidget):
         cam_l.addWidget(self.camera_table)
         self.load_default_camera_table()
         self.refresh_sku_profiles()
-
-        for col, width in enumerate([90, 105, 78, 68, 82, 78, 82, 88, 86, 62, 72, 72, 72]):
-            self.camera_table.setColumnWidth(col, width)
 
         main.addWidget(cam_box)
 
@@ -1431,7 +1501,7 @@ class AutoPLCFFCProcessTab(QWidget):
         checks_l.addWidget(self.save_raw_chk, 1, 0)
         checks_l.addWidget(self.save_gain_chk, 1, 1)
 
-        self.gain_target_combo = QComboBox()
+        self.gain_target_combo = StrictWheelComboBox()
         self.gain_target_combo.addItems(["PERCENTILE_95", "MEAN", "MAX"])
         self.gain_min_spin = self.make_double(0.01, 100.0, 1.0, 3)
         self.gain_max_spin = self.make_double(0.01, 100.0, 15.99, 3)
@@ -1527,6 +1597,15 @@ class AutoPLCFFCProcessTab(QWidget):
                 font-family: "Segoe UI", Arial, sans-serif;
                 font-size: 12px;
             }
+            QToolTip {
+                background-color: #ffffff;
+                color: #3f2a50;
+                border: 1px solid #cdb8dc;
+                border-radius: 6px;
+                padding: 6px 9px;
+                font-family: "Segoe UI", Arial, sans-serif;
+                font-size: 11px;
+            }
             QScrollArea#CaptureScroll, QScrollArea#CaptureScroll > QWidget > QWidget {
                 background: #f6f7fb;
                 border: none;
@@ -1618,15 +1697,33 @@ class AutoPLCFFCProcessTab(QWidget):
                 color: #263238;
                 border: 1px solid #d7dce3;
                 border-radius: 6px;
-                padding: 0 8px;
+                padding: 0 28px 0 8px;
                 selection-background-color: #6d2fa0;
             }
             QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
                 border: 1px solid #7b3fac;
             }
             QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
                 border: none;
-                width: 22px;
+                width: 26px;
+                background: transparent;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background: #ffffff;
+                color: #263238;
+                border: 1px solid #cdb8dc;
+                border-radius: 5px;
+                padding: 3px;
+                selection-background-color: #6d2fa0;
+                selection-color: #ffffff;
+                outline: 0;
             }
             QSpinBox::up-button, QDoubleSpinBox::up-button,
             QSpinBox::down-button, QDoubleSpinBox::down-button {
@@ -1700,6 +1797,39 @@ class AutoPLCFFCProcessTab(QWidget):
                 padding: 3px 6px;
                 border-bottom: 1px solid #eff1f4;
             }
+            QComboBox#TableCombo {
+                min-height: 24px;
+                max-height: 24px;
+                background: #ffffff;
+                color: #263238;
+                border: 1px solid #cfd5dd;
+                border-radius: 5px;
+                padding: 0 24px 0 6px;
+                font-size: 11px;
+            }
+            QComboBox#TableCombo:hover {
+                border: 1px solid #a979c6;
+                background: #fcf9fe;
+            }
+            QComboBox#TableCombo:focus {
+                color: #263238;
+                background: #ffffff;
+                border: 1px solid #7b3fac;
+            }
+            QComboBox#TableCombo QAbstractItemView {
+                background: #ffffff;
+                color: #263238;
+                selection-background-color: #6d2fa0;
+                selection-color: #ffffff;
+                border: 1px solid #cdb8dc;
+                outline: 0;
+            }
+            QTableCornerButton::section {
+                background: #f0e7f7;
+                border: none;
+                border-right: 1px solid #e1d4eb;
+                border-bottom: 1px solid #e1d4eb;
+            }
             QHeaderView::section {
                 background: #f0e7f7;
                 color: #5b168b;
@@ -1737,14 +1867,14 @@ class AutoPLCFFCProcessTab(QWidget):
 
     # -----------------------------------------------------
     def make_spin(self, min_val, max_val, default):
-        spin = QSpinBox()
+        spin = StrictWheelSpinBox()
         spin.setRange(min_val, max_val)
         spin.setValue(default)
         return spin
 
     # -----------------------------------------------------
     def make_double(self, min_val, max_val, default, decimals):
-        spin = QDoubleSpinBox()
+        spin = StrictWheelDoubleSpinBox()
         spin.setRange(min_val, max_val)
         spin.setDecimals(decimals)
         spin.setValue(default)
@@ -1800,11 +1930,14 @@ class AutoPLCFFCProcessTab(QWidget):
         self.sku_combo.blockSignals(True)
         self.sku_combo.clear()
         self.sku_combo.addItems(names)
-        if current:
-            self.sku_combo.setCurrentText(current)
-        elif names:
-            self.sku_combo.setCurrentIndex(0)
+        selected_index = self.sku_combo.findText(current, Qt.MatchFixedString) if current else -1
+        self.sku_combo.setCurrentIndex(selected_index if selected_index >= 0 else -1)
         self.sku_combo.blockSignals(False)
+
+        if hasattr(self, "profile_status_label") and not names:
+            self.profile_status_label.setText(
+                f"No SKU profiles found in {self.camera_profile_root}"
+            )
 
     # -----------------------------------------------------
     def _camera_profile_path(self, sku_name):
@@ -1932,17 +2065,21 @@ class AutoPLCFFCProcessTab(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.camera_table.setItem(row, col, item)
 
-        enabled_combo = QComboBox()
+        enabled_combo = StrictWheelComboBox()
         enabled_combo.addItems(["Yes", "No"])
         enabled_combo.setCurrentText("Yes" if bool(cfg.get("enabled", True)) else "No")
+        enabled_combo.setObjectName("TableCombo")
         enabled_combo.setProperty("noWheelChange", True)
+        enabled_combo.setFocusPolicy(Qt.StrongFocus)
         self.camera_table.setCellWidget(row, 2, enabled_combo)
 
-        pixel_combo = QComboBox()
+        pixel_combo = StrictWheelComboBox()
         pixel_combo.addItems(["Mono8", "Mono16"])
         pixel = str(cfg.get("pixel_format", "Mono8"))
         pixel_combo.setCurrentText("Mono16" if pixel.lower() == "mono16" else "Mono8")
+        pixel_combo.setObjectName("TableCombo")
         pixel_combo.setProperty("noWheelChange", True)
+        pixel_combo.setFocusPolicy(Qt.StrongFocus)
         self.camera_table.setCellWidget(row, 5, pixel_combo)
 
     # -----------------------------------------------------

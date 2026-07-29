@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from src.COMMON.repositories import DeviceProfileRepository
 
@@ -32,22 +32,51 @@ class SKUDeviceProfileStore:
         self.profile_repository = DeviceProfileRepository()
 
     def camera_profile_path(self, sku_name: str) -> Path:
-        return self.camera_root / sku_name / "camera_profile.json"
+        return self.camera_root / str(sku_name).strip() / "camera_profile.json"
 
     def laser_profile_path(self, sku_name: str) -> Path:
-        return self.laser_root / sku_name / "laser_profile.json"
+        return self.laser_root / str(sku_name).strip() / "laser_profile.json"
+
+    def list_camera_skus(self) -> List[str]:
+        return sorted(
+            entry.name
+            for entry in self.camera_root.iterdir()
+            if entry.is_dir() and (entry / "camera_profile.json").is_file()
+        )
+
+    def list_laser_skus(self) -> List[str]:
+        return sorted(
+            entry.name
+            for entry in self.laser_root.iterdir()
+            if entry.is_dir() and (entry / "laser_profile.json").is_file()
+        )
 
     def save_camera_profile(self, sku_name: str, profile: Dict[str, Any]) -> Path:
         profile = _json_safe(profile)
-        profile["schema_version"] = 1
+        # Version 2 stores separate logical Inner and Bead profiles even when
+        # both roles share one physical camera serial.
+        profile["schema_version"] = max(int(profile.get("schema_version", 2)), 2)
         profile["profile_type"] = "camera"
-        profile["sku_name"] = sku_name
+        profile["sku"] = str(profile.get("sku") or sku_name)
+        profile["sku_name"] = str(sku_name)
         profile["global_trigger_source"] = ".env"
         profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        cameras = profile.get("cameras", {})
+        inner = cameras.get("inner", cameras.get("innerwall", {}))
+        bead = cameras.get("bead", {})
+        inner_serial = str(inner.get("serial", "")).strip()
+        bead_serial = str(bead.get("serial", "")).strip()
+        if inner_serial and inner_serial == bead_serial:
+            profile["shared_inner_bead_serial"] = inner_serial
+            profile["shared_role_profiles_enabled"] = True
+        else:
+            profile.setdefault("shared_role_profiles_enabled", False)
+            if not profile.get("shared_role_profiles_enabled"):
+                profile.pop("shared_inner_bead_serial", None)
+
         path = self.camera_profile_path(sku_name)
         path.parent.mkdir(parents=True, exist_ok=True)
-
         with open(path, "w", encoding="utf-8") as f:
             json.dump(profile, f, indent=4)
 
@@ -58,28 +87,30 @@ class SKUDeviceProfileStore:
             profile=profile,
             json_path=str(path),
         )
-
         return path
 
     def load_camera_profile(self, sku_name: str) -> Dict[str, Any]:
         path = self.camera_profile_path(sku_name)
-
         if not path.exists():
             raise FileNotFoundError(f"Camera profile not found: {path}")
-
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            profile = json.load(f)
+
+        # Accept older files that used innerwall instead of inner.
+        cameras = profile.setdefault("cameras", {})
+        if "innerwall" in cameras and "inner" not in cameras:
+            cameras["inner"] = cameras["innerwall"]
+        return profile
 
     def save_laser_profile(self, sku_name: str, profile: Dict[str, Any]) -> Path:
         profile = _json_safe(profile)
-        profile["schema_version"] = 1
+        profile["schema_version"] = max(int(profile.get("schema_version", 1)), 1)
         profile["profile_type"] = "laser"
-        profile["sku_name"] = sku_name
+        profile["sku_name"] = str(sku_name)
         profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         path = self.laser_profile_path(sku_name)
         path.parent.mkdir(parents=True, exist_ok=True)
-
         with open(path, "w", encoding="utf-8") as f:
             json.dump(profile, f, indent=4)
 
@@ -90,15 +121,12 @@ class SKUDeviceProfileStore:
             profile=profile,
             json_path=str(path),
         )
-
         return path
 
     def load_laser_profile(self, sku_name: str) -> Dict[str, Any]:
         path = self.laser_profile_path(sku_name)
-
         if not path.exists():
             raise FileNotFoundError(f"Laser profile not found: {path}")
-
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 

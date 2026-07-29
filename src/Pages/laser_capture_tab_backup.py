@@ -119,7 +119,7 @@ class LaserCaptureTab(QWidget):
         title.setObjectName("PageTitle")
         subtitle = QLabel(
             "Production mode: waits for Siemens PLC DB74.DBX0.3 rising edge and saves "
-            "only reflectance 8-bit PNG, reflectance 16-bit PNG, and one full-resolution PLY."
+            "only height 8-bit PNG, height 16-bit PNG, and one full-resolution PLY."
         )
         subtitle.setObjectName("SubTitle")
         subtitle.setWordWrap(True)
@@ -196,7 +196,6 @@ class LaserCaptureTab(QWidget):
         self.target_serials_edit = QLineEdit("M0006674")
         self.config_mode_combo = QComboBox()
         self.config_mode_combo.addItems(["PYTHON", "USERSET1"])
-        self.config_mode_combo.setCurrentText("USERSET1")
         self.config_mode_combo.currentTextChanged.connect(self._apply_global_config_mode)
         self.user_set_edit = QLineEdit("UserSet1")
         self.num_buffers_spin = self.make_spin(1, 64, 4)
@@ -272,20 +271,20 @@ class LaserCaptureTab(QWidget):
         self.ply_format_combo.setCurrentText("ascii")
         self.debug_ply_step_spin = self.make_spin(1, 100, 1)
         self.center_z_chk = QCheckBox("Center Z by median")
-        self.center_z_chk.setChecked(False)
+        self.center_z_chk.setChecked(True)
         self.invalid_c_spin = self.make_spin(0, 65535, 65535)
-        self.x_scaler_spin = self.make_double(0.000001, 100000.0, 140.0, 6, 1.0)
+        self.x_scaler_spin = self.make_double(0.000001, 100000.0, 10.0, 6, 1.0)
         self.z_scaler_spin = self.make_double(0.000001, 100000.0, 5.0, 6, 1.0)
-        self.y_step_spin = self.make_double(0.000001, 100000.0, 0.140, 6, 0.01)
+        self.y_step_spin = self.make_double(0.000001, 100000.0, 1.0, 6, 0.1)
 
         out_left.addRow(self.full_ply_chk)
         out_left.addRow("PLY Format", self.ply_format_combo)
         out_left.addRow("Debug PLY Step", self.debug_ply_step_spin)
         out_left.addRow(self.center_z_chk)
         out_right.addRow("Invalid C Value", self.invalid_c_spin)
-        out_right.addRow("Fallback X Step µm", self.x_scaler_spin)
+        out_right.addRow("X Scaler µm", self.x_scaler_spin)
         out_right.addRow("Z Scaler µm", self.z_scaler_spin)
-        out_right.addRow("Fallback Y Step mm/profile", self.y_step_spin)
+        out_right.addRow("Y Step mm/profile", self.y_step_spin)
 
         output_grid.addLayout(out_left, 0, 0)
         output_grid.addLayout(out_right, 0, 1)
@@ -294,9 +293,8 @@ class LaserCaptureTab(QWidget):
         main.addWidget(output_box)
 
         production_note = QLabel(
-            "Current production output: one full-resolution Sapera-compatible ASCII PLY + "
-            "8-bit reflectance preview + 16-bit reflectance PNG only. X/Y geometry is read "
-            "from the active UserSet; metadata and RAW remain temporary unless checked."
+            "Current production output: one full-resolution ASCII PLY + 8-bit reflectance preview + "
+            "16-bit reflectance PNG only. Metadata and RAW are temporary and deleted unless checked."
         )
         production_note.setObjectName("WarningNote")
         production_note.setWordWrap(True)
@@ -309,7 +307,7 @@ class LaserCaptureTab(QWidget):
 
         table_hint = QLabel(
             "Only rows marked Enabled are passed to the runner. Median Filter maps to "
-            "profileMedianFilterMode; Y Displacement is verified against streamed_displacementY. "
+            "profileMedianFilterMode; Y Displacement maps to displacementBetweenSamplesY. "
             "The connection/capture runner logs whether each feature was accepted by the laser."
         )
         table_hint.setObjectName("SubTitle")
@@ -405,7 +403,6 @@ class LaserCaptureTab(QWidget):
 
         self.setStyleSheet(self._style())
         self._on_run_mode_changed(self.run_mode_combo.currentText())
-        self._apply_global_config_mode(self.config_mode_combo.currentText())
 
     def _style(self) -> str:
         return f"""
@@ -533,7 +530,6 @@ class LaserCaptureTab(QWidget):
             )
 
     def _apply_global_config_mode(self, mode: str) -> None:
-        normalized = str(mode).strip().upper()
         for row in range(self.laser_table.rowCount()):
             combo = self.laser_table.cellWidget(row, 3)
             if isinstance(combo, QComboBox):
@@ -542,33 +538,21 @@ class LaserCaptureTab(QWidget):
             if item is not None:
                 item.setText(self.user_set_edit.text().strip() or "UserSet1")
 
-        # In USERSET1 mode, X/Y geometry comes from verified device readback.
-        # Manual values remain visible only as an emergency PYTHON-mode fallback.
-        userset_mode = normalized == "USERSET1"
-        if hasattr(self, "center_z_chk"):
-            if userset_mode:
-                self.center_z_chk.setChecked(False)
-            self.center_z_chk.setEnabled(not userset_mode)
-        if hasattr(self, "x_scaler_spin"):
-            self.x_scaler_spin.setEnabled(not userset_mode)
-        if hasattr(self, "y_step_spin"):
-            self.y_step_spin.setEnabled(not userset_mode)
-
     def load_default_laser_table(self) -> None:
         rows = [
             [
                 "M0006674",
                 "1",
                 "laser_1_ztrak_2k_M0006674",
-                "USERSET1",
+                "PYTHON",
                 "UserSet1",
                 "17150",
-                "512",
+                "256",
                 "2047",
                 "16",
-                "11",
+                "",
                 "On3x1",
-                "140.0",
+                "990.0",
                 "8000.0",
                 "100.0",
                 "0",
@@ -577,7 +561,7 @@ class LaserCaptureTab(QWidget):
                 "M0006994",
                 "0",
                 "laser_2_lp2c_4k_M0006994",
-                "USERSET1",
+                "PYTHON",
                 "UserSet1",
                 "5000",
                 "128",
@@ -675,9 +659,6 @@ class LaserCaptureTab(QWidget):
             "x_scaler_um": self.x_scaler_spin.value(),
             "z_scaler_um": self.z_scaler_spin.value(),
             "y_step_mm": self.y_step_spin.value(),
-            "geometry_source": "USERSET_READBACK",
-            "coordinate_unit": "Micrometer",
-            "include_reflectance_property": True,
         }
 
     def build_laser_configs(self) -> Dict[str, Dict[str, object]]:
@@ -714,19 +695,15 @@ class LaserCaptureTab(QWidget):
             if noise_level_text:
                 safe_features["noiseReductionLevel"] = self._to_int(noise_level_text, 0)
             if fir_size_text:
-                fir_value = fir_size_text.strip()
-                if fir_value.lower().startswith("fir"):
-                    safe_features["firSize"] = fir_value
-                else:
-                    safe_features["firSize"] = f"fir{self._to_int(fir_value, 0)}"
+                safe_features["firSize"] = self._to_int(fir_size_text, 0)
             if median_filter_mode:
                 safe_features["profileMedianFilterMode"] = median_filter_mode
             if displacement_y is not None:
-                safe_features["displacementY"] = displacement_y
+                safe_features["displacementBetweenSamplesY"] = displacement_y
 
             optional_locked: Dict[str, object] = {}
             if profile_rate is not None:
-                optional_locked["AcquisitionLineRate"] = profile_rate
+                optional_locked["profileRate"] = profile_rate
             if exposure is not None:
                 optional_locked["ExposureTime"] = exposure
 
@@ -734,7 +711,6 @@ class LaserCaptureTab(QWidget):
                 "label": label,
                 "config_mode": config_mode,
                 "userset_name": user_set,
-                "expected_displacement_y_um": displacement_y,
                 "apply_safe_overrides_after_userset": (
                     str(config_mode).strip().upper() != "USERSET1"
                 ),
@@ -867,7 +843,7 @@ class LaserCaptureTab(QWidget):
                 f"[OUTPUT] full_ply={self.full_ply_chk.isChecked()} "
                 f"format={converter['ply_format']} "
                 f"debug_step={converter['debug_ply_step']} "
-                f"center_z={self.center_z_chk.isChecked()} geometry=USERSET_READBACK "
+                f"center_z={self.center_z_chk.isChecked()} y_step={self.y_step_spin.value()} "
                 "save=reflectance_preview_8bit,reflectance_16bit,ply_only"
             ),
         ]

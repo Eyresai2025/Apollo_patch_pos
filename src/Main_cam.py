@@ -617,6 +617,10 @@ class ContinuousCycleWorker(QObject):
         pipeline_sec = 0.0
         prep_wait_sec = 0.0
         result = None
+        # A camera may fail after other cameras have already completed. Keep the
+        # successful arrays long enough to save them, but never allow AI to run
+        # for an incomplete inspection cycle.
+        capture_failure_message: Optional[str] = None
 
         try:
             set_live_progress(
@@ -731,9 +735,13 @@ class ContinuousCycleWorker(QObject):
                 if side not in images or images.get(side) is None
             ]
             if missing_capture_sides:
-                raise RuntimeError(
+                capture_failure_message = (
                     "Camera capture failed / missing images for: "
                     + ", ".join(missing_capture_sides)
+                )
+                self.status_update.emit(
+                    " Partial capture detected. Successfully captured images "
+                    "will be saved; AI inspection will be skipped."
                 )
 
             if not images or not any(img is not None for img in images.values()):
@@ -807,6 +815,19 @@ class ContinuousCycleWorker(QObject):
             self.status_update.emit(
                 f"   Saved {len(image_map)} sides: {', '.join(image_map.keys())}"
             )
+
+            # Preserve all successfully captured files, then fail the cycle at
+            # this boundary so no incomplete set can enter PatchCore/AI.
+            if capture_failure_message:
+                self.status_update.emit(
+                    f" Partial capture saved in {cycle_id}. AI inspection skipped."
+                )
+                self._timing_log(
+                    f"PARTIAL_CAPTURE_SAVED | cycle_id={cycle_id} | "
+                    f"saved_sides={','.join(image_map.keys())} | "
+                    f"error={capture_failure_message}"
+                )
+                raise RuntimeError(capture_failure_message)
 
             self.processing_started.emit(cycle_id)
             self.status_update.emit(f" Starting inspection stage for {cycle_id}...")

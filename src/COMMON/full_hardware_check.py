@@ -4,6 +4,7 @@ import os
 import io
 import time
 import contextlib
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -13,6 +14,7 @@ from PyQt5.QtWidgets import QMessageBox
 
 _HARDWARE_STATE = {
     "ready": False,
+    "check_running": False,
     "last_result": None,
     "plc_client": None,
     "multi_cam": None,
@@ -27,8 +29,163 @@ def get_hardware_state():
     return dict(_HARDWARE_STATE)
 
 
-def reset_hardware_state():
+# A single snap7 Client is shared by Test Mode, Live SKU resolution and the
+# lightweight component-health monitor.  python-snap7 Client operations are
+# not safe to overlap across GUI/worker threads, so all connection checks and
+# small PLC reads must use this lock.
+_PLC_IO_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def plc_io_guard():
+    """Serialize access to the shared snap7 client."""
+    with _PLC_IO_LOCK:
+        yield
+
+
+def _plc_client_is_connected(client):
+    if client is None:
+        return False
+    try:
+        return bool(client.get_connected())
+    except Exception:
+        return False
+
+
+def _disconnect_plc_client(client):
+    if client is None:
+        return
+    try:
+        client.disconnect()
+    except Exception:
+        pass
+
+
+def _close_camera_manager(manager):
+    if manager is None:
+        return
+    for method_name in ("stop_all_streams", "close_all"):
+        method = getattr(manager, method_name, None)
+        if callable(method):
+            try:
+                method()
+            except Exception as exc:
+                print(f"[HARDWARE STATE][WARN] {method_name} failed: {exc}")
+
+
+def release_hardware_state_resources():
+    """Release the previous Test Mode PLC and camera resources before a rerun."""
+    with _PLC_IO_LOCK:
+        manager = _HARDWARE_STATE.get("multi_cam")
+        client = _HARDWARE_STATE.get("plc_client")
+        _HARDWARE_STATE["ready"] = False
+        _HARDWARE_STATE["check_running"] = False
+        _HARDWARE_STATE["last_result"] = None
+        _HARDWARE_STATE["plc_client"] = None
+        _HARDWARE_STATE["multi_cam"] = None
+
+    # Arena cleanup can take time. Do not hold the PLC lock while closing it.
+    _close_camera_manager(manager)
+    with _PLC_IO_LOCK:
+        _disconnect_plc_client(client)
+
+
+def ensure_plc_client_connected(env_path=None):
+    """Return a connected shared snap7 Client, reconnecting when stale.
+
+    Test Mode creates the original client in a worker thread and stores it in
+    ``_HARDWARE_STATE``.  The PLC or snap7 session can later expire while the
+    Test Mode card still shows the successful *last check*.  Live inspection
+    and component health must therefore validate/reconnect the session before
+    using it.
+
+    The existing MultiCameraManager is updated with the replacement client so
+    camera trigger polling and Live SKU resolution continue to use the same
+    PLC session.
+    """
+    with _PLC_IO_LOCK:
+        current = _HARDWARE_STATE.get("plc_client")
+        if _plc_client_is_connected(current):
+            return current
+
+        resolved_env_path = (
+            Path(env_path)
+            if env_path
+            else Path(__file__).resolve().parents[2] / ".env"
+        )
+        env = _load_env_file(resolved_env_path)
+
+        deployment_value = str(env.get("DEPLOYMENT", "False")).strip().lower()
+        if deployment_value not in ("1", "true", "yes", "y", "on"):
+            return current
+
+        plc_ip = str(env.get("PLC_IP", "")).strip()
+        plc_rack = _env_int(env, "PLC_RACK", 0)
+        plc_slot = _env_int(env, "PLC_SLOT", 1)
+
+        if not plc_ip:
+            _HARDWARE_STATE["ready"] = False
+            raise RuntimeError("PLC_IP is missing in .env")
+
+        if current is not None:
+            try:
+                current.disconnect()
+            except Exception:
+                pass
+
+        try:
+            from snap7 import Client
+
+            replacement = Client()
+            replacement.connect(plc_ip, plc_rack, plc_slot)
+            if not _plc_client_is_connected(replacement):
+                raise RuntimeError("snap7 connect returned but PLC is not connected")
+
+            _HARDWARE_STATE["plc_client"] = replacement
+
+            manager = _HARDWARE_STATE.get("multi_cam")
+            if manager is not None and hasattr(manager, "set_plc_interface"):
+                manager.set_plc_interface(replacement)
+
+            last_result = _HARDWARE_STATE.get("last_result")
+            if isinstance(last_result, dict):
+                last_result["plc_client"] = replacement
+                last_result["plc_ok"] = True
+                plc_detail = last_result.setdefault("details", {}).setdefault("plc", {})
+                plc_detail["connected"] = True
+                plc_detail["last_error"] = "-"
+                plc_detail["reconnected"] = True
+                _HARDWARE_STATE["ready"] = bool(last_result.get("overall_ok", False))
+
+            print(
+                f"[PLC][RECONNECT] Connected shared PLC client | "
+                f"ip={plc_ip} rack={plc_rack} slot={plc_slot}"
+            )
+            return replacement
+
+        except Exception as exc:
+            _HARDWARE_STATE["plc_client"] = None
+            _HARDWARE_STATE["ready"] = False
+
+            last_result = _HARDWARE_STATE.get("last_result")
+            if isinstance(last_result, dict):
+                last_result["plc_ok"] = False
+                plc_detail = last_result.setdefault("details", {}).setdefault("plc", {})
+                plc_detail["connected"] = False
+                plc_detail["last_error"] = str(exc)
+
+            raise RuntimeError(
+                f"PLC reconnect failed for {plc_ip} rack={plc_rack} "
+                f"slot={plc_slot}: {exc}"
+            ) from exc
+
+
+def reset_hardware_state(*, release_resources=False):
+    if release_resources:
+        release_hardware_state_resources()
+        return
     _HARDWARE_STATE["ready"] = False
+    _HARDWARE_STATE["check_running"] = False
     _HARDWARE_STATE["last_result"] = None
     _HARDWARE_STATE["plc_client"] = None
     _HARDWARE_STATE["multi_cam"] = None
@@ -75,32 +232,53 @@ def _env_bool(env, key, default=False):
 
 
 def _set_status(dot, txt, state, msg):
-    colors = {
-        "ok": "#2f9e44",
-        "warn": "#ff9800",
-        "err": "#e03131",
-        "off": "#666666",
-    }
+    """Update both the legacy dot UI and the modern readiness chip UI."""
+    state = str(state or "off").strip().lower()
+    owner = dot
+    modern_owner = None
+    while owner is not None:
+        if callable(getattr(owner, "_refresh_summary", None)):
+            modern_owner = owner
+            break
+        owner = owner.parent()
+
+    if modern_owner is not None:
+        meta = {
+            "ok": ("READY", "#15803D", "#DCFCE7", "#BBF7D0", "#166534"),
+            "warn": ("CHECKING", "#B45309", "#FEF3C7", "#FDE68A", "#92400E"),
+            "err": ("FAILED", "#B91C1C", "#FEE2E2", "#FECACA", "#991B1B"),
+            "off": ("WAITING", "#64748B", "#F1F5F9", "#E2E8F0", "#475569"),
+        }
+        label, fg, bg, border, detail = meta.get(state, meta["off"])
+        dot.setProperty("hardwareState", state)
+        dot.setText(label)
+        dot.setStyleSheet(f"""
+            QLabel {{
+                color: {fg};
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 10px;
+                padding: 3px 9px;
+                font: 800 9px 'Segoe UI';
+            }}
+        """)
+        txt.setStyleSheet(f"""
+            QLabel {{
+                font: 600 10px 'Segoe UI';
+                color: {detail};
+                background: transparent;
+                border: none;
+                padding: 2px;
+            }}
+        """)
+        txt.setText(msg)
+        modern_owner._refresh_summary()
+        return
+
+    colors = {"ok": "#2f9e44", "warn": "#ff9800", "err": "#e03131", "off": "#666666"}
     c = colors.get(state, "#666666")
-
-    dot.setStyleSheet(f"""
-        QLabel {{
-            font: 900 16px 'Segoe UI';
-            color: {c};
-            border: none;
-            background: transparent;
-        }}
-    """)
-
-    txt.setStyleSheet(f"""
-        QLabel {{
-            font: 700 11px 'Segoe UI';
-            color: {c};
-            background: transparent;
-            border: none;
-        }}
-    """)
-
+    dot.setStyleSheet(f"QLabel {{ font:900 16px 'Segoe UI'; color:{c}; border:none; background:transparent; }}")
+    txt.setStyleSheet(f"QLabel {{ font:700 11px 'Segoe UI'; color:{c}; background:transparent; border:none; }}")
     txt.setText(msg)
 
 
@@ -131,6 +309,14 @@ def _set_progress(test_page, state):
         }}
     """)
     test_page.p_label.setText(label)
+    if hasattr(test_page, "last_check_label"):
+        if state == "running":
+            test_page.last_check_label.setText("Running now")
+        else:
+            test_page.last_check_label.setText(datetime.now().strftime("%d %b %Y, %I:%M:%S %p"))
+    refresh = getattr(test_page, "_refresh_summary", None)
+    if callable(refresh):
+        refresh()
 
 
 class FullHardwareChecker:
@@ -151,6 +337,35 @@ class FullHardwareChecker:
         self.plc_retry_delay_sec = _env_float(self.env, "PLC_RETRY_DELAY_SEC", 1.0)
         self.require_lights = _env_bool(self.env, "REQUIRE_LIGHTS", True)
         self.require_laser = _env_bool(self.env, "REQUIRE_LASER", False)
+
+        # Test Mode laser policy:
+        # - LASER_CONNECTION_CHECK_ENABLED controls whether a real, non-capturing
+        #   Sapera open/close check is executed.
+        # - REQUIRE_LASER controls only whether failure blocks APP_OK.
+        # A required laser always forces the connection check on.
+        self.laser_connection_check_enabled = (
+            _env_bool(self.env, "LASER_CONNECTION_CHECK_ENABLED", False)
+            or self.require_laser
+        )
+        target_text = str(
+            self.env.get(
+                "LASER_CONNECTION_TARGET_SERIALS",
+                self.env.get("APOLLO_LASER_TARGET_SERIALS", ""),
+            )
+            or ""
+        ).strip()
+        self.laser_connection_target_serials = [
+            part.strip()
+            for part in target_text.replace(";", ",").split(",")
+            if part.strip()
+        ]
+        self.laser_sapera_dll = str(
+            self.env.get("SAPERA_DOTNET_DLL", "") or ""
+        ).strip()
+
+        self._active_plc_client = None
+        self._multi_cam = None
+
         self.app_ok_bit = {
             "db": _env_int(self.env, "APP_OK_DB", 100),
             "byte": _env_int(self.env, "APP_OK_BYTE", 0),
@@ -227,184 +442,157 @@ class FullHardwareChecker:
 
         try:
             from snap7 import Client
-
             last_error = None
-
             for attempt in range(1, self.plc_retry_count + 1):
+                client = None
                 try:
-                    client = Client()
-                    client.connect(self.plc_ip, self.plc_rack, self.plc_slot)
-
-                    if client.get_connected():
-                        detail = self._plc_detail_base()
-                        detail["connected"] = True
-                        detail["connected_on_attempt"] = attempt
-                        return True, client, f"PLC connected on attempt {attempt}.", detail
-
+                    with _PLC_IO_LOCK:
+                        client = Client()
+                        client.connect(self.plc_ip, self.plc_rack, self.plc_slot)
+                        if _plc_client_is_connected(client):
+                            self._active_plc_client = client
+                            _HARDWARE_STATE["plc_client"] = client
+                            detail = self._plc_detail_base()
+                            detail["connected"] = True
+                            detail["connected_on_attempt"] = attempt
+                            return True, client, f"PLC connected on attempt {attempt}.", detail
                     last_error = f"Attempt {attempt}: snap7 client not connected"
-
-                except Exception as e:
-                    last_error = f"Attempt {attempt}: {e}"
-
+                except Exception as exc:
+                    last_error = f"Attempt {attempt}: {exc}"
+                    _disconnect_plc_client(client)
                 time.sleep(self.plc_retry_delay_sec)
 
             detail = self._plc_detail_base()
             detail["last_error"] = last_error
-            return False, None, f"PLC connection failed after {self.plc_retry_count} attempts. {last_error}", detail
-
-        except Exception as e:
+            return False, None, (
+                f"PLC connection failed after {self.plc_retry_count} attempts. {last_error}"
+            ), detail
+        except Exception as exc:
             detail = self._plc_detail_base()
-            detail["last_error"] = str(e)
-            return False, None, f"PLC connection error: {e}", detail
-        
+            detail["last_error"] = str(exc)
+            return False, None, f"PLC connection error: {exc}", detail
+
+    def _reconnect_checker_plc(self, old_client=None):
+        if str(self.deployment) != "True":
+            return old_client
+        with _PLC_IO_LOCK:
+            _disconnect_plc_client(old_client or self._active_plc_client)
+            from snap7 import Client
+            client = Client()
+            client.connect(self.plc_ip, self.plc_rack, self.plc_slot)
+            if not _plc_client_is_connected(client):
+                raise RuntimeError("snap7 reconnect returned but PLC is not connected")
+            self._active_plc_client = client
+            _HARDWARE_STATE["plc_client"] = client
+            if self._multi_cam is not None and hasattr(self._multi_cam, "set_plc_interface"):
+                self._multi_cam.set_plc_interface(client)
+            print(
+                f"[PLC][HARDWARE CHECK RECONNECT] ip={self.plc_ip} "
+                f"rack={self.plc_rack} slot={self.plc_slot}"
+            )
+            return client
+
+    def _ensure_checker_plc(self, client=None, *, force_reconnect=False):
+        current = client or self._active_plc_client
+        if not force_reconnect and _plc_client_is_connected(current):
+            self._active_plc_client = current
+            return current
+        return self._reconnect_checker_plc(current)
+
     def _read_db_bit(self, client, db_number, byte_index, bit_index):
-        data = client.db_read(db_number, byte_index, 1)
-        return bool(data[0] & (1 << bit_index))
+        with _PLC_IO_LOCK:
+            data = client.db_read(db_number, byte_index, 1)
+            return bool(data[0] & (1 << bit_index))
 
     def _write_db_bit(self, client, db_number, byte_index, bit_index, value=True):
-        data = client.db_read(db_number, byte_index, 1)
-        byte_val = data[0]
-
-        if value:
-            byte_val = byte_val | (1 << bit_index)
-        else:
-            byte_val = byte_val & ~(1 << bit_index)
-
-        client.db_write(db_number, byte_index, bytes([byte_val]))
+        # Preserve all other bits in the same PLC byte.
+        with _PLC_IO_LOCK:
+            data = client.db_read(db_number, byte_index, 1)
+            byte_val = data[0]
+            if value:
+                byte_val |= (1 << bit_index)
+            else:
+                byte_val &= ~(1 << bit_index)
+            client.db_write(db_number, byte_index, bytes([byte_val]))
 
     def _send_application_ok_bit(self, client, checks_ok):
-        address = f'DB{self.app_ok_bit["db"]}.DBX{self.app_ok_bit["byte"]}.{self.app_ok_bit["bit"]}'
-
+        address = (
+            f'DB{self.app_ok_bit["db"]}.'
+            f'DBX{self.app_ok_bit["byte"]}.{self.app_ok_bit["bit"]}'
+        )
+        requested_value = bool(checks_ok)
         detail = {
             "address": address,
             "sent": False,
-            "value_written": False,
+            "value_written": requested_value,
             "read_back_value": False,
             "verified": False,
             "message": "-",
         }
 
-        # Demo/local mode
         if str(self.deployment) != "True":
-            detail["sent"] = True
-            detail["value_written"] = "DEMO PASS"
-            detail["read_back_value"] = "DEMO PASS"
-            detail["verified"] = "DEMO PASS"
-            detail["message"] = "DEPLOYMENT=False. Application OK bit demo pass."
+            detail.update({
+                "sent": True,
+                "value_written": "DEMO PASS",
+                "read_back_value": "DEMO PASS",
+                "verified": "DEMO PASS",
+                "message": "DEPLOYMENT=False. Application OK bit demo pass.",
+            })
             return True, detail
 
-        # Production mode: if hardware checks failed, force App OK bit FALSE
-        if not checks_ok:
-            if client is None:
-                detail["message"] = (
-                    "Hardware checks failed. Application OK bit could not be cleared "
-                    "because PLC client is None."
-                )
-                return False, detail
-
+        last_error = None
+        for attempt in range(1, 3):
             try:
+                client = self._ensure_checker_plc(
+                    client,
+                    force_reconnect=(attempt > 1),
+                )
                 db = self.app_ok_bit["db"]
                 byte = self.app_ok_bit["byte"]
                 bit = self.app_ok_bit["bit"]
-
-                # 1. Write App OK bit FALSE
-                self._write_db_bit(
-                    client=client,
-                    db_number=db,
-                    byte_index=byte,
-                    bit_index=bit,
-                    value=False,
-                )
-
-                # 2. Small delay for PLC update cycle
-                time.sleep(0.1)
-
-                # 3. Read same bit back
-                read_back = self._read_db_bit(
-                    client=client,
-                    db_number=db,
-                    byte_index=byte,
-                    bit_index=bit,
-                )
+                self._write_db_bit(client, db, byte, bit, requested_value)
+                time.sleep(0.10)
+                read_back = self._read_db_bit(client, db, byte, bit)
 
                 detail["sent"] = True
-                detail["value_written"] = False
-                detail["read_back_value"] = read_back
-                detail["verified"] = not bool(read_back)
+                detail["read_back_value"] = bool(read_back)
+                detail["verified"] = bool(read_back) == requested_value
 
-                if not read_back:
+                if detail["verified"]:
+                    if requested_value:
+                        detail["message"] = (
+                            f"Application OK bit written and verified at {address}."
+                        )
+                        return True, detail
                     detail["message"] = (
-                        f"Hardware checks failed. Application OK bit cleared and verified at {address}."
+                        f"Hardware checks failed. Application OK bit cleared "
+                        f"and verified at {address}."
                     )
                     return False, detail
 
-                detail["message"] = (
-                    f"Hardware checks failed. Tried to clear Application OK bit, "
-                    f"but read-back is still TRUE at {address}."
+                last_error = (
+                    f"read-back mismatch: wrote {requested_value}, "
+                    f"read {bool(read_back)}"
                 )
-                return False, detail
-
-            except Exception as e:
-                detail["message"] = (
-                    f"Hardware checks failed. Failed to clear Application OK bit at {address}: {e}"
+            except Exception as exc:
+                last_error = str(exc)
+                print(
+                    f"[PLC][APP_OK][WARN] attempt={attempt}/2 "
+                    f"address={address} error={exc}"
                 )
-                return False, detail
 
-        if client is None:
-            detail["message"] = "Application OK bit not sent because PLC client is None."
-            return False, detail
+        action = "write/verify" if requested_value else "clear/verify"
+        detail["message"] = (
+            f"Failed to {action} Application OK bit at {address}: {last_error}"
+        )
+        return False, detail
 
-        try:
-            db = self.app_ok_bit["db"]
-            byte = self.app_ok_bit["byte"]
-            bit = self.app_ok_bit["bit"]
-
-            # 1. Write App OK bit TRUE
-            self._write_db_bit(
-                client=client,
-                db_number=db,
-                byte_index=byte,
-                bit_index=bit,
-                value=True,
-            )
-
-            # 2. Small delay for PLC update cycle
-            time.sleep(0.1)
-
-            # 3. Read same bit back
-            read_back = self._read_db_bit(
-                client=client,
-                db_number=db,
-                byte_index=byte,
-                bit_index=bit,
-            )
-
-            detail["sent"] = True
-            detail["value_written"] = True
-            detail["read_back_value"] = read_back
-            detail["verified"] = bool(read_back)
-
-            if read_back:
-                detail["message"] = f"Application OK bit written and verified at {address}."
-                return True, detail
-
-            detail["message"] = f"Application OK bit write attempted but read-back is FALSE at {address}."
-            return False, detail
-
-        except Exception as e:
-            detail["message"] = f"Failed to write/verify Application OK bit at {address}: {e}"
-            return False, detail
     def _send_camera_status_bits(self, client, camera_status):
-        """
-        Writes each logical camera connection status to PLC.
+        """Write and verify camera status with one transaction per PLC byte.
 
-        sidewall1 -> DB74.DBX86.1
-        sidewall2 -> DB74.DBX86.2
-        tread     -> DB74.DBX86.3
-        innerwall -> DB74.DBX86.4
-        bead      -> DB74.DBX86.5
+        DB74.DBX86.0 is the bead trigger. Camera status occupies bits 1..5.
+        Bit 0 and all unrelated bits are preserved.
         """
-
         detail = {
             "enabled": bool(self.camera_status_write_enabled),
             "sent": False,
@@ -414,16 +602,24 @@ class FullHardwareChecker:
         }
 
         if not self.camera_status_write_enabled:
-            detail["sent"] = True
-            detail["verified"] = True
-            detail["message"] = "Camera status PLC bit writing is disabled."
+            detail.update({
+                "sent": True,
+                "verified": True,
+                "message": "Camera status PLC bit writing is disabled.",
+            })
             return True, detail
+
+        status_by_side = {
+            str(item.get("side", "")).strip().lower(): bool(
+                item.get("connected", False)
+            )
+            for item in camera_status or []
+        }
 
         if str(self.deployment) != "True":
             detail["sent"] = True
             detail["verified"] = "DEMO PASS"
             detail["message"] = "DEPLOYMENT=False. Camera status bits demo pass."
-
             for side, addr in self.camera_status_bits.items():
                 detail["items"].append({
                     "side": side,
@@ -432,78 +628,80 @@ class FullHardwareChecker:
                     "read_back_value": "DEMO PASS",
                     "verified": "DEMO PASS",
                 })
-
             return True, detail
 
-        if client is None:
-            detail["message"] = "Camera status bits not sent because PLC client is None."
-            return False, detail
+        groups = {}
+        for side, addr in self.camera_status_bits.items():
+            key = (int(addr["db"]), int(addr["byte"]))
+            groups.setdefault(key, []).append((side, int(addr["bit"])))
 
-        status_by_side = {
-            str(item.get("side", "")).strip().lower(): bool(item.get("connected", False))
-            for item in camera_status or []
-        }
-
-        try:
-            all_verified = True
-
-            for side, addr in self.camera_status_bits.items():
-                value_to_write = bool(status_by_side.get(side, False))
-
-                db = int(addr["db"])
-                byte = int(addr["byte"])
-                bit = int(addr["bit"])
-                address = f"DB{db}.DBX{byte}.{bit}"
-
-                self._write_db_bit(
-                    client=client,
-                    db_number=db,
-                    byte_index=byte,
-                    bit_index=bit,
-                    value=value_to_write,
+        last_error = None
+        for attempt in range(1, 3):
+            try:
+                client = self._ensure_checker_plc(
+                    client,
+                    force_reconnect=(attempt > 1),
                 )
+                attempt_items = []
+                all_verified = True
 
-                time.sleep(0.02)
+                for (db, byte_index), entries in groups.items():
+                    with _PLC_IO_LOCK:
+                        original = client.db_read(db, byte_index, 1)[0]
+                        requested = original
+                        for side, bit_index in entries:
+                            value = bool(status_by_side.get(side, False))
+                            if value:
+                                requested |= (1 << bit_index)
+                            else:
+                                requested &= ~(1 << bit_index)
 
-                read_back = self._read_db_bit(
-                    client=client,
-                    db_number=db,
-                    byte_index=byte,
-                    bit_index=bit,
+                        client.db_write(db, byte_index, bytes([requested]))
+                        time.sleep(0.05)
+                        read_back_byte = client.db_read(db, byte_index, 1)[0]
+
+                    for side, bit_index in entries:
+                        expected = bool(status_by_side.get(side, False))
+                        actual = bool(read_back_byte & (1 << bit_index))
+                        verified = actual == expected
+                        all_verified = all_verified and verified
+                        address = f"DB{db}.DBX{byte_index}.{bit_index}"
+                        attempt_items.append({
+                            "side": side,
+                            "address": address,
+                            "value_written": expected,
+                            "read_back_value": actual,
+                            "verified": verified,
+                        })
+                        print(
+                            f"[PLC][CAMERA_STATUS] {side} -> {address} "
+                            f"write={expected} read_back={actual} "
+                            f"verified={verified}"
+                        )
+
+                detail["items"] = attempt_items
+                detail["sent"] = True
+                detail["verified"] = bool(all_verified)
+                if all_verified:
+                    detail["message"] = (
+                        "Camera status bits written and verified in PLC."
+                    )
+                    return True, detail
+                last_error = (
+                    "one or more camera status bits failed read-back verification"
                 )
-
-                verified = bool(read_back) == bool(value_to_write)
-                all_verified = all_verified and verified
-
-                detail["items"].append({
-                    "side": side,
-                    "address": address,
-                    "value_written": value_to_write,
-                    "read_back_value": bool(read_back),
-                    "verified": verified,
-                })
-
+            except Exception as exc:
+                last_error = str(exc)
                 print(
-                    f"[PLC][CAMERA_STATUS] {side} -> {address} "
-                    f"write={value_to_write} read_back={bool(read_back)} verified={verified}"
+                    f"[PLC][CAMERA_STATUS][WARN] "
+                    f"attempt={attempt}/2 error={exc}"
                 )
 
-            detail["sent"] = True
-            detail["verified"] = bool(all_verified)
+        detail["message"] = (
+            f"Failed to write/verify camera status PLC bits: {last_error}"
+        )
+        return False, detail
 
-            if all_verified:
-                detail["message"] = "Camera status bits written and verified in PLC."
-                return True, detail
-
-            detail["message"] = "One or more camera status PLC bits failed read-back verification."
-            return False, detail
-
-        except Exception as e:
-            detail["message"] = f"Failed to write/verify camera status PLC bits: {e}"
-            return False, detail
-    # --------------------------------------------------------
-    # LIGHT MANUAL FEEDBACK
-    # --------------------------------------------------------
     def _check_light_feedback(self):
         lights = {}
         for i in range(1, 6):
@@ -634,59 +832,67 @@ class FullHardwareChecker:
     # LASER
     # --------------------------------------------------------
     def _check_teledyne_laser(self):
-        sapera_path = self.env.get("SAPERA_CAMEXPERT_PATH", "")
-        laser_config_file = self.env.get("LASER_CONFIG_FILE", "")
+        """Run an optional, connection-only Z-Trak check.
 
-        possible_paths = []
-        if sapera_path:
-            possible_paths.append(sapera_path)
-
-        possible_paths.extend([
-            r"C:\Program Files\Teledyne DALSA\Sapera\CamExpert\CamExpert.exe",
-            r"C:\Program Files\Teledyne DALSA\Sapera LT\CamExpert\CamExpert.exe",
-            r"C:\Program Files\Teledyne DALSA\Sapera\Bin",
-            r"C:\Program Files\Teledyne DALSA\Sapera LT\Bin",
-        ])
-
-        found_paths = [p for p in possible_paths if p and os.path.exists(p)]
-
+        This uses src/Laser/safe_find_ztrak.py, which follows the same Sapera
+        discovery/open path as the capture runner but does not apply features,
+        start acquisition, turn the laser on, or save files.
+        """
         detail = {
-            "sapera_env_path": sapera_path,
-            "found_paths": found_paths,
-            "laser_config_file": laser_config_file,
-            "laser_config_exists": bool(laser_config_file and os.path.exists(laser_config_file)),
+            "check_enabled": bool(self.laser_connection_check_enabled),
+            "required": bool(self.require_laser),
+            "targets": list(self.laser_connection_target_serials),
             "connected": False,
+            "skipped": False,
             "message": "",
+            "devices": [],
+            "detected": [],
+            "missing": [],
         }
 
         print("\n" + "=" * 70)
-        print("[TEST MODE] TELEDYNE / SAPERA LASER CHECK")
+        print("[TEST MODE] TELEDYNE / SAPERA LASER CONNECTION CHECK")
         print("=" * 70)
-        print(f"SAPERA_CAMEXPERT_PATH = {sapera_path}")
-        print(f"FOUND_PATHS = {found_paths}")
-        print(f"LASER_CONFIG_FILE = {laser_config_file}")
+        print(f"CHECK_ENABLED = {self.laser_connection_check_enabled}")
+        print(f"REQUIRE_LASER = {self.require_laser}")
+        print(f"TARGET_SERIALS = {self.laser_connection_target_serials}")
+        print("MODE = CONNECTION ONLY (NO CONFIG / NO CAPTURE)")
         print("=" * 70 + "\n")
 
         if str(self.deployment) != "True":
             detail["connected"] = True
-            detail["message"] = "DEMO PASS"
-            return True, "DEPLOYMENT=False. Demo laser pass.", detail
+            detail["message"] = "DEPLOYMENT=False. Demo laser pass."
+            return True, detail["message"], detail
 
-        if not found_paths:
-            detail["message"] = "Sapera/CamExpert path not found."
+        if not self.laser_connection_check_enabled:
+            detail["skipped"] = True
+            detail["connected"] = True
+            detail["message"] = (
+                "Optional laser connection check is disabled by "
+                "LASER_CONNECTION_CHECK_ENABLED=False."
+            )
+            return True, detail["message"], detail
+
+        try:
+            from src.Laser.safe_find_ztrak import check_ztrak_connections
+
+            result = check_ztrak_connections(
+                self.laser_connection_target_serials,
+                sapera_dll=self.laser_sapera_dll,
+                open_device=True,
+            )
+            detail.update(result)
+            detail["check_enabled"] = True
+            detail["required"] = bool(self.require_laser)
+            detail["connected"] = bool(result.get("ok", False))
+            ok = bool(result.get("ok", False))
+            return ok, str(result.get("message", "Laser check completed.")), detail
+
+        except Exception as exc:
+            detail["connected"] = False
+            detail["message"] = f"Laser connection check failed: {exc}"
+            detail["error"] = str(exc)
             return False, detail["message"], detail
-
-        if not laser_config_file:
-            detail["message"] = "LASER_CONFIG_FILE is empty. Laser hardware/config not verified."
-            return False, detail["message"], detail
-
-        if not os.path.exists(laser_config_file):
-            detail["message"] = f"Laser config file not found: {laser_config_file}"
-            return False, detail["message"], detail
-
-        detail["connected"] = True
-        detail["message"] = "Sapera path and laser config file found."
-        return True, detail["message"], detail
 
     # --------------------------------------------------------
     # MAIN
@@ -718,18 +924,21 @@ class FullHardwareChecker:
 
         plc_ok, plc_client, plc_msg, plc_detail = self._connect_plc()
         result["plc_ok"] = plc_ok
+        self._active_plc_client = plc_client
         result["plc_client"] = plc_client
         result["details"]["plc"] = plc_detail
         result["messages"].append(plc_msg)
 
         camera_ok, multi_cam, camera_msg, camera_detail = self._check_lucid_cameras(plc_client=plc_client)
         result["camera_ok"] = camera_ok
+        self._multi_cam = multi_cam
         result["multi_cam"] = multi_cam
+        _HARDWARE_STATE["multi_cam"] = multi_cam
         result["details"]["camera"] = camera_detail
         result["messages"].append(camera_msg)
 
         camera_status_bits_ok, camera_status_bits_detail = self._send_camera_status_bits(
-            client=plc_client,
+            client=self._active_plc_client,
             camera_status=camera_detail.get("camera_status", []),
         )
 
@@ -763,19 +972,57 @@ class FullHardwareChecker:
             result["messages"].append("Light check is bypassed using REQUIRE_LIGHTS=False.")
 
         if not self.require_laser:
-            result["messages"].append("Laser check is bypassed using REQUIRE_LASER=False.")
+            result["messages"].append(
+                "Laser failure does not block APP_OK because REQUIRE_LASER=False."
+            )
 
         app_ok_sent, app_ok_detail = self._send_application_ok_bit(
-            plc_client,
+            self._active_plc_client,
             checks_ok_before_app_bit,
         )
         result["app_ok_sent"] = app_ok_sent
         result["details"]["application_ok_bit"] = app_ok_detail
         result["messages"].append(app_ok_detail.get("message", "-"))
 
+        result["plc_client"] = self._active_plc_client
+        if self._multi_cam is not None and hasattr(
+            self._multi_cam, "set_plc_interface"
+        ):
+            self._multi_cam.set_plc_interface(self._active_plc_client)
+
         result["overall_ok"] = checks_ok_before_app_bit and app_ok_sent
 
         return result
+
+
+def _show_test_page_message(test_page, level, title, text, informative_text="", details=""):
+    """Show a white readable popup even when the application uses a dark palette."""
+    modern = getattr(test_page, "show_modern_message", None)
+    if callable(modern):
+        return modern(level, title, text, informative_text=informative_text, details=details)
+
+    icon_map = {
+        "information": QMessageBox.Information,
+        "warning": QMessageBox.Warning,
+        "critical": QMessageBox.Critical,
+    }
+    box = QMessageBox(test_page)
+    box.setWindowTitle(title)
+    box.setIcon(icon_map.get(level, QMessageBox.Information))
+    box.setTextFormat(Qt.PlainText)
+    box.setText(text)
+    if informative_text:
+        box.setInformativeText(informative_text)
+    if details:
+        box.setDetailedText(details)
+    box.setStandardButtons(QMessageBox.Ok)
+    box.setStyleSheet("""
+        QMessageBox, QMessageBox QWidget { background:#FFFFFF; color:#172033; }
+        QMessageBox QLabel { background:transparent; color:#172033; min-width:440px; font:600 10px 'Segoe UI'; }
+        QMessageBox QPushButton { min-width:92px; min-height:32px; border-radius:7px; border:1px solid #6D28D9; background:#6D28D9; color:#FFFFFF; font:700 10px 'Segoe UI'; }
+        QMessageBox QPlainTextEdit { background:#F8FAFC; color:#172033; border:1px solid #DCE3EC; }
+    """)
+    return box.exec_()
 
 
 class FullHardwareCheckWorker(QObject):
@@ -804,14 +1051,18 @@ def start_full_hardware_check_from_test_page(test_page, media_path):
     existing_thread = getattr(test_page, "_hardware_check_thread", None)
 
     if existing_thread is not None and existing_thread.isRunning():
-        QMessageBox.information(
+        _show_test_page_message(
             test_page,
+            "information",
             "Hardware Check",
             "Full hardware check is already running.",
         )
         return
 
-    reset_hardware_state()
+    # Release previous Test Mode resources before a rerun. Otherwise an old
+    # Snap7 session or Arena manager can cause Receive timeout / Not connected.
+    reset_hardware_state(release_resources=True)
+    _HARDWARE_STATE["check_running"] = True
 
     light_feedback = {}
     if hasattr(test_page, "get_light_feedback"):
@@ -838,10 +1089,23 @@ def start_full_hardware_check_from_test_page(test_page, media_path):
 
         _apply_result_to_test_page(test_page, result)
 
+        _HARDWARE_STATE["check_running"] = False
         _HARDWARE_STATE["ready"] = bool(result.get("overall_ok"))
         _HARDWARE_STATE["last_result"] = result
         _HARDWARE_STATE["plc_client"] = result.get("plc_client")
         _HARDWARE_STATE["multi_cam"] = result.get("multi_cam")
+
+        if not result.get("overall_ok"):
+            # A failed test must not retain half-initialized hardware handles.
+            failed_manager = result.get("multi_cam")
+            failed_client = result.get("plc_client")
+            _HARDWARE_STATE["plc_client"] = None
+            _HARDWARE_STATE["multi_cam"] = None
+            _close_camera_manager(failed_manager)
+            with _PLC_IO_LOCK:
+                _disconnect_plc_client(failed_client)
+            result["plc_client"] = None
+            result["multi_cam"] = None
 
         # Save Test Mode result to MongoDB.
         # This must happen after result is available, but it should not block hardware state.
@@ -854,23 +1118,28 @@ def start_full_hardware_check_from_test_page(test_page, media_path):
         messages = "\n".join(result.get("messages", []))
 
         if result.get("overall_ok"):
-            QMessageBox.information(
+            _show_test_page_message(
                 test_page,
+                "information",
                 "System Ready",
-                "All checks passed.\n\nApplication OK bit sent to PLC.\nLive Inspection is now allowed.",
+                "All hardware checks passed.",
+                informative_text="The Application OK bit was verified and Live Inspection is allowed.",
             )
         else:
-            QMessageBox.warning(
+            _show_test_page_message(
                 test_page,
+                "warning",
                 "Hardware Check Failed",
-                "Live Inspection is blocked because one or more checks failed.\n\n"
-                f"{messages}",
+                "Live Inspection remains blocked.",
+                informative_text="One or more required hardware checks failed.",
+                details=messages,
             )
 
         thread.quit()
 
     def on_error(message):
-        reset_hardware_state()
+        _HARDWARE_STATE["check_running"] = False
+        reset_hardware_state(release_resources=True)
 
         _set_status(test_page.m99_dot, test_page.m99_txt, "err", "PLC check error")
         _set_status(test_page.cam_dot, test_page.cam_txt, "err", "Camera check error")
@@ -879,10 +1148,12 @@ def start_full_hardware_check_from_test_page(test_page, media_path):
 
         _set_progress(test_page, "fail")
 
-        QMessageBox.critical(
+        _show_test_page_message(
             test_page,
+            "critical",
             "Hardware Check Error",
-            f"Full hardware check failed:\n\n{message}",
+            "The full hardware check could not be completed.",
+            informative_text=str(message),
         )
 
         thread.quit()
@@ -894,6 +1165,7 @@ def start_full_hardware_check_from_test_page(test_page, media_path):
     thread.finished.connect(thread.deleteLater)
 
     def cleanup():
+        _HARDWARE_STATE["check_running"] = False
         test_page._hardware_check_thread = None
         test_page._hardware_check_worker = None
 
@@ -936,17 +1208,43 @@ def _apply_result_to_test_page(test_page, result):
         "\n".join(light_lines),
     )
 
-    # LASER - concise display
+    # LASER - connection-only optional/required display
     laser_ok = bool(result.get("laser_ok"))
-    laser_text = (
-        f"Laser Status: {_tick(laser_ok)}\n"
-        f"Message: {laser.get('message', '-')}"
-    )
+    laser_skipped = bool(laser.get("skipped", False))
+    laser_required = bool(laser.get("required", False))
+    targets = laser.get("targets", []) or []
+    detected = laser.get("detected", []) or []
+    device_lines = []
+    for item in laser.get("devices", []) or []:
+        serial = item.get("serial", "-")
+        opened = bool(item.get("opened", False))
+        device_lines.append(
+            f"{serial}: {'✅ CONNECTED' if opened else '❌ NOT CONNECTED'} "
+            f"| {item.get('message', '-')}"
+        )
+
+    if laser_skipped:
+        laser_state = "off"
+        laser_text = (
+            "Laser Status: OPTIONAL CHECK DISABLED\n"
+            f"Message: {laser.get('message', '-')}"
+        )
+    else:
+        laser_state = "ok" if laser_ok else "err"
+        requirement_text = "REQUIRED" if laser_required else "OPTIONAL / NON-BLOCKING"
+        laser_text = (
+            f"Laser Status: {_tick(laser_ok)} ({requirement_text})\n"
+            f"Targets: {', '.join(map(str, targets)) if targets else 'Any accessible Z-Trak'}\n"
+            f"Detected: {', '.join(map(str, detected)) if detected else '-'}\n"
+            f"Message: {laser.get('message', '-')}"
+        )
+        if device_lines:
+            laser_text += "\n\n" + "\n".join(device_lines)
 
     _set_status(
         test_page.laser_dot,
         test_page.laser_txt,
-        "ok" if laser_ok else "err",
+        laser_state,
         laser_text,
     )
 

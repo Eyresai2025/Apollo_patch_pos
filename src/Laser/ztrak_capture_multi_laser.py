@@ -51,11 +51,14 @@ DEFAULT_CONVERTER = {
     "full_resolution_ply": True,
     "debug_ply_step": 1,
     "ply_format": "ascii",
-    "center_z": True,
+    "center_z": False,
     "invalid_c_value": 65535,
-    "x_scaler_um": 10.0,
+    "x_scaler_um": 140.0,
     "z_scaler_um": 5.0,
-    "y_step_mm": 1.0,             # TODO: replace with encoder/conveyor mm-per-profile.
+    "y_step_mm": 0.140,
+    "geometry_source": "USERSET_READBACK",
+    "coordinate_unit": "Micrometer",
+    "include_reflectance_property": True,
 }
 
 # If True, both lasers will save full-resolution ASCII PLY.
@@ -67,22 +70,26 @@ LASER_CONFIGS = {
     # Existing 2K Z-Trak laser
     "M0006674": {
         "label": "laser_1_ztrak_2k_M0006674",
-        "config_mode": "PYTHON",       # Change to "USERSET1" after saving UserSet1 in Z-Expert.
+        "config_mode": "USERSET1",
         "userset_name": "UserSet1",
-        "apply_safe_overrides_after_userset": True,
+        "expected_displacement_y_um": 140.0,
+        "apply_safe_overrides_after_userset": False,
         "write_locked_features": False,
         "safe_features": {
             "laserActivation": "On",
             "laserControlMode": "Manual",
             "laserPower": 2047,
-            "peakDetectorReflectanceThreshold": 256,
+            "peakDetectorReflectanceThreshold": 512,
             "noiseReductionLevel": 16,
+            "firSize": "fir11",
             "profilesPerScan": 17150,
+            "profileMedianFilterMode": "On3x1",
+            "displacementY": 140.0,
             "TriggerMode": "Off",
         },
         "optional_locked_features": {
             # These previously returned False/popup on your setup.
-            "profileRate": 8000.0,
+            "AcquisitionLineRate": 8000.0,
             "ExposureTime": 100.0,
             "Gain": 4.0,
         },
@@ -90,20 +97,24 @@ LASER_CONFIGS = {
             "full_resolution_ply": True,
             "debug_ply_step": 1,
             "ply_format": "ascii",
-            "center_z": True,
+            "center_z": False,
             "invalid_c_value": 65535,
-            "x_scaler_um": 10.0,
+            "x_scaler_um": 140.0,
             "z_scaler_um": 5.0,
-            "y_step_mm": 1.0,
+            "y_step_mm": 0.140,
+            "geometry_source": "USERSET_READBACK",
+            "coordinate_unit": "Micrometer",
+            "include_reflectance_property": True,
         },
     },
 
     # New 4K LP2C laser. Gain is not added because your screenshot does not show Gain.
     "M0006994": {
         "label": "laser_2_lp2c_4k_M0006994",
-        "config_mode": "PYTHON",       # Change to "USERSET1" if you save UserSet1 in Z-Expert.
+        "config_mode": "USERSET1",
         "userset_name": "UserSet1",
-        "apply_safe_overrides_after_userset": True,
+        "expected_displacement_y_um": 990.0,
+        "apply_safe_overrides_after_userset": False,
         "write_locked_features": False,
         "safe_features": {
             "laserActivation": "On",
@@ -111,24 +122,29 @@ LASER_CONFIGS = {
             "laserPower": 2047,
             "peakDetectorReflectanceThreshold": 128,
             # Screenshot shows FIR Size = 5. If this feature name is different, code will skip it.
-            "firSize": 5,
+            "firSize": "fir5",
             "profilesPerScan": 5000,
+            "profileMedianFilterMode": "On3x1",
+            "displacementY": 990.0,
             "TriggerMode": "Off",
         },
         "optional_locked_features": {
             # From your Z-Expert screenshot for LP2C-4K0-0300-R3:
-            "profileRate": 323.625,
+            "AcquisitionLineRate": 323.625,
             "ExposureTime": 200.0,
         },
         "converter": {
             "full_resolution_ply": True,
             "debug_ply_step": 1,
             "ply_format": "ascii",
-            "center_z": True,
+            "center_z": False,
             "invalid_c_value": 65535,
-            "x_scaler_um": 10.0,
+            "x_scaler_um": 140.0,
             "z_scaler_um": 5.0,
-            "y_step_mm": 1.0,
+            "y_step_mm": 0.140,
+            "geometry_source": "USERSET_READBACK",
+            "coordinate_unit": "Micrometer",
+            "include_reflectance_property": True,
         },
     },
 }
@@ -234,7 +250,7 @@ def _apply_environment_overrides():
                 DEFAULT_CONVERTER.get("ply_format", "ascii"),
             ).strip().lower(),
             "center_z": _env_bool(
-                "APOLLO_LASER_CENTER_Z", DEFAULT_CONVERTER.get("center_z", True)
+                "APOLLO_LASER_CENTER_Z", DEFAULT_CONVERTER.get("center_z", False)
             ),
             "invalid_c_value": _env_int(
                 "APOLLO_LASER_INVALID_C_VALUE",
@@ -244,7 +260,7 @@ def _apply_environment_overrides():
             ),
             "x_scaler_um": _env_float(
                 "APOLLO_LASER_X_SCALER_UM",
-                DEFAULT_CONVERTER.get("x_scaler_um", 10.0),
+                DEFAULT_CONVERTER.get("x_scaler_um", 140.0),
                 0.000001,
             ),
             "z_scaler_um": _env_float(
@@ -254,7 +270,7 @@ def _apply_environment_overrides():
             ),
             "y_step_mm": _env_float(
                 "APOLLO_LASER_Y_STEP_MM",
-                DEFAULT_CONVERTER.get("y_step_mm", 1.0),
+                DEFAULT_CONVERTER.get("y_step_mm", 0.140),
                 0.000001,
             ),
         }
@@ -358,19 +374,57 @@ def now_stamp():
     return time.strftime("%Y%m%d_%H%M%S")
 
 
+FEATURE_NAME_ALIASES = {
+    # Z-Expert display: Profile Median Filter Mode
+    "profileMedianFilterMode": (
+        "profileMedianFilterMode",
+        "ProfileMedianFilterMode",
+    ),
+    # Z-Expert display: Displacement Between Samples Y
+    "displacementY": (
+        "displacementY",
+        "DisplacementY",
+    ),
+    # Backward-compatible UI/config alias.
+    "displacementBetweenSamplesY": (
+        "displacementY",
+        "DisplacementY",
+    ),
+}
+
+
 def try_set_feature(acq_device, name, value):
-    try:
-        if not acq_device.IsFeatureAvailable(name):
-            print(f"[SKIP] Feature not available: {name}")
-            return False
+    candidates = FEATURE_NAME_ALIASES.get(name, (name,))
+    last_error = None
 
-        ok = acq_device.SetFeatureValue(name, value)
-        print(f"[SET] {name} = {value} -> {ok}")
-        return bool(ok)
+    for candidate in candidates:
+        try:
+            if not acq_device.IsFeatureAvailable(candidate):
+                continue
 
-    except Exception as e:
-        print(f"[WARN] Could not set {name}={value}: {e}")
-        return False
+            ok = acq_device.SetFeatureValue(candidate, value)
+            print(
+                f"[SET] {name} via {candidate} = {value} -> {ok}",
+                flush=True,
+            )
+            return bool(ok)
+
+        except Exception as error:
+            last_error = error
+            print(
+                f"[WARN] Could not set {name} via {candidate}={value}: {error}",
+                flush=True,
+            )
+
+    if last_error is not None:
+        print(f"[WARN] Feature write failed for {name}: {last_error}", flush=True)
+    else:
+        print(
+            f"[SKIP] Feature not available: {name} "
+            f"(tried {', '.join(candidates)})",
+            flush=True,
+        )
+    return False
 
 
 def try_execute_command_feature(acq_device, name):
@@ -410,6 +464,202 @@ def update_features_from_device(acq_device):
     except Exception as e:
         print("[WARN] UpdateFeaturesFromDevice failed:", e)
         return False
+
+
+
+
+def parse_feature_ccf(path):
+    values = {}
+    path = Path(path)
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "\t" in line:
+            key, value = line.split("\t", 1)
+        elif "=" in line:
+            key, value = line.split("=", 1)
+        else:
+            continue
+        values[key.strip()] = value.strip()
+    return values
+
+
+def _ccf_float(values, name, default=None):
+    try:
+        raw = values.get(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        return float(str(raw).strip())
+    except Exception:
+        return default
+
+
+def read_verified_userset_geometry(acq_device, cfg, serial, output_dir):
+    """Save active features, verify the UserSet, and return PLY geometry.
+
+    Coord3D_CR16 stores C and R.  X and Y are implicit and must come from
+    the active Z-Trak UserSet.  The returned values are in micrometres to
+    match Sapera's native PLY export.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
+    userset = str(cfg.get("userset_name", "UserSet1"))
+    ccf_path = output_dir / f"{serial}_{userset}_active_features.ccf"
+
+    try:
+        save_ok = bool(acq_device.SaveFeatures(str(ccf_path)))
+    except Exception as error:
+        raise RuntimeError(f"Could not save active laser features: {error}") from error
+    print(f"[USERSET READBACK] SaveFeatures -> {save_ok} | {ccf_path}")
+    if not save_ok:
+        raise RuntimeError("Active UserSet feature snapshot could not be saved")
+
+    values = parse_feature_ccf(ccf_path)
+    profiles = _ccf_float(values, "profilesPerScan")
+    line_rate = _ccf_float(values, "AcquisitionLineRate")
+    exposure = _ccf_float(values, "ExposureTime")
+    x_step_um = _ccf_float(values, "streamed_uniformXStepSize")
+    y_step_um = _ccf_float(values, "streamed_displacementY")
+    aoi_start_x_um = _ccf_float(values, "streamed_aoiNFOVStartX")
+    aoi_width_um = _ccf_float(values, "streamed_aoiNFOVWidth")
+    aoi_z_start_um = _ccf_float(values, "streamed_aoiZStart")
+    aoi_height_um = _ccf_float(values, "streamed_aoiHeight")
+    distance_unit = str(values.get("Scan3dDistanceUnit", "")).strip()
+
+    required = {
+        "profilesPerScan": profiles,
+        "streamed_uniformXStepSize": x_step_um,
+        "streamed_displacementY": y_step_um,
+        "streamed_aoiNFOVStartX": aoi_start_x_um,
+        "streamed_aoiNFOVWidth": aoi_width_um,
+        "streamed_aoiZStart": aoi_z_start_um,
+        "streamed_aoiHeight": aoi_height_um,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise RuntimeError(
+            "LASER CONFIG VERIFICATION FAILED: unreadable required features: "
+            + ", ".join(missing)
+        )
+    if x_step_um <= 0 or y_step_um <= 0:
+        raise RuntimeError("LASER CONFIG VERIFICATION FAILED: X/Y spacing must be positive")
+    if distance_unit.lower() not in {"micrometer", "micrometre", "um", "µm"}:
+        raise RuntimeError(
+            f"LASER CONFIG VERIFICATION FAILED: expected Micrometer, got {distance_unit!r}"
+        )
+
+
+    # Verify the acquisition/filter values that are expected from the selected
+    # UserSet.  noiseReductionLevel is omitted when Sapera does not persist it
+    # in the CCF; all other listed values are treated as production-critical.
+    expected_features = {}
+    safe = cfg.get("safe_features", {}) or {}
+    optional = cfg.get("optional_locked_features", {}) or {}
+    for feature_name in (
+        "profilesPerScan",
+        "laserPower",
+        "peakDetectorReflectanceThreshold",
+        "profileMedianFilterMode",
+        "firSize",
+        "TriggerMode",
+    ):
+        if feature_name in safe:
+            expected_features[feature_name] = safe[feature_name]
+    if "AcquisitionLineRate" in optional:
+        expected_features["AcquisitionLineRate"] = optional["AcquisitionLineRate"]
+    elif "profileRate" in optional:
+        expected_features["AcquisitionLineRate"] = optional["profileRate"]
+    if "ExposureTime" in optional:
+        expected_features["ExposureTime"] = optional["ExposureTime"]
+
+    feature_mismatches = []
+    print("\n[USERSET CRITICAL FEATURE VERIFY]")
+    for feature_name, expected in expected_features.items():
+        actual_raw = values.get(feature_name)
+        if actual_raw is None:
+            feature_mismatches.append(
+                f"{feature_name}: expected={expected}, actual=<missing>"
+            )
+            print(f"[FAIL] {feature_name}: expected={expected} actual=<missing>")
+            continue
+
+        expected_text = str(expected).strip()
+        actual_text = str(actual_raw).strip()
+        if feature_name == "firSize" and not expected_text.lower().startswith("fir"):
+            expected_text = f"fir{expected_text}"
+
+        expected_number = _ccf_float({"v": expected_text}, "v")
+        actual_number = _ccf_float({"v": actual_text}, "v")
+        if expected_number is not None and actual_number is not None:
+            tolerance = max(1e-6, abs(expected_number) * 1e-6)
+            matches = abs(expected_number - actual_number) <= tolerance
+        else:
+            matches = expected_text.lower() == actual_text.lower()
+
+        status = "PASS" if matches else "FAIL"
+        print(
+            f"[{status}] {feature_name}: expected={expected_text} actual={actual_text}"
+        )
+        if not matches:
+            feature_mismatches.append(
+                f"{feature_name}: expected={expected_text}, actual={actual_text}"
+            )
+
+    if feature_mismatches:
+        raise RuntimeError(
+            "LASER CONFIG VERIFICATION FAILED: " + "; ".join(feature_mismatches)
+        )
+
+    expected_y = cfg.get("expected_displacement_y_um")
+    if expected_y is None:
+        expected_y = 140.0 if serial == "M0006674" else 990.0 if serial == "M0006994" else None
+    if expected_y is not None and abs(float(y_step_um) - float(expected_y)) > 1e-6:
+        raise RuntimeError(
+            "LASER CONFIG VERIFICATION FAILED: "
+            f"serial={serial} expected displacementY={expected_y}, actual={y_step_um}"
+        )
+
+    # Current validated Z-Trak Coord3D_CR16 C scaling is 5 micrometres/raw unit.
+    z_scale_um = float(cfg.get("converter", {}).get("z_scaler_um", 5.0))
+
+    geometry = {
+        "source": "USERSET1_DEVICE_READBACK",
+        "serial": serial,
+        "userset": userset,
+        "distance_unit": "Micrometer",
+        "profiles_per_scan": int(round(profiles)),
+        "line_rate_hz": line_rate,
+        "exposure_us": exposure,
+        "x_step_um": float(x_step_um),
+        "y_step_um": float(y_step_um),
+        "z_scale_um": z_scale_um,
+        "aoi_start_x_um": float(aoi_start_x_um),
+        "aoi_width_um": float(aoi_width_um),
+        "aoi_z_start_um": float(aoi_z_start_um),
+        "aoi_height_um": float(aoi_height_um),
+        "y_direction": -1.0,
+        "center_z": False,
+        "include_reflectance_property": True,
+    }
+
+    print("\n[USERSET VERIFY - PASS]")
+    for key in (
+        "serial", "userset", "profiles_per_scan", "line_rate_hz",
+        "exposure_us", "x_step_um", "y_step_um", "z_scale_um",
+        "aoi_start_x_um", "aoi_width_um", "aoi_z_start_um",
+        "aoi_height_um", "distance_unit",
+    ):
+        print(f"{key:<24}: {geometry.get(key)}")
+
+    try:
+        ccf_path.unlink(missing_ok=True)
+        print("[USERSET READBACK CLEANUP] Temporary CCF deleted")
+    except Exception as error:
+        print(f"[WARN] Could not delete temporary CCF: {error}")
+    return geometry
 
 
 def get_buffer_param(buffer, prm_name, dummy):
@@ -541,12 +791,14 @@ def get_laser_config(serial, capture_index):
             "label": default_label,
             "config_mode": "PYTHON",
             "userset_name": "UserSet1",
-            "apply_safe_overrides_after_userset": True,
+            "apply_safe_overrides_after_userset": False,
             "write_locked_features": False,
             "safe_features": {
                 "laserActivation": "On",
                 "laserControlMode": "Manual",
                 "laserPower": 2047,
+                "profileMedianFilterMode": "On3x1",
+                "displacementY": 990.0,
                 "TriggerMode": "Off",
             },
             "optional_locked_features": {},
@@ -557,7 +809,7 @@ def get_laser_config(serial, capture_index):
     cfg.setdefault("label", default_label)
     cfg.setdefault("config_mode", "PYTHON")
     cfg.setdefault("userset_name", "UserSet1")
-    cfg.setdefault("apply_safe_overrides_after_userset", True)
+    cfg.setdefault("apply_safe_overrides_after_userset", False)
     cfg.setdefault("write_locked_features", False)
     cfg.setdefault("safe_features", {})
     cfg.setdefault("optional_locked_features", {})
@@ -618,23 +870,30 @@ def apply_optional_locked_features(acq_device, cfg):
     update_features_from_device(acq_device)
 
 
-def configure_laser(acq_device, cfg):
+def configure_laser(acq_device, cfg, serial, output_dir):
     mode = str(cfg.get("config_mode", "PYTHON")).strip().upper()
     print("\n[CONFIG MODE]", mode)
     print("[CONFIG LABEL]", cfg.get("label"))
 
     if mode == "USERSET1":
-        load_userset(acq_device, cfg.get("userset_name", "UserSet1"))
-        if cfg.get("apply_safe_overrides_after_userset", True):
+        loaded = load_userset(acq_device, cfg.get("userset_name", "UserSet1"))
+        if not loaded:
+            raise RuntimeError(
+                f"Failed to load UserSet {cfg.get('userset_name', 'UserSet1')} "
+                f"for laser {serial}"
+            )
+        if cfg.get("apply_safe_overrides_after_userset", False):
             apply_safe_capture_overrides(acq_device, cfg)
         apply_optional_locked_features(acq_device, cfg)
-        return
+        return read_verified_userset_geometry(acq_device, cfg, serial, output_dir)
 
     if mode == "PYTHON":
         print("\n[PYTHON CONFIGURATION MODE]")
         apply_safe_capture_overrides(acq_device, cfg)
         apply_optional_locked_features(acq_device, cfg)
-        return
+        # Read back the resulting active geometry as well.  This prevents the
+        # PLY converter from using unrelated global X/Y defaults.
+        return read_verified_userset_geometry(acq_device, cfg, serial, output_dir)
 
     raise ValueError(f"Unsupported config_mode={mode!r}. Use 'PYTHON' or 'USERSET1'.")
 
@@ -643,7 +902,7 @@ def configure_laser(acq_device, cfg):
 # CAPTURE
 # =============================================================================
 
-def dump_raw_buffer(buffer, output_dir, serial, cfg):
+def dump_raw_buffer(buffer, output_dir, serial, cfg, geometry):
     timestamp = now_stamp()
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -749,6 +1008,13 @@ def dump_raw_buffer(buffer, output_dir, serial, cfg):
         for k, v in converter_cfg.items():
             f.write(f"{k}={v}\n")
 
+        f.write("\n[VERIFIED_GEOMETRY]\n")
+        for k, v in (geometry or {}).items():
+            if isinstance(v, (dict, list, tuple, bool)) or v is None:
+                f.write(f"{k}={json.dumps(v)}\n")
+            else:
+                f.write(f"{k}={v}\n")
+
     print("[RAW SAVED]", raw_path)
     print("[META SAVED]", meta_path)
 
@@ -799,7 +1065,7 @@ def capture_one_laser(device, capture_index, run_dir):
             raise RuntimeError("SapAcqDevice.Create() failed")
 
         update_features_from_device(acq_device)
-        configure_laser(acq_device, cfg)
+        geometry = configure_laser(acq_device, cfg, serial, laser_dir)
 
         print("\n[CREATE BUFFER]")
         buffer = SapBuffer(NUM_BUFFERS, acq_device, SapBuffer.MemoryType.ScatterGather)
@@ -825,6 +1091,14 @@ def capture_one_laser(device, capture_index, run_dir):
         print("Buffer Format:", buffer.Format)
         print("Buffer Pitch :", buffer.Pitch)
         print("Buffer BPP   :", buffer.BytesPerPixel)
+
+        expected_height = int(geometry.get("profiles_per_scan", int(buffer.Height)))
+        if int(buffer.Height) != expected_height:
+            raise RuntimeError(
+                "LASER CONFIG VERIFICATION FAILED: "
+                f"buffer height={int(buffer.Height)} but UserSet profilesPerScan={expected_height}"
+            )
+        print(f"[USERSET VERIFY] Buffer height matches profilesPerScan: {expected_height}")
 
         print("\n[CREATE TRANSFER]")
         xfer = SapAcqDeviceToBuf(acq_device, buffer)
@@ -863,7 +1137,7 @@ def capture_one_laser(device, capture_index, run_dir):
         print("Space Used  :", buffer.SpaceUsed)
 
         print("\n[DUMP RAW BUFFER]")
-        raw_path, meta_path, byte_count = dump_raw_buffer(buffer, laser_dir, serial, cfg)
+        raw_path, meta_path, byte_count = dump_raw_buffer(buffer, laser_dir, serial, cfg, geometry)
 
         raw_mb = byte_count / (1024 * 1024)
         capture_mbps = raw_mb / capture_sec if capture_sec > 0 else 0.0
@@ -877,11 +1151,12 @@ def capture_one_laser(device, capture_index, run_dir):
             full_resolution_ply=conv.get("full_resolution_ply", True),
             debug_ply_step=conv.get("debug_ply_step", 1),
             ply_format=conv.get("ply_format", "ascii"),
-            center_z=conv.get("center_z", True),
+            center_z=conv.get("center_z", False),
             invalid_c_value=conv.get("invalid_c_value", 65535),
-            x_scaler_um=conv.get("x_scaler_um", 10.0),
+            x_scaler_um=conv.get("x_scaler_um", 140.0),
             z_scaler_um=conv.get("z_scaler_um", 5.0),
-            y_step_mm=conv.get("y_step_mm", 1.0),
+            y_step_mm=conv.get("y_step_mm", 0.140),
+            geometry=geometry,
         )
 
         if not KEEP_RAW_FILE:

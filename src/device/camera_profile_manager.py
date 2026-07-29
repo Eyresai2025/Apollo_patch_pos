@@ -18,51 +18,40 @@ DEFAULT_CAMERA_SETTINGS = {
     "serial": "",
     "enabled": True,
 
-    # Mode
-    "use_hardware_trigger": True,
-
-    # Geometry
+    # Geometry used by the camera and stitched production image.
     "width": 4096,
-    "height": 6000,
-    "pixel_format": "Mono16",
+    "height": 15000,
+    "camera_height": 15000,
+    "final_height": 75000,
+    "pixel_format": "Mono8",
 
-    # Exposure / gain
+    # Exposure / gain.
     "exposure_auto": "Off",
-    "exposure_time": 150.0,
+    "exposure_auto_limit_auto": "Off",
+    "exposure_time": 75.0,
     "gain_auto": "Off",
-    "gain": 0.0,
+    "gain": 24.0,
 
-    # Line rate
+    # Line rate / acquisition.
     "acquisition_line_rate_enable": True,
-    "acquisition_line_rate": 4096.0,
-
-    # Acquisition
+    "acquisition_line_rate": 13117.0,
     "acquisition_mode": "Continuous",
 
-    # Hardware trigger nodes
-    "line_selector": "Line0",
-    "line_mode": "Input",
-    "line_source": "Off",
-    "trigger_selector": "AcquisitionStart",
-    "trigger_source": "Line0",
-    "trigger_activation": "RisingEdge",
-    "trigger_mode": "On",
-
-    # Network
+    # Stream / network.
+    "num_stream_buffers": 16,
     "packet_size": 9000,
+    "packet_delay": 1000,
 }
 
 
 class CameraProfileManager:
     def __init__(self, profile_dir=None):
         """
-        Saves profiles inside:
-            media/camera_profiles/
+        Legacy profile helper retained for compatibility.
 
-        Example:
-            media/camera_profiles/100_camera_config.json
+        Canonical production profiles are saved by SKUDeviceProfileStore under:
+            media/Camera_Profiles/<SKU>/camera_profile.json
         """
-
         if profile_dir is None:
             self.profile_dir = Path("media") / "camera_profiles"
         else:
@@ -72,38 +61,37 @@ class CameraProfileManager:
 
     def profile_path(self, sku_name: str) -> Path:
         sku_name = str(sku_name).strip().replace(" ", "_")
-
         if not sku_name:
             sku_name = "default"
-
         return self.profile_dir / f"{sku_name}_camera_config.json"
 
     def default_profile(self, sku_name: str) -> dict:
         profile = {
             "sku": sku_name,
-            "cameras": {}
+            "schema_version": 2,
+            "profile_type": "camera",
+            "shared_role_profiles_enabled": False,
+            "cameras": {},
         }
 
-        for zone_name, zone_key in ZONE_KEYS.items():
-            profile["cameras"][zone_key] = deepcopy(DEFAULT_CAMERA_SETTINGS)
+        for _zone_name, zone_key in ZONE_KEYS.items():
+            settings = deepcopy(DEFAULT_CAMERA_SETTINGS)
+            if zone_key in ("inner", "bead"):
+                settings["final_height"] = 60000
+            profile["cameras"][zone_key] = settings
 
         return profile
 
     def save_profile(self, sku_name: str, profile_data: dict) -> Path:
         path = self.profile_path(sku_name)
-
         path.parent.mkdir(parents=True, exist_ok=True)
-
         with open(path, "w", encoding="utf-8") as f:
             json.dump(profile_data, f, indent=4)
-
         return path
 
     def load_profile(self, sku_name: str) -> dict:
         path = self.profile_path(sku_name)
-
         if not path.exists():
             return self.default_profile(sku_name)
-
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)

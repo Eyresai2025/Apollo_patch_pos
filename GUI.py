@@ -63,7 +63,12 @@ from src.COMMON.cycle_engine import (
     validate_sku_runtime_assets,
 )
 from src.COMMON.system_check import show_startup_system_popup
-from src.COMMON.full_hardware_check import is_hardware_ready, get_hardware_state
+from src.COMMON.full_hardware_check import (
+    is_hardware_ready,
+    get_hardware_state,
+    ensure_plc_client_connected,
+    plc_io_guard,
+)
 from src.COMMON.component_health_service import ComponentHealthService
 from src.UI.component_health_ui import apply_component_health_to_gui
 from src.Pages.axis_status_page import AxisStatusPage
@@ -550,9 +555,28 @@ class MainWindow(QMainWindow):
                 )
             )
 
-            health = self.component_health_service.get_health(
-                inspection_running=inspection_running
-            )
+            hardware_state = get_hardware_state()
+            # The Full Hardware Check owns the shared PLC and camera resources.
+            # Do not let the 3-second health timer read App-OK/mode concurrently.
+            if hardware_state.get("check_running"):
+                return
+
+            # Validate the stored Test Mode client before each lightweight
+            # health read. The common lock prevents overlap with Live recipe
+            # resolution and Test Mode PLC writes.
+            with plc_io_guard():
+                if deployment and not inspection_running and is_hardware_ready():
+                    try:
+                        ensure_plc_client_connected(env_path=ENV_PATH)
+                    except Exception as reconnect_error:
+                        logger.warning(
+                            f"[HEALTH][PLC] shared PLC reconnect failed: "
+                            f"{reconnect_error}"
+                        )
+
+                health = self.component_health_service.get_health(
+                    inspection_running=inspection_running
+                )
 
             apply_component_health_to_gui(self, health)
 
@@ -882,15 +906,20 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            hardware_state = get_hardware_state()
-            plc_client_from_test = hardware_state.get("plc_client")
-
             try:
-                resolved = resolve_live_sku_from_plc(
-                    plc_client=plc_client_from_test,
-                    media_path=MEDIA_PATH,
-                    env_path=ENV_PATH,
-                )
+                # The successful Test Mode screen is a last-check snapshot.
+                # Revalidate/reconnect the stored PLC session before reading the
+                # active recipe, otherwise a stale snap7 Client raises
+                # "Not connected" even though Test Mode previously passed.
+                with plc_io_guard():
+                    plc_client_from_test = ensure_plc_client_connected(
+                        env_path=ENV_PATH
+                    )
+                    resolved = resolve_live_sku_from_plc(
+                        plc_client=plc_client_from_test,
+                        media_path=MEDIA_PATH,
+                        env_path=ENV_PATH,
+                    )
             except Exception as error:
                 QMessageBox.critical(
                     self,

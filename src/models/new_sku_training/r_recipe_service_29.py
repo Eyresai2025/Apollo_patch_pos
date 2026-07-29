@@ -14,8 +14,6 @@ from PyQt5.QtCore import QThread, pyqtSignal  # type: ignore
 from .ai_team_pipeline import detect_and_crop_utils as dc
 from .ai_team_pipeline import detect_and_crop_fast as dcf
 from .ai_team_pipeline import r_locator_fast as rlf
-from .ai_team_pipeline import detect_and_crop_fast_sidewall2 as dcf_sw2
-from .ai_team_pipeline import r_locator_fast_sidewall2 as rlf_sw2
 
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
 
@@ -57,17 +55,11 @@ def _inject_r_anchor(
     top_box: Dict[str, Any],
     roi: tuple[int, int, int, int],
     circumference_px: int,
-    role: str,
 ) -> Dict[str, Any]:
     payload = json.loads(recipe_path.read_text(encoding="utf-8"))
     x, y, w, h = roi
-    normalized_role = str(role or "").strip().lower()
     anchor = {
-        "source": (
-            "apollo_r_recipe_creation_sidewall2"
-            if normalized_role == "sidewall2"
-            else "apollo_r_recipe_creation"
-        ),
+        "source": "apollo_r_recipe_creation",
         "coordinate_space": "golden_sidewall_image_pixels",
         "golden_image": str(golden_image.resolve()),
         "R1_top_y": int(top_band["top_y"]),
@@ -79,9 +71,6 @@ def _inject_r_anchor(
         "R2_band": _json_safe(bottom_band),
         "teach_roi_xywh": {"x": int(x), "y": int(y), "w": int(w), "h": int(h)},
     }
-    if normalized_role == "sidewall2":
-        anchor["sidewall"] = "sidewall2"
-        anchor["roi_side"] = "right"
     payload["r_anchor"] = anchor
     payload["r1_top_y"] = anchor["R1_top_y"]
     payload["r2_top_y"] = anchor["R2_top_y"]
@@ -102,8 +91,6 @@ def create_fast_recipe(
     match_threshold: float = 0.50,
     fast_score_threshold: float = 0.40,
     left_edge_inset_px: int = 0,
-    left_edge_outset_px: int = 500,
-    right_edge_inset_px: int = 500,
 ) -> Dict[str, Any]:
     """Create one fast-R recipe and retain its useful debugging artifacts.
 
@@ -120,14 +107,7 @@ def create_fast_recipe(
     folder. This avoids the Windows copy error while keeping the verification
     score and pass/fail check unchanged.
     """
-    normalized_role = str(role or "").strip().lower()
-    if normalized_role not in {"sidewall1", "sidewall2"}:
-        raise ValueError(f"Unsupported R recipe role: {role}")
-
-    is_sidewall2 = normalized_role == "sidewall2"
     left_edge_inset_px = max(0, int(left_edge_inset_px))
-    left_edge_outset_px = max(0, int(left_edge_outset_px))
-    right_edge_inset_px = max(0, int(right_edge_inset_px))
     golden = find_golden_image(raw_folder)
     raw = cv2.imread(str(golden), cv2.IMREAD_UNCHANGED)
     if raw is None:
@@ -150,38 +130,10 @@ def create_fast_recipe(
             'Choose another GOOD raw image or verify the R template.'
         )
 
-    # SIDEWALL2 AI reference explicitly sorts by vertical coordinate and uses
-    # the strongest exact-row candidate (or nearest row as a fallback). Keep
-    # the existing SIDEWALL1 selection unchanged.
-    if is_sidewall2:
-        bands = sorted(bands, key=lambda band: int(band["top_y"]))
-        top_band, bottom_band = bands[0], bands[1]
-        exact_candidates = [
-            box for box in boxes
-            if int(box["box"][1]) == int(top_band["top_y"])
-        ]
-        if exact_candidates:
-            top_box = max(
-                exact_candidates,
-                key=lambda box: float(box.get("score", 0.0)),
-            )
-        else:
-            top_box = min(
-                boxes,
-                key=lambda box: abs(
-                    int(box["box"][1]) - int(top_band["top_y"])
-                ),
-            )
-    else:
-        top_band, bottom_band = bands[0], bands[1]
-        top_box = next(
-            (box for box in boxes if box["box"][1] == top_band["top_y"]),
-            None,
-        )
-        if top_box is None:
-            raise RuntimeError(
-                "Unable to resolve the first R match box from tiled detection."
-            )
+    top_band, bottom_band = bands[0], bands[1]
+    top_box = next((b for b in boxes if b['box'][1] == top_band['top_y']), None)
+    if top_box is None:
+        raise RuntimeError('Unable to resolve the first R match box from tiled detection.')
 
     x1, y1, x2, y2 = [int(v) for v in top_box['box']]
     roi = (x1, y1, x2 - x1, y2 - y1)
@@ -205,59 +157,19 @@ def create_fast_recipe(
         if not cv2.imwrite(str(stretched_path), stretched):
             raise OSError(f'Unable to save temporary stretched golden image: {stretched_path}')
 
-        if is_sidewall2:
-            # AI-team SIDEWALL2 recipe: right-half-only search with its own
-            # boundary joining and manual left/right edge corrections.
-            locator_module = rlf_sw2
-            adapter_module = dcf_sw2
-            effective_fast_score_threshold = max(0.50, float(fast_score_threshold))
-            recipe = locator_module.teach(
-                stretched_path,
-                roi=roi,
-                model=model_name,
-                out_dir=temp_dir,
-                measure_circumference=False,
-                circumference_px=circumference_px,
-                score_threshold=effective_fast_score_threshold,
-                use_gradient=False,
-                auto_first_half=True,
-                first_half_thr=0.18,
-                boundary_row_step=10,
-                boundary_smooth=81,
-                boundary_edge_thr=0.06,
-                boundary_mask_close_gap=41,
-                boundary_bridge_gap=301,
-                boundary_edge_pad=10,
-                boundary_min_strong_cols=3,
-                boundary_min_segment_width=25,
-                boundary_min_width_ratio=0.35,
-                use_image_mid_split=True,
-                left_edge_outset_px=left_edge_outset_px,
-                right_edge_inset_px=right_edge_inset_px,
-            )
-            if recipe.roi_side != "right":
-                raise RuntimeError(
-                    "SIDEWALL2 recipe must be taught from an R template in "
-                    "the right half of the image."
-                )
-        else:
-            # Existing SIDEWALL1 logic remains unchanged.
-            locator_module = rlf
-            adapter_module = dcf
-            effective_fast_score_threshold = float(fast_score_threshold)
-            recipe = locator_module.teach(
-                stretched_path,
-                roi=roi,
-                model=model_name,
-                out_dir=temp_dir,
-                measure_circumference=False,
-                circumference_px=circumference_px,
-                score_threshold=effective_fast_score_threshold,
-                use_gradient=False,
-                auto_first_half=True,
-                first_half_thr=0.18,
-                left_edge_inset_px=left_edge_inset_px,
-            )
+        recipe = rlf.teach(
+            stretched_path,
+            roi=roi,
+            model=model_name,
+            out_dir=temp_dir,
+            measure_circumference=False,
+            circumference_px=circumference_px,
+            score_threshold=float(fast_score_threshold),
+            use_gradient=False,
+            auto_first_half=True,
+            first_half_thr=0.18,
+            left_edge_inset_px=left_edge_inset_px,
+        )
 
         # Save the same boundary/search-window debug images produced by the
         # AI team's standalone teach_fast_recipe.py flow.
@@ -266,7 +178,7 @@ def create_fast_recipe(
         if taught_template is None:
             raise FileNotFoundError(f'Taught R template missing: {recipe.template_path}')
 
-        debug_result = locator_module.locate_two_revolutions(
+        debug_result = rlf.locate_two_revolutions(
             stretched,
             recipe,
             circumference_px=circumference_px,
@@ -278,13 +190,11 @@ def create_fast_recipe(
             debug_dir=debug_dir,
         )
 
-        verify = locator_module.verify_recipe(
-            stretched_path, recipe, annotate_path=preview_path
-        )
+        verify = rlf.verify_recipe(stretched_path, recipe, annotate_path=preview_path)
         if not bool(verify.get('verify_ok')):
             raise RuntimeError(
                 f'Fast recipe was created but verification score {verify.get("score", 0):.4f} '
-                f'is below threshold {effective_fast_score_threshold:.4f}.'
+                f'is below threshold {fast_score_threshold:.4f}.'
             )
 
         # Persist all debugging artifacts only after verification succeeds.
@@ -309,7 +219,7 @@ def create_fast_recipe(
         # This is traceability-only and does not change the existing
         # recipe creation pass/fail rule or downstream output schema.
         try:
-            fast_boxes, fast_bands, fast_metadata = adapter_module.detect_r_bands_fast(
+            fast_boxes, fast_bands, fast_metadata = dcf.detect_r_bands_fast(
                 raw,
                 recipe,
                 scale=1,
@@ -336,7 +246,6 @@ def create_fast_recipe(
             top_box=top_box,
             roi=roi,
             circumference_px=circumference_px,
-            role=normalized_role,
         )
 
     result = {
@@ -357,10 +266,7 @@ def create_fast_recipe(
         ],
         'debug_artifact_paths': saved_debug_artifacts,
         'debug_boundary_path': next(
-            (
-                path for path in saved_debug_artifacts
-                if Path(path).name.startswith('P0_boundary')
-            ),
+            (path for path in saved_debug_artifacts if path.endswith('P0_boundary.png')),
             None,
         ),
         'verify_score': float(verify.get('score', 0.0)),
@@ -369,32 +275,10 @@ def create_fast_recipe(
             'R_DETECTION_PATCH_HEIGHT': int(patch_height),
             'R_DETECTION_PATCH_WIDTH': int(patch_width),
             'R_MATCH_THRESHOLD': float(match_threshold),
-            **(
-                {
-                    'SIDEWALL2_BOUNDARY_ROW_STEP': 10,
-                    'SIDEWALL2_BOUNDARY_SMOOTH': 81,
-                    'SIDEWALL2_BOUNDARY_EDGE_THR': 0.06,
-                    'SIDEWALL2_BOUNDARY_MASK_CLOSE_GAP': 41,
-                    'SIDEWALL2_BOUNDARY_BRIDGE_GAP': 301,
-                    'SIDEWALL2_BOUNDARY_EDGE_PAD': 10,
-                    'SIDEWALL2_BOUNDARY_MIN_STRONG_COLS': 3,
-                    'SIDEWALL2_BOUNDARY_MIN_SEGMENT_WIDTH': 25,
-                    'SIDEWALL2_BOUNDARY_MIN_WIDTH_RATIO': 0.35,
-                    'SIDEWALL2_USE_IMAGE_MID_SPLIT': True,
-                    'LEFT_EDGE_OUTSET_PX': int(left_edge_outset_px),
-                    'RIGHT_EDGE_INSET_PX': int(right_edge_inset_px),
-                }
-                if is_sidewall2
-                else {'LEFT_EDGE_INSET_PX': int(left_edge_inset_px)}
-            ),
+            'LEFT_EDGE_INSET_PX': int(left_edge_inset_px),
         },
-        'detector_variant': (
-            'sidewall2_right_half' if is_sidewall2 else 'sidewall1_generic'
-        ),
         'circumference_px': circumference_px,
         'left_edge_inset_px': int(left_edge_inset_px),
-        'left_edge_outset_px': int(left_edge_outset_px),
-        'right_edge_inset_px': int(right_edge_inset_px),
         'runtime_fast_verify_ok': bool(runtime_fast_verify_ok),
         'runtime_fast_band_count': int(len(fast_bands)),
         'runtime_fast_boxes': _json_safe(fast_boxes),

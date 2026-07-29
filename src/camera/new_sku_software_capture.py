@@ -1,36 +1,41 @@
 # src/camera/new_sku_software_capture.py
 # =========================================================
-# New SKU fixed two-image PLC-software-trigger capture
+# New SKU two-stage PLC-software-trigger capture
 #
 # Behaviour:
-#   - Reuses the connected HARDWARE_TRIGGER.MultiCameraManager.
-#   - The Start Capture button arms the capture worker and starts streams once.
-#   - Actual acquisition waits for PLC rising edges.
-#   - Main group trigger: DB74.DBX0.3 (configurable through HARDWARE_TRIGGER/.env).
-#   - Bead trigger      : DB74.DBX86.0 (configurable through HARDWARE_TRIGGER/.env).
-#   - Captures two complete PLC-triggered image sets without stopping streams
-#     between the two sets.
-#   - HARDWARE_TRIGGER.capture_all() performs capture, stitching and software FFC.
-#   - Saves only the returned FFC-corrected images.
-#   - Saves by logical tyre side, never by serial-number folder.
-#   - Stops streams once after all five sides have two images.
+#   - Reuses the validated HARDWARE_TRIGGER.MultiCameraManager.
+#   - Applies the camera profile explicitly selected on the New SKU Capture tab.
+#   - Starts all camera streams once and keeps them open for both trigger sets.
+#   - Trigger set 1 captures one FFC-corrected CALIBRATION image for each side.
+#   - Trigger set 2 captures one FFC-corrected REFERENCE image for each side.
+#   - The same validated shared bead -> innerwall sequence used by Live inspection
+#     is used for both trigger sets.
+#   - Stops all streams once after both complete five-side sets are saved.
 #
 # Save structure:
-#   media/new_sku_images/<SKU>/Cycle_<N>/sidewall1/<files>
-#   media/new_sku_images/<SKU>/Cycle_<N>/sidewall2/<files>
-#   media/new_sku_images/<SKU>/Cycle_<N>/innerwall/<files>
-#   media/new_sku_images/<SKU>/Cycle_<N>/tread/<files>
-#   media/new_sku_images/<SKU>/Cycle_<N>/bead/<files>
+#   media/new_sku_images/<SKU>/Calibration/sidewall1/sidewall1_calibration.png
+#   media/new_sku_images/<SKU>/Calibration/sidewall2/sidewall2_calibration.png
+#   media/new_sku_images/<SKU>/Calibration/innerwall/innerwall_calibration.png
+#   media/new_sku_images/<SKU>/Calibration/tread/tread_calibration.png
+#   media/new_sku_images/<SKU>/Calibration/bead/bead_calibration.png
+#
+#   media/new_sku_images/<SKU>/Cycle_<N>/sidewall1/sidewall1_reference.png
+#   media/new_sku_images/<SKU>/Cycle_<N>/sidewall2/sidewall2_reference.png
+#   media/new_sku_images/<SKU>/Cycle_<N>/innerwall/innerwall_reference.png
+#   media/new_sku_images/<SKU>/Cycle_<N>/tread/tread_reference.png
+#   media/new_sku_images/<SKU>/Cycle_<N>/bead/bead_reference.png
 #
 # Expected total per capture session:
-#   5 sides x 2 images = 10 images
+#   5 calibration images + 5 reference images = 10 images
 # =========================================================
+
+from __future__ import annotations
 
 import os
 import re
 import time
 from datetime import datetime
-from typing import Dict, Optional, Any, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -53,6 +58,9 @@ CAPTURE_SIDE_ORDER: Tuple[str, ...] = (
     "bead",
 )
 
+# Two complete five-side trigger sets are used:
+#   1) calibration
+#   2) reference / normal cycle
 CAPTURE_IMAGES_PER_SIDE = 2
 EXPECTED_TOTAL_IMAGES = len(CAPTURE_SIDE_ORDER) * CAPTURE_IMAGES_PER_SIDE
 
@@ -87,23 +95,32 @@ def _ensure_dir(path: str) -> str:
 
 
 def _save_image_keep_depth(img: np.ndarray, path: str) -> None:
-    """Save the returned Mono image without converting its bit depth."""
+    """Atomically save the returned mono image without changing its bit depth."""
     if img is None:
         raise ValueError("Cannot save a None image")
     if img.ndim != 2:
         raise RuntimeError(f"Expected a 2D mono image, got shape={img.shape}")
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    ok = cv2.imwrite(path, img)
-    if not ok:
-        raise RuntimeError(f"Failed to save image: {path}")
+    target_dir = os.path.dirname(path)
+    os.makedirs(target_dir, exist_ok=True)
+
+    root, ext = os.path.splitext(path)
+    temp_path = f"{root}.writing{ext}"
+    try:
+        ok = cv2.imwrite(temp_path, img)
+        if not ok:
+            raise RuntimeError(f"Failed to save image: {path}")
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def _get_connected_manager(multi_camera_manager=None):
-    """
-    Prefer the Test Mode connected camera manager.
-    If it was not passed, create and connect a fallback manager.
-    """
+    """Prefer the already connected application manager; create a fallback only when needed."""
     if multi_camera_manager is not None:
         return multi_camera_manager, False
 
@@ -132,11 +149,7 @@ def _normalise_captured_results(
     manager,
     captured: Dict[str, Optional[np.ndarray]],
 ) -> Dict[str, Optional[np.ndarray]]:
-    """Normalize manager output to logical side keys.
-
-    The updated HARDWARE_TRIGGER returns side-keyed images already. A serial-key
-    fallback is retained only for compatibility with an older manager build.
-    """
+    """Normalize manager output to logical side keys."""
     output: Dict[str, Optional[np.ndarray]] = {}
     camera_to_side = getattr(manager, "camera_to_side", {}) or {}
 
@@ -153,6 +166,36 @@ def _normalise_captured_results(
     return output
 
 
+def _validate_complete_ffc_set(
+    *,
+    captured: Dict[str, Optional[np.ndarray]],
+    ffc_stats_by_side: Dict[str, Any],
+    stage_label: str,
+) -> None:
+    missing_sides = [
+        side
+        for side in CAPTURE_SIDE_ORDER
+        if side not in captured or captured.get(side) is None
+    ]
+    if missing_sides:
+        raise RuntimeError(
+            f"{stage_label} capture is incomplete. Missing sides: "
+            f"{', '.join(missing_sides)}"
+        )
+
+    ffc_missing_or_disabled = []
+    for side_name in CAPTURE_SIDE_ORDER:
+        side_stats = ffc_stats_by_side.get(side_name)
+        if not isinstance(side_stats, dict) or side_stats.get("enabled") is not True:
+            ffc_missing_or_disabled.append(side_name)
+
+    if ffc_missing_or_disabled:
+        raise RuntimeError(
+            f"Software FFC was not confirmed for {stage_label}. Images will not "
+            f"be saved. Sides: {', '.join(ffc_missing_or_disabled)}"
+        )
+
+
 def capture_new_sku_images(
     sku_name: str,
     media_path: str,
@@ -163,90 +206,127 @@ def capture_new_sku_images(
     meta_collection: str = "New SKU",
     gridfs_bucket: str = "fs",
     capture_delay_sec: float = 0.10,
+    camera_profile_sku: Optional[str] = None,
     logger=print,
-) -> Dict[str, str]:
-    """Capture exactly two PLC-triggered, FFC-corrected images for five sides.
+) -> Dict[str, Any]:
+    """Capture one calibration set and one normal-cycle set for all five sides.
 
-    ``images_per_camera`` and ``train_good_count`` are retained in the function
-    signature so existing NewSKUPage calls remain compatible. The requested
-    production behaviour is fixed to two images per logical side and no
-    train/good subfolder.
+    The function keeps the historical ``images_per_camera`` and
+    ``train_good_count`` arguments so older NewSKUPage calls remain compatible,
+    but the production capture plan is fixed to exactly two complete trigger
+    sets.
 
-    Returns the latest saved image path for every logical side::
+    ``sku_name`` controls where the images are saved. ``camera_profile_sku``
+    controls which file under ``media/Camera_Profiles`` is applied. This lets a
+    newly created SKU use an explicitly selected camera profile without mixing
+    the destination SKU folder with the source profile name.
+
+    Returns a structured payload::
 
         {
-            "sidewall1": ".../Cycle_1/sidewall1/..._02.png",
-            "sidewall2": ".../Cycle_1/sidewall2/..._02.png",
-            "innerwall": ".../Cycle_1/innerwall/..._02.png",
-            "tread": ".../Cycle_1/tread/..._02.png",
-            "bead": ".../Cycle_1/bead/..._02.png",
+            "calibration": {"sidewall1": "...", ...},
+            "cycle": {"sidewall1": "...", ...},
+            "meta": {
+                "capture_cycle": "Cycle_1",
+                "camera_profile_sku": "SKU_001",
+                "calibration_root": ".../Calibration",
+                "cycle_root": ".../Cycle_1",
+            },
         }
     """
-    del images_per_camera, train_good_count  # Fixed capture plan by requirement.
+    del images_per_camera, train_good_count
 
     sku_folder = _safe_name(sku_name)
-    # One complete New SKU capture session is stored in one numeric cycle.
-    # Existing cycles are preserved; the next session becomes Cycle_2, Cycle_3, ...
-    base_out_dir = str(next_cycle_dir(media_path, sku_folder, create=False))
-    cycle_name = os.path.basename(base_out_dir)
+    profile_sku_folder = _safe_name(camera_profile_sku or sku_folder)
 
-    logger("=" * 72)
-    logger("[NEW SKU CAPTURE] Fixed two-image PLC side-based capture started")
-    logger(f"[NEW SKU CAPTURE] SKU               : {sku_folder}")
-    logger(f"[NEW SKU CAPTURE] Sides             : {', '.join(CAPTURE_SIDE_ORDER)}")
-    logger(f"[NEW SKU CAPTURE] Images/side       : {CAPTURE_IMAGES_PER_SIDE}")
-    logger(f"[NEW SKU CAPTURE] Expected total    : {EXPECTED_TOTAL_IMAGES}")
-    logger(f"[NEW SKU CAPTURE] Capture cycle     : {cycle_name}")
-    logger(f"[NEW SKU CAPTURE] Save root         : {base_out_dir}")
-    logger("[NEW SKU CAPTURE] Save layout       : <SKU>/Cycle_<N>/<side>/")
-    logger("[NEW SKU CAPTURE] Trigger mode      : PLC_SOFTWARE")
-    logger("[NEW SKU CAPTURE] Returned images   : FFC-corrected by HARDWARE_TRIGGER")
-    logger("=" * 72)
+    sku_root = os.path.join(media_path, "new_sku_images", sku_folder)
+    calibration_root = os.path.join(sku_root, "Calibration")
+    cycle_root = str(next_cycle_dir(media_path, sku_folder, create=False))
+    cycle_name = os.path.basename(cycle_root)
+
+    stages = (
+        {
+            "key": "calibration",
+            "label": "CALIBRATION SET",
+            "root": calibration_root,
+            "filename_suffix": "calibration",
+            "capture_index": 1,
+            "save_group": "calibration_side_root",
+        },
+        {
+            "key": "cycle",
+            "label": f"REFERENCE SET ({cycle_name})",
+            "root": cycle_root,
+            "filename_suffix": "reference",
+            "capture_index": 2,
+            "save_group": "cycle_side_root",
+        },
+    )
+
+    logger("=" * 76)
+    logger("[NEW SKU CAPTURE] Calibration + reference PLC capture started")
+    logger(f"[NEW SKU CAPTURE] Destination SKU      : {sku_folder}")
+    logger(f"[NEW SKU CAPTURE] Camera profile SKU   : {profile_sku_folder}")
+    logger(f"[NEW SKU CAPTURE] Sides                : {', '.join(CAPTURE_SIDE_ORDER)}")
+    logger(f"[NEW SKU CAPTURE] Trigger sets         : 2 (calibration, reference)")
+    logger(f"[NEW SKU CAPTURE] Expected total       : {EXPECTED_TOTAL_IMAGES}")
+    logger(f"[NEW SKU CAPTURE] Calibration root     : {calibration_root}")
+    logger(f"[NEW SKU CAPTURE] Reference cycle      : {cycle_name}")
+    logger(f"[NEW SKU CAPTURE] Reference root       : {cycle_root}")
+    logger("[NEW SKU CAPTURE] Trigger mode         : PLC_SOFTWARE")
+    logger("[NEW SKU CAPTURE] Images               : FFC-corrected by HARDWARE_TRIGGER")
+    logger("=" * 76)
 
     manager, created_here = _get_connected_manager(multi_camera_manager)
     old_trigger_mode = HT.TRIGGER_MODE
 
-    latest_paths: Dict[str, str] = {}
-    saved_count_by_side = {side: 0 for side in CAPTURE_SIDE_ORDER}
+    saved_paths: Dict[str, Dict[str, str]] = {
+        "calibration": {},
+        "cycle": {},
+    }
+    saved_count_by_stage = {
+        "calibration": {side: 0 for side in CAPTURE_SIDE_ORDER},
+        "cycle": {side: 0 for side in CAPTURE_SIDE_ORDER},
+    }
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     streams_started_here = False
 
     try:
-        # The Start Capture button only arms the capture workflow. The actual
-        # camera TriggerSoftware command is released by HARDWARE_TRIGGER after
-        # the configured PLC bit produces a fresh LOW -> HIGH transition.
-        # Live inspection .env can remain plc_software; the previous mode is
-        # restored in the finally block.
         HT.TRIGGER_MODE = "plc_software"
 
-        # Defensive cleanup if this manager was left streaming by an earlier test.
         if bool(getattr(manager, "_streams_started", False)):
             logger("[NEW SKU CAPTURE] Existing streams detected; resetting once before capture...")
             manager.stop_all_streams()
 
-        # Always load and apply the camera settings for the SKU selected in
-        # the New SKU workflow. This prevents settings from a previously used
-        # SKU (or only the .env defaults) from being used accidentally.
         if not hasattr(manager, "apply_camera_profile"):
             raise RuntimeError(
                 "Connected camera manager does not support apply_camera_profile(). "
                 "Update src/camera/HARDWARE_TRIGGER.py."
             )
 
-        logger(f"[NEW SKU CAPTURE] Loading camera profile for SKU={sku_folder}...")
+        logger(
+            f"[NEW SKU CAPTURE] Loading camera profile "
+            f"media/Camera_Profiles/{profile_sku_folder}/camera_profile.json"
+        )
         try:
             camera_profile = load_sku_camera_profile(
                 media_root=media_path,
-                sku_name=sku_folder,
+                sku_name=profile_sku_folder,
             )
         except Exception as exc:
+            expected = os.path.join(
+                media_path,
+                "Camera_Profiles",
+                profile_sku_folder,
+                "camera_profile.json",
+            )
             raise RuntimeError(
-                f"Could not load camera profile for SKU={sku_folder}: {exc}. "
-                f"Expected: {os.path.join(media_path, 'Camera_Profiles', sku_folder, 'camera_profile.json')}"
+                f"Could not load camera profile for SKU={profile_sku_folder}: {exc}. "
+                f"Expected: {expected}"
             ) from exc
 
         manager.apply_camera_profile(camera_profile)
-        logger(f"[NEW SKU CAPTURE] SKU camera profile applied: {sku_folder}")
+        logger(f"[NEW SKU CAPTURE] Camera profile applied: {profile_sku_folder}")
 
         main_tag = (
             f"DB{HT.MAIN_TRIGGER_DB}.DBX"
@@ -257,103 +337,67 @@ def capture_new_sku_images(
             f"{HT.BEAD_TRIGGER_BYTE}.{HT.BEAD_TRIGGER_BIT}"
         )
 
-        logger("[NEW SKU CAPTURE] Starting all camera streams once in PLC_SOFTWARE mode...")
-        logger(f"[NEW SKU CAPTURE] Main PLC trigger : {main_tag}")
-        logger(f"[NEW SKU CAPTURE] Bead PLC trigger : {bead_tag}")
+        logger("[NEW SKU CAPTURE] Starting all camera streams once...")
+        logger(f"[NEW SKU CAPTURE] BEAD trigger : {bead_tag}")
+        logger(f"[NEW SKU CAPTURE] MAIN trigger : {main_tag}")
         if not manager.start_all_streams():
             raise RuntimeError(
                 "Not all configured camera streams started. Partial resources were "
                 "released; correct the connection and start capture again."
             )
         streams_started_here = True
-        logger("[NEW SKU CAPTURE] Cameras armed and ready for PLC trigger set 1/2")
 
-        for shot_idx in range(1, CAPTURE_IMAGES_PER_SIDE + 1):
+        for stage_number, stage in enumerate(stages, start=1):
+            stage_key = str(stage["key"])
+            stage_label = str(stage["label"])
+            stage_root = str(stage["root"])
+            file_suffix = str(stage["filename_suffix"])
+
             logger("")
+            logger("-" * 76)
             logger(
-                f"[NEW SKU CAPTURE] Waiting for PLC trigger set "
-                f"{shot_idx}/{CAPTURE_IMAGES_PER_SIDE}"
+                f"[NEW SKU CAPTURE] Stage {stage_number}/2: {stage_label}"
             )
             logger(
-                f"[NEW SKU CAPTURE] BEAD {bead_tag} -> "
-                "Sidewall1 + Sidewall2 + Tread + Bead"
+                f"[NEW SKU CAPTURE] Waiting for BEAD {bead_tag}, then MAIN {main_tag}"
             )
-            logger(
-                f"[NEW SKU CAPTURE] MAIN {main_tag} -> Innerwall"
-            )
+            logger(f"[NEW SKU CAPTURE] Save root: {stage_root}")
 
-            # HARDWARE_TRIGGER.capture_all() starts two trigger-wait workers:
-            # one for the main group and one for bead. It returns only after
-            # both groups are captured and software FFC has completed.
             captured_raw = manager.capture_all(
                 sides_to_capture=list(CAPTURE_SIDE_ORDER),
             )
-            logger(
-                f"[NEW SKU CAPTURE] PLC trigger set {shot_idx}/2 captured; "
-                "FFC correction completed"
-            )
             captured = _normalise_captured_results(manager, captured_raw)
-
-            missing_sides = [
-                side
-                for side in CAPTURE_SIDE_ORDER
-                if side not in captured or captured.get(side) is None
-            ]
-            if missing_sides:
-                raise RuntimeError(
-                    f"Capture set {shot_idx} is incomplete. Missing sides: "
-                    f"{', '.join(missing_sides)}"
-                )
-
-            capture_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             ffc_stats_by_side = dict(getattr(manager, "last_ffc_stats", {}) or {})
 
-            # Corrected-only requirement: validate FFC for the complete set
-            # before saving even the first side. This avoids a partial set in
-            # which some raw/uncorrected files were already written.
-            ffc_missing_or_disabled = []
-            for side_name in CAPTURE_SIDE_ORDER:
-                side_stats = ffc_stats_by_side.get(side_name)
-                if not isinstance(side_stats, dict) or side_stats.get("enabled") is not True:
-                    ffc_missing_or_disabled.append(side_name)
+            _validate_complete_ffc_set(
+                captured=captured,
+                ffc_stats_by_side=ffc_stats_by_side,
+                stage_label=stage_label,
+            )
 
-            if ffc_missing_or_disabled:
-                raise RuntimeError(
-                    "Software FFC was not confirmed for capture set "
-                    f"{shot_idx}. Images will not be saved. Sides: "
-                    f"{', '.join(ffc_missing_or_disabled)}"
-                )
+            logger(
+                f"[NEW SKU CAPTURE] {stage_label} captured; all five FFC results validated"
+            )
 
             for side_name in CAPTURE_SIDE_ORDER:
-                img = captured[side_name]
-                if img is None:
+                image = captured.get(side_name)
+                if image is None:
                     raise RuntimeError(
-                        f"No image returned for side={side_name}, set={shot_idx}"
+                        f"No image returned for side={side_name}, stage={stage_key}"
                     )
 
                 serial = _camera_serial_for_side(manager, side_name)
-                side_dir = _ensure_dir(os.path.join(base_out_dir, side_name))
-
-                # Include role and serial in the filename for traceability, while
-                # keeping the directory structure side-based as requested.
-                serial_part = _safe_name(serial) if serial else "unknown_serial"
-                file_name = (
-                    f"{side_name}_{serial_part}_{session_id}_"
-                    f"{capture_stamp}_{shot_idx:02d}.png"
-                )
+                side_dir = _ensure_dir(os.path.join(stage_root, side_name))
+                file_name = f"{side_name}_{file_suffix}.png"
                 file_path = os.path.join(side_dir, file_name)
 
-                _save_image_keep_depth(img, file_path)
-                saved_count_by_side[side_name] += 1
-                latest_paths[side_name] = file_path
-
-                ffc_stats = dict(ffc_stats_by_side.get(side_name, {}) or {})
-                # Already validated above for every side before file saving.
-                ffc_enabled = True
+                _save_image_keep_depth(image, file_path)
+                saved_paths[stage_key][side_name] = file_path
+                saved_count_by_stage[stage_key][side_name] += 1
 
                 logger(
-                    f"[SAVE OK] side={side_name} image={shot_idx}/2 "
-                    f"serial={serial or '-'} ffc={ffc_enabled} -> {file_path}"
+                    f"[SAVE OK] stage={stage_key} side={side_name} "
+                    f"serial={serial or '-'} ffc=True -> {file_path}"
                 )
 
                 if save_new_sku_image is not None:
@@ -363,19 +407,21 @@ def capture_new_sku_images(
                         db_meta.update(
                             {
                                 "sku_name": sku_folder,
+                                "camera_profile_sku": profile_sku_folder,
                                 "side_name": side_name,
                                 "camera_serial": serial,
                                 "session_id": session_id,
-                                "capture_index": shot_idx,
+                                "capture_index": int(stage["capture_index"]),
+                                "capture_kind": stage_key,
                                 "total_images_per_side": CAPTURE_IMAGES_PER_SIDE,
                                 "expected_total_images": EXPECTED_TOTAL_IMAGES,
-                                "save_group": "cycle_side_root",
-                                "capture_cycle": cycle_name,
+                                "save_group": str(stage["save_group"]),
+                                "capture_cycle": cycle_name if stage_key == "cycle" else "Calibration",
                                 "saved_dir": side_dir,
                                 "saved_file": file_name,
                                 "saved_path": file_path,
-                                "software_ffc_enabled": ffc_enabled,
-                                "ffc_stats": ffc_stats,
+                                "software_ffc_enabled": True,
+                                "ffc_stats": dict(ffc_stats_by_side.get(side_name, {}) or {}),
                                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             }
                         )
@@ -391,43 +437,63 @@ def capture_new_sku_images(
                     except Exception as exc:
                         logger(f"[DB WARN] Could not save metadata for {file_path}: {exc}")
 
-            # Streams stay open. This short delay only separates application
-            # bookkeeping before arming the second PLC-triggered set; no
-            # stop/start occurs between sets.
-            if shot_idx < CAPTURE_IMAGES_PER_SIDE and capture_delay_sec > 0:
+            if stage_number < len(stages) and capture_delay_sec > 0:
+                logger(
+                    "[NEW SKU CAPTURE] Calibration set saved. Keeping streams open "
+                    "and arming the reference set..."
+                )
                 time.sleep(float(capture_delay_sec))
 
         invalid_counts = {
-            side: count
-            for side, count in saved_count_by_side.items()
-            if count != CAPTURE_IMAGES_PER_SIDE
+            f"{stage_key}:{side}": count
+            for stage_key, side_counts in saved_count_by_stage.items()
+            for side, count in side_counts.items()
+            if count != 1
         }
         if invalid_counts:
             raise RuntimeError(
-                f"Unexpected saved image counts: {invalid_counts}; "
-                f"expected {CAPTURE_IMAGES_PER_SIDE} per side"
+                f"Unexpected saved image counts: {invalid_counts}; expected 1 per stage/side"
             )
 
-        total_saved = sum(saved_count_by_side.values())
+        total_saved = sum(
+            count
+            for side_counts in saved_count_by_stage.values()
+            for count in side_counts.values()
+        )
         if total_saved != EXPECTED_TOTAL_IMAGES:
             raise RuntimeError(
                 f"Saved {total_saved} images; expected {EXPECTED_TOTAL_IMAGES}"
             )
 
         logger("")
+        logger("=" * 76)
         logger(
             f"[NEW SKU CAPTURE] Completed successfully | "
-            f"2 images x 5 sides = {total_saved} images"
+            f"5 calibration + 5 reference = {total_saved} images"
         )
-        logger(f"[NEW SKU CAPTURE] Saved counts: {saved_count_by_side}")
-        return latest_paths
+        logger(f"[NEW SKU CAPTURE] Calibration root: {calibration_root}")
+        logger(f"[NEW SKU CAPTURE] Reference root  : {cycle_root}")
+        logger("=" * 76)
+
+        return {
+            "calibration": dict(saved_paths["calibration"]),
+            "cycle": dict(saved_paths["cycle"]),
+            "meta": {
+                "sku_name": sku_folder,
+                "camera_profile_sku": profile_sku_folder,
+                "capture_cycle": cycle_name,
+                "calibration_root": calibration_root,
+                "cycle_root": cycle_root,
+                "total_saved": total_saved,
+            },
+        }
 
     finally:
         HT.TRIGGER_MODE = old_trigger_mode
 
         if streams_started_here:
             try:
-                logger("[NEW SKU CAPTURE] Stopping all streams once after the 10 images...")
+                logger("[NEW SKU CAPTURE] Stopping all streams once after both trigger sets...")
                 manager.stop_all_streams()
             except Exception as exc:
                 logger(f"[NEW SKU CAPTURE][WARN] stop_all_streams failed: {exc}")

@@ -6,14 +6,15 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent, QSize  # type: ignore
-from PyQt5.QtGui import QPixmap, QColor  # type: ignore
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QEvent, QSize, QPointF  # type: ignore
+from PyQt5.QtGui import QPixmap, QColor, QImageReader, QPainter, QPen  # type: ignore
 from PyQt5.QtWidgets import (  # type: ignore
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QMessageBox, QSizePolicy, QApplication,
     QGridLayout, QScrollArea, QDialog, QStackedWidget,
     QFormLayout, QLineEdit, QSpinBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QProgressBar, QInputDialog
+    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QProgressBar, QInputDialog,
+    QPlainTextEdit
 )
 
 from src.COMMON.common import load_env
@@ -159,6 +160,41 @@ def _to_float_or_none(value: Any):
     except Exception:
         return None
 
+class StrictWheelComboBox(QComboBox):
+    """Dropdown that is safe while the workflow page is being scrolled."""
+
+    def wheelEvent(self, event):
+        popup_open = bool(self.view() is not None and self.view().isVisible())
+        if popup_open:
+            super().wheelEvent(event)
+            return
+        event.ignore()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        if not self.isEnabled():
+            color = QColor("#aaa1b4")
+        elif self.hasFocus() or self.underMouse():
+            color = QColor("#6b2aa3")
+        else:
+            color = QColor("#6f667a")
+
+        pen = QPen(color)
+        pen.setWidthF(1.7)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+
+        cx = float(self.width() - 13)
+        cy = float(self.height()) / 2.0 - 1.0
+        painter.drawLine(QPointF(cx - 4.0, cy - 1.5), QPointF(cx, cy + 2.5))
+        painter.drawLine(QPointF(cx, cy + 2.5), QPointF(cx + 4.0, cy - 1.5))
+        painter.end()
+
+
 class ImageViewerDialog(QDialog):
     def __init__(self, image_path: str, title: str = "Image Viewer", parent=None):
         super().__init__(parent)
@@ -273,8 +309,10 @@ class ImageViewerDialog(QDialog):
 
 
 class AspectImageLabel(QLabel):
-    PREVIEW_W = 210
-    PREVIEW_H = 430
+    # Small thumbnails keep the Capture tab compact. The popup still opens the
+    # original full-resolution image with scroll and zoom controls.
+    PREVIEW_W = 102
+    PREVIEW_H = 250
 
     def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
@@ -304,12 +342,27 @@ class AspectImageLabel(QLabel):
         path = path or ""
         if path == self._image_path and self._pm is not None:
             return
+
         self._image_path = path
+        self._pm = None
+
         if path and os.path.exists(path):
-            pm = QPixmap(path)
-            self._pm = pm if not pm.isNull() else None
-        else:
-            self._pm = None
+            # Decode only a small preview instead of loading a 4096 x 60000/75000
+            # line-scan image into the page. The original path is retained for
+            # the zoom dialog.
+            reader = QImageReader(path)
+            reader.setAutoTransform(True)
+            source_size = reader.size()
+            if source_size.isValid():
+                target = source_size.scaled(
+                    QSize(self.PREVIEW_W * 2, self.PREVIEW_H * 2),
+                    Qt.KeepAspectRatio,
+                )
+                reader.setScaledSize(target)
+            image = reader.read()
+            if not image.isNull():
+                self._pm = QPixmap.fromImage(image)
+
         self._update_scaled()
 
     def resizeEvent(self, event):
@@ -735,6 +788,7 @@ class CaptureWorker(QThread):
         sku_meta=None,
         meta_collection: str = "New SKU",
         gridfs_bucket: str = "fs",
+        camera_profile_sku: str = "",
         parent=None,
     ):
         super().__init__(parent)
@@ -746,6 +800,7 @@ class CaptureWorker(QThread):
         self.sku_meta = dict(sku_meta or {})
         self.meta_collection = meta_collection
         self.gridfs_bucket = gridfs_bucket
+        self.camera_profile_sku = str(camera_profile_sku or "").strip()
 
     def run(self):
         try:
@@ -758,6 +813,7 @@ class CaptureWorker(QThread):
                 sku_meta=self.sku_meta,
                 meta_collection=self.meta_collection,
                 gridfs_bucket=self.gridfs_bucket,
+                camera_profile_sku=self.camera_profile_sku,
                 logger=self.status_signal.emit,
             )
             self.finished_signal.emit(result or {})
@@ -798,15 +854,31 @@ class NewSKUPage(QWidget):
         self.labels = ["SIDE WALL 1", "SIDE WALL 2", "INNER SIDE", "TREAD", "BEAD"]
 
         self.img_labels: List[AspectImageLabel] = []
+        self.calibration_img_labels: List[AspectImageLabel] = []
+        self.reference_img_labels: List[AspectImageLabel] = []
         self.status_lbl: Optional[QLabel] = None
         self.capture_btn: Optional[QPushButton] = None
         self.image_processing_btn: Optional[QPushButton] = None
         self.template_btn: Optional[QPushButton] = None
         self.refresh_btn: Optional[QPushButton] = None
         self.close_btn: Optional[QPushButton] = None
+        self.capture_profile_combo: Optional[StrictWheelComboBox] = None
+        self.capture_profile_refresh_btn: Optional[QPushButton] = None
+        self.capture_profile_status_lbl: Optional[QLabel] = None
+        self.capture_workflow_sku_lbl: Optional[QLabel] = None
+        self.capture_calibration_path_lbl: Optional[QLabel] = None
+        self.capture_cycle_path_lbl: Optional[QLabel] = None
+        self.capture_plan_info_lbl: Optional[QLabel] = None
+        self.capture_console: Optional[QPlainTextEdit] = None
+        self.capture_console_state_lbl: Optional[QLabel] = None
+        self.capture_console_toggle_btn: Optional[QPushButton] = None
+        self.capture_console_clear_btn: Optional[QPushButton] = None
+        self._capture_console_expanded = True
+        self._last_capture_profile_console_message = ""
 
         self.capture_in_progress = False
         self.latest_preview_paths: Dict[str, str] = {}
+        self.latest_calibration_preview_paths: Dict[str, str] = {}
         self.capture_worker: Optional[CaptureWorker] = None
         self.recipe_service = RecipeService(
             media_path=self.media_path,
@@ -864,7 +936,12 @@ class NewSKUPage(QWidget):
         self.camera_role_order = list(CAPTURE_ROLE_ORDER)
 
         self._build_ui()
+        self._append_capture_console(
+            "READY",
+            "Capture page initialized. Select a camera profile, then start the two-set PLC capture."
+        )
 
+        QTimer.singleShot(50, self.refresh_capture_camera_profiles)
         QTimer.singleShot(100, self.load_raw_images_for_preview)
         self.preview_timer = QTimer(self)
         self.preview_timer.timeout.connect(self.refresh_preview_only)
@@ -872,14 +949,87 @@ class NewSKUPage(QWidget):
         QTimer.singleShot(0, self.refresh_preview_only)
 
 
+    def _set_capture_console_state(self, state: str, text: str = "") -> None:
+        label = self.capture_console_state_lbl
+        if label is None:
+            return
+
+        normalized = str(state or "READY").strip().upper()
+        palette = {
+            "READY": ("#eef2f7", "#536071", "#d7dee8"),
+            "RUNNING": ("#eaf2ff", "#2563eb", "#cfe0ff"),
+            "SUCCESS": ("#eaf8f0", "#16884f", "#ccebd9"),
+            "WARNING": ("#fff5e5", "#a35f00", "#f2ddb8"),
+            "ERROR": ("#fdecec", "#d14343", "#f2caca"),
+        }
+        bg, fg, border = palette.get(normalized, palette["READY"])
+        label.setText(text or normalized)
+        label.setStyleSheet(
+            f"QLabel {{ background:{bg}; color:{fg}; border:1px solid {border}; "
+            "border-radius:10px; padding:2px 9px; font:700 9px 'Segoe UI'; }}"
+        )
+
+    def _append_capture_console(self, level: str, message: str) -> None:
+        console = self.capture_console
+        if console is None:
+            return
+
+        normalized = str(level or "INFO").strip().upper()
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        clean_message = str(message or "").strip().replace("\r", "")
+        if not clean_message:
+            return
+
+        # Keep multi-line diagnostics readable while preserving one timestamp.
+        lines = clean_message.split("\n")
+        console.appendPlainText(f"[{timestamp}] [{normalized}] {lines[0]}")
+        for line in lines[1:]:
+            console.appendPlainText(f"                     {line}")
+
+        scrollbar = console.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _clear_capture_console(self) -> None:
+        if self.capture_console is not None:
+            self.capture_console.clear()
+            self._append_capture_console("READY", "Console cleared.")
+
+    def _toggle_capture_console(self) -> None:
+        if self.capture_console is None:
+            return
+        self._capture_console_expanded = not self._capture_console_expanded
+        self.capture_console.setVisible(self._capture_console_expanded)
+        if self.capture_console_toggle_btn is not None:
+            self.capture_console_toggle_btn.setText(
+                "Hide Console" if self._capture_console_expanded else "Show Console"
+            )
+
     def _on_capture_status(self, message: str):
+        text = str(message)
         if self.status_lbl is not None:
-            self.status_lbl.setText(str(message))
+            self.status_lbl.setText(text)
+        self._set_capture_console_state("RUNNING")
+        self._append_capture_console("CAPTURE", text)
 
 
     def _on_capture_finished(self, result: dict):
-        self.latest_preview_paths = result or {}
+        payload = dict(result or {})
+        calibration_paths = dict(payload.get("calibration") or {})
+        cycle_paths = dict(payload.get("cycle") or {})
+        meta = dict(payload.get("meta") or {})
+
+        # Backward compatibility with the older flat role -> path result.
+        if not cycle_paths:
+            cycle_paths = {
+                role: str(payload.get(role) or "")
+                for role in self.camera_role_order
+                if payload.get(role)
+            }
+
+        self.latest_calibration_preview_paths = calibration_paths
+        self.latest_preview_paths = cycle_paths
         self._update_preview_from_latest()
+
         if self.template_extractor_page is not None:
             self.template_extractor_page.refresh_context()
         if self.r_recipe_page is not None:
@@ -890,39 +1040,49 @@ class NewSKUPage(QWidget):
             self.training_page.refresh_context()
 
         sku_name = _safe_name(self._get_sku_name())
-        capture_cycle = "Cycle_<N>"
-        for saved_path in (result or {}).values():
-            try:
-                candidate = Path(str(saved_path)).resolve().parent.parent.name
-                if re.match(r"^Cycle[_\- ]?\d+$", candidate, re.IGNORECASE):
-                    capture_cycle = candidate
-                    break
-            except Exception:
-                continue
-        relative_save_root = (
-            f"media/new_sku_images/{sku_name}/{capture_cycle}/<side>/"
+        capture_cycle = str(meta.get("capture_cycle") or "Cycle_<N>")
+        profile_sku = str(meta.get("camera_profile_sku") or self._selected_capture_profile_sku())
+        calibration_root = str(
+            meta.get("calibration_root")
+            or Path(self.media_path) / "new_sku_images" / sku_name / "Calibration"
+        )
+        cycle_root = str(
+            meta.get("cycle_root")
+            or Path(self.media_path) / "new_sku_images" / sku_name / capture_cycle
         )
 
         if self.status_lbl is not None:
             self.status_lbl.setText(
-                f"Capture completed: {CAPTURE_EXPECTED_TOTAL} FFC-corrected images saved in "
-                f"{relative_save_root}"
+                "Capture complete — 5 calibration images and 5 reference images saved. "
+                f"Profile={profile_sku} | Reference={capture_cycle}"
             )
+
+        self._set_capture_console_state("SUCCESS", "COMPLETE")
+        self._append_capture_console(
+            "SUCCESS",
+            "Two-set capture completed successfully.\n"
+            f"Profile: {profile_sku}\n"
+            f"Calibration: {calibration_root}\n"
+            f"Reference: {cycle_root}"
+        )
 
         QMessageBox.information(
             self,
-            "Capture Complete",
+            "New SKU Capture Complete",
             (
-                f"PLC capture completed successfully.\n\n"
-                f"Saved {CAPTURE_IMAGES_PER_SIDE} FFC-corrected images for each of 5 sides "
-                f"({CAPTURE_EXPECTED_TOTAL} images total).\n\n"
-                f"Save root:\n{relative_save_root}"
+                "Both PLC-triggered image sets were captured successfully.\n\n"
+                "Calibration set: 5 FFC-corrected images\n"
+                "Reference set: 5 FFC-corrected images\n\n"
+                f"Camera profile: {profile_sku}\n\n"
+                f"Calibration folder:\n{calibration_root}\n\n"
+                f"Reference folder:\n{cycle_root}"
             ),
         )
 
         self.capture_in_progress = False
         self._set_controls_enabled(True)
         self._refresh_workflow_header()
+        self._update_capture_plan_labels()
 
         if self.preview_timer:
             self.preview_timer.start(1500)
@@ -933,6 +1093,8 @@ class NewSKUPage(QWidget):
 
 
     def _on_capture_error(self, message: str):
+        self._set_capture_console_state("ERROR", "FAILED")
+        self._append_capture_console("ERROR", str(message))
         QMessageBox.critical(self, "Capture Error", str(message))
 
         if self.status_lbl is not None:
@@ -1027,16 +1189,38 @@ class NewSKUPage(QWidget):
                 padding: 10px 14px;
                 font: 700 11px 'Segoe UI';
             }
-            QLineEdit, QSpinBox {
+            QLineEdit, QSpinBox, QComboBox {
                 background: #ffffff;
                 border: 1px solid #d9d0e6;
                 border-radius: 10px;
                 min-height: 34px;
-                padding: 0 12px;
+                padding: 0 30px 0 12px;
                 color: #2f2a36;
+                selection-background-color: #6a2ca0;
+                selection-color: #ffffff;
             }
-            QLineEdit:focus, QSpinBox:focus {
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
                 border: 2px solid #6a2ca0;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 28px;
+                border: none;
+                background: transparent;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background: #ffffff;
+                color: #2f2a36;
+                border: 1px solid #d9d0e6;
+                selection-background-color: #efe5f8;
+                selection-color: #571c86;
+                outline: none;
             }
             QTableWidget {
                 background: #ffffff;
@@ -1218,12 +1402,15 @@ class NewSKUPage(QWidget):
 
         if changed:
             self._workflow_sku = sku
+            if self.capture_workflow_sku_lbl is not None:
+                self.capture_workflow_sku_lbl.setText(sku)
             self.latest_template_assets.clear()
             self.latest_offset_assets.clear()
             self.latest_training_assets.clear()
             self.latest_threshold_assets.clear()
             self.latest_validation_report.clear()
             self.latest_preview_paths.clear()
+            self.latest_calibration_preview_paths.clear()
 
             current_meta = dict(self.sku_meta or {})
             current_meta.pop("machine_serial", None)
@@ -1258,6 +1445,8 @@ class NewSKUPage(QWidget):
                 self.axis_table.clearContents()
                 self.axis_table.setRowCount(0)
             self._update_preview_from_latest()
+            self._sync_capture_profile_selection(sku)
+            self._update_capture_plan_labels()
             return
 
         for page in (
@@ -1275,6 +1464,143 @@ class NewSKUPage(QWidget):
             if callable(refresh):
                 refresh()
 
+    def _capture_profile_root(self) -> Path:
+        return Path(self.media_path).expanduser().resolve() / "Camera_Profiles"
+
+    def refresh_capture_camera_profiles(self) -> None:
+        combo = self.capture_profile_combo
+        if combo is None:
+            return
+
+        previous = str(combo.currentText() or "").strip()
+        workflow_sku = _safe_name(self._get_sku_name())
+        root = self._capture_profile_root()
+
+        profiles: List[str] = []
+        if root.is_dir():
+            for child in root.iterdir():
+                if child.is_dir() and (child / "camera_profile.json").is_file():
+                    profiles.append(child.name)
+        profiles.sort(key=str.lower)
+
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(profiles)
+
+        preferred = ""
+        for candidate in (previous, workflow_sku):
+            if candidate and candidate in profiles:
+                preferred = candidate
+                break
+        if not preferred and profiles:
+            preferred = profiles[0]
+        if preferred:
+            combo.setCurrentText(preferred)
+        combo.blockSignals(False)
+
+        self._update_capture_profile_status()
+        self._update_capture_plan_labels()
+        selected = self._selected_capture_profile_sku()
+        if profiles:
+            self._append_capture_console(
+                "PROFILE",
+                f"Profile list refreshed: {len(profiles)} available | selected={selected or '-'}"
+            )
+        else:
+            self._set_capture_console_state("WARNING")
+            self._append_capture_console(
+                "WARNING",
+                f"No camera profiles found under {root}"
+            )
+
+    def _selected_capture_profile_sku(self) -> str:
+        if self.capture_profile_combo is None:
+            return ""
+        return str(self.capture_profile_combo.currentText() or "").strip()
+
+    def _sync_capture_profile_selection(self, sku_name: str) -> None:
+        combo = self.capture_profile_combo
+        if combo is None:
+            return
+        safe_sku = _safe_name(sku_name)
+        index = combo.findText(safe_sku, Qt.MatchFixedString)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        self._update_capture_profile_status()
+
+    def _update_capture_profile_status(self) -> None:
+        if self.capture_profile_status_lbl is None:
+            return
+
+        selected = self._selected_capture_profile_sku()
+        if not selected:
+            message = "No camera profile selected. Create or select a profile before capture."
+            self.capture_profile_status_lbl.setText(message)
+            self.capture_profile_status_lbl.setStyleSheet(
+                "color:#a35f00; font:600 10px 'Segoe UI'; background:transparent;"
+            )
+            console_level = "WARNING"
+        else:
+            path = self._capture_profile_root() / selected / "camera_profile.json"
+            if path.is_file():
+                message = f"Ready — {selected} camera profile will be applied to both trigger sets."
+                self.capture_profile_status_lbl.setText(message)
+                self.capture_profile_status_lbl.setStyleSheet(
+                    "color:#16884f; font:600 10px 'Segoe UI'; background:transparent;"
+                )
+                console_level = "PROFILE"
+            else:
+                message = f"Profile file not found: {path}"
+                self.capture_profile_status_lbl.setText(message)
+                self.capture_profile_status_lbl.setStyleSheet(
+                    "color:#d14343; font:600 10px 'Segoe UI'; background:transparent;"
+                )
+                console_level = "ERROR"
+
+        if message != self._last_capture_profile_console_message:
+            self._last_capture_profile_console_message = message
+            self._append_capture_console(console_level, message)
+            if console_level == "ERROR":
+                self._set_capture_console_state("ERROR")
+            elif console_level == "WARNING" and not self.capture_in_progress:
+                self._set_capture_console_state("WARNING")
+            elif not self.capture_in_progress:
+                self._set_capture_console_state("READY")
+
+    def _update_capture_plan_labels(self) -> None:
+        """Refresh the hidden/tooltip capture plan without occupying page space."""
+        sku = _safe_name(self._get_sku_name())
+        base = Path(self.media_path).expanduser().resolve() / "new_sku_images" / sku
+        calibration = base / "Calibration"
+        cycle = next_cycle_dir(self.media_path, sku, create=False)
+
+        # Keep backward-compatible label updates for any older embedding code.
+        if self.capture_calibration_path_lbl is not None:
+            self.capture_calibration_path_lbl.setText(
+                f"1  Calibration  •  {calibration}"
+            )
+        if self.capture_cycle_path_lbl is not None:
+            self.capture_cycle_path_lbl.setText(
+                f"2  Reference  •  {cycle}"
+            )
+
+        plan_tooltip = (
+            "Capture & Save Plan\n\n"
+            f"1. Calibration set\n   {calibration}\n\n"
+            f"2. Reference set\n   {cycle}\n\n"
+            "Each set captures Sidewall 1, Sidewall 2, Tread and Bead on the "
+            "BEAD PLC edge. The shared Bead camera then switches to Innerwall, "
+            "and the current MAIN PLC edge releases the Innerwall capture."
+        )
+
+        for widget in (
+            getattr(self, "capture_plan_info_lbl", None),
+            getattr(self, "capture_btn", None),
+            getattr(self, "capture_profile_combo", None),
+        ):
+            if widget is not None:
+                widget.setToolTip(plan_tooltip)
+
     def _preview_serial_order(self):
         """Return logical side keys first, with old serial/index keys as fallback."""
         if any(role in self.latest_preview_paths for role in self.camera_role_order):
@@ -1283,16 +1609,15 @@ class NewSKUPage(QWidget):
             return self.camera_serial_order
         return [str(i + 1) for i in range(len(self.labels))]
 
-    def _ordered_preview_paths(self):
-        """Keep the five UI cards in sidewall1/2/innerwall/tread/bead order."""
-        paths = []
+    def _ordered_stage_preview_paths(self, source: Dict[str, str]) -> List[str]:
+        paths: List[str] = []
         for idx, role_name in enumerate(self.camera_role_order):
             serial = self.camera_serial_order[idx] if idx < len(self.camera_serial_order) else ""
             raw_key = str(idx + 1)
             path = (
-                self.latest_preview_paths.get(role_name)
-                or (self.latest_preview_paths.get(serial) if serial else "")
-                or self.latest_preview_paths.get(raw_key)
+                source.get(role_name)
+                or (source.get(serial) if serial else "")
+                or source.get(raw_key)
                 or ""
             )
             paths.append(path)
@@ -1300,21 +1625,24 @@ class NewSKUPage(QWidget):
             paths.append("")
         return paths[:len(self.labels)]
 
+    def _ordered_preview_paths(self):
+        return self._ordered_stage_preview_paths(self.latest_preview_paths)
+
     def load_raw_images_for_preview(self):
-        """Load the newest captured image for every role of the active SKU.
-
-        Preferred layout::
-
-            media/new_sku_images/<SKU>/Cycle_<N>/<role>/
-
-        The legacy ``<SKU>/<role>/`` layout remains supported. For each role,
-        the newest numeric cycle containing images is selected automatically.
-        """
+        """Load Calibration thumbnails and the newest normal Cycle_<N> thumbnails."""
         if self.capture_in_progress:
             return
 
         self.latest_preview_paths = {}
+        self.latest_calibration_preview_paths = {}
         sku_name = _safe_name(self._get_sku_name())
+        sku_root = Path(self.media_path).expanduser().resolve() / "new_sku_images" / sku_name
+
+        for role_name in self.camera_role_order:
+            calibration_dir = sku_root / "Calibration" / role_name
+            latest_calibration = find_latest_cycle_image(calibration_dir, recursive=False)
+            if latest_calibration is not None:
+                self.latest_calibration_preview_paths[role_name] = str(latest_calibration)
 
         for role_name in self.camera_role_order:
             serial = str(CAMERA_SERIAL_MAP.get(role_name, "") or "")
@@ -1329,7 +1657,6 @@ class NewSKUPage(QWidget):
             if latest is not None:
                 self.latest_preview_paths[role_name] = str(latest)
 
-        # Backward-compatible fallback for projects that still use raw_dir.
         if not self.latest_preview_paths and os.path.exists(self.raw_dir):
             preview_keys = self._preview_serial_order()
             image_files = [
@@ -1338,7 +1665,6 @@ class NewSKUPage(QWidget):
                 if file_name.lower().endswith(IMAGE_EXTS)
             ]
             image_files.sort()
-
             for idx, key in enumerate(preview_keys):
                 if idx >= len(image_files):
                     break
@@ -1346,27 +1672,22 @@ class NewSKUPage(QWidget):
                 if os.path.exists(image_path):
                     self.latest_preview_paths[key] = image_path
 
-            if not self.latest_preview_paths:
-                for file_name in image_files:
-                    name_without_ext = os.path.splitext(file_name)[0]
-                    if name_without_ext in preview_keys:
-                        self.latest_preview_paths[name_without_ext] = os.path.join(
-                            self.raw_dir,
-                            file_name,
-                        )
-
         self._update_preview_from_latest()
+        self._update_capture_plan_labels()
+
         if self.status_lbl is not None:
-            if self.latest_preview_paths:
+            calibration_count = len(self.latest_calibration_preview_paths)
+            reference_count = len(self.latest_preview_paths)
+            if calibration_count or reference_count:
                 cycle = latest_cycle_dir(self.media_path, sku_name)
-                cycle_text = cycle.name if cycle is not None else "legacy direct layout"
+                cycle_text = cycle.name if cycle is not None else "No Cycle_<N> yet"
                 self.status_lbl.setText(
-                    f"Loaded {len(self.latest_preview_paths)} latest side previews "
-                    f"for SKU={sku_name} ({cycle_text})"
+                    f"Loaded previews for SKU={sku_name} | Calibration {calibration_count}/5 | "
+                    f"Reference {reference_count}/5 ({cycle_text})"
                 )
             else:
                 self.status_lbl.setText(
-                    f"No captured images found for SKU={sku_name}"
+                    f"No Calibration or Cycle images found for SKU={sku_name}"
                 )
 
     # ======================================================================
@@ -3175,25 +3496,36 @@ class NewSKUPage(QWidget):
     def _build_capture_page(self):
         root = QVBoxLayout(self.capture_page)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(12)
+        root.setSpacing(10)
 
         main_card = QFrame()
         main_card.setObjectName("PageCard")
         main_l = QVBoxLayout(main_card)
-        main_l.setContentsMargins(18, 16, 18, 16)
-        main_l.setSpacing(14)
+        main_l.setContentsMargins(18, 14, 18, 14)
+        main_l.setSpacing(10)
 
+        # --------------------------------------------------------------
+        # Header
+        # --------------------------------------------------------------
         header_row = QHBoxLayout()
         header_left = QVBoxLayout()
+        header_left.setSpacing(2)
+
         title_lbl = QLabel("New SKU Image Capture")
         title_lbl.setObjectName("PageTitle")
         header_left.addWidget(title_lbl)
-        subtitle_lbl = QLabel("Capture two FFC-corrected images for each tyre side before saving the SKU recipe.")
+
+        subtitle_lbl = QLabel(
+            "Capture one calibration set and one reference set with the validated PLC software sequence."
+        )
         subtitle_lbl.setObjectName("PageSubTitle")
+        subtitle_lbl.setWordWrap(True)
         header_left.addWidget(subtitle_lbl)
+
         header_row.addLayout(header_left)
         header_row.addStretch(1)
-        badge_lbl = QLabel(f"{len(self.labels)} Cameras")
+
+        badge_lbl = QLabel("2 SETS  •  10 IMAGES")
         badge_lbl.setAlignment(Qt.AlignCenter)
         badge_lbl.setFixedHeight(28)
         badge_lbl.setStyleSheet("""
@@ -3202,73 +3534,247 @@ class NewSKUPage(QWidget):
                 color: #571c86;
                 border: 1px solid #e5d8f4;
                 border-radius: 14px;
-                font: 700 11px 'Segoe UI';
+                font: 700 10px 'Segoe UI';
                 padding: 0 12px;
             }
         """)
+        badge_lbl.setToolTip(
+            "One Calibration set and one Reference set are captured. "
+            "Hover over the information badge beside Camera Profile for exact save paths."
+        )
         header_row.addWidget(badge_lbl)
         main_l.addLayout(header_row)
 
-        preview_grid = QGridLayout()
-        preview_grid.setHorizontalSpacing(16)
-        preview_grid.setVerticalSpacing(16)
-        preview_grid.setContentsMargins(0, 0, 0, 0)
-        self.img_labels = []
+        # --------------------------------------------------------------
+        # Compact workflow SKU + camera profile selector. The old visible
+        # Capture & Save Plan card is intentionally replaced by a tooltip.
+        # --------------------------------------------------------------
+        profile_card = QFrame()
+        profile_card.setObjectName("InnerCard")
+        profile_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        profile_l = QVBoxLayout(profile_card)
+        profile_l.setContentsMargins(14, 10, 14, 10)
+        profile_l.setSpacing(7)
+
+        profile_header = QHBoxLayout()
+        profile_header.setSpacing(8)
+        profile_title = QLabel("SKU & Camera Profile")
+        profile_title.setObjectName("SectionTitle")
+        profile_header.addWidget(profile_title)
+        profile_header.addStretch(1)
+
+        self.capture_plan_info_lbl = QLabel("ⓘ  Capture plan")
+        self.capture_plan_info_lbl.setAlignment(Qt.AlignCenter)
+        self.capture_plan_info_lbl.setFixedHeight(24)
+        self.capture_plan_info_lbl.setCursor(Qt.WhatsThisCursor)
+        self.capture_plan_info_lbl.setStyleSheet("""
+            QLabel {
+                background:#f7f2fb;
+                color:#5b2488;
+                border:1px solid #e6d9f1;
+                border-radius:12px;
+                padding:0 10px;
+                font:700 9px 'Segoe UI';
+            }
+            QLabel:hover {
+                background:#efe5f8;
+                border-color:#cbaee2;
+            }
+        """)
+        profile_header.addWidget(self.capture_plan_info_lbl)
+        profile_l.addLayout(profile_header)
+
+        profile_fields = QHBoxLayout()
+        profile_fields.setSpacing(9)
+
+        destination_lbl = QLabel("Destination SKU")
+        destination_lbl.setStyleSheet(
+            "font:700 10px 'Segoe UI'; color:#43354d; background:transparent;"
+        )
+        profile_fields.addWidget(destination_lbl)
+
+        self.capture_workflow_sku_lbl = QLabel(_safe_name(self._get_sku_name()))
+        self.capture_workflow_sku_lbl.setObjectName("StatusPill")
+        self.capture_workflow_sku_lbl.setMinimumWidth(130)
+        self.capture_workflow_sku_lbl.setMaximumWidth(190)
+        profile_fields.addWidget(self.capture_workflow_sku_lbl)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFixedHeight(28)
+        divider.setStyleSheet("color:#e8e0ee;")
+        profile_fields.addWidget(divider)
+
+        camera_profile_lbl = QLabel("Camera profile")
+        camera_profile_lbl.setStyleSheet(
+            "font:700 10px 'Segoe UI'; color:#43354d; background:transparent;"
+        )
+        profile_fields.addWidget(camera_profile_lbl)
+
+        self.capture_profile_combo = StrictWheelComboBox()
+        self.capture_profile_combo.setEditable(False)
+        self.capture_profile_combo.setMinimumWidth(260)
+        self.capture_profile_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.capture_profile_combo.currentTextChanged.connect(
+            lambda _text: self._update_capture_profile_status()
+        )
+        profile_fields.addWidget(self.capture_profile_combo, 1)
+
+        self.capture_profile_refresh_btn = self._make_button("Refresh Profiles", "secondary")
+        self.capture_profile_refresh_btn.setFixedWidth(138)
+        self.capture_profile_refresh_btn.clicked.connect(
+            self.refresh_capture_camera_profiles
+        )
+        profile_fields.addWidget(self.capture_profile_refresh_btn)
+        profile_l.addLayout(profile_fields)
+
+        self.capture_profile_status_lbl = QLabel("No camera profile selected")
+        self.capture_profile_status_lbl.setWordWrap(True)
+        self.capture_profile_status_lbl.setObjectName("HintText")
+        self.capture_profile_status_lbl.setStyleSheet(
+            "font:600 9px 'Segoe UI'; color:#6b5a78; background:transparent; border:none;"
+        )
+        profile_l.addWidget(self.capture_profile_status_lbl)
+        main_l.addWidget(profile_card)
+
+        # --------------------------------------------------------------
+        # Enlarged five-side preview area. The page decodes compressed
+        # thumbnails only; clicking opens the original image with zoom/scroll.
+        # --------------------------------------------------------------
+        preview_header = QHBoxLayout()
+        preview_title = QLabel("Captured Image Preview")
+        preview_title.setObjectName("SectionTitle")
+        preview_header.addWidget(preview_title)
+        preview_header.addStretch(1)
+        preview_hint = QLabel("Compressed thumbnails  •  click any image for full-resolution zoom")
+        preview_hint.setObjectName("HintText")
+        preview_header.addWidget(preview_hint)
+        main_l.addLayout(preview_header)
+
+        preview_scroll = QScrollArea()
+        preview_scroll.setWidgetResizable(True)
+        preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        preview_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        preview_scroll.setMinimumHeight(328)
+        preview_scroll.setMaximumHeight(350)
+        preview_scroll.setFrameShape(QFrame.NoFrame)
+        preview_scroll.setStyleSheet("""
+            QScrollArea {
+                background:transparent;
+                border:none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background:transparent;
+            }
+            QScrollBar:horizontal {
+                background:#f2edf6;
+                height:8px;
+                border-radius:4px;
+                margin:1px 0;
+            }
+            QScrollBar::handle:horizontal {
+                background:#bba4cb;
+                border-radius:4px;
+                min-width:36px;
+            }
+            QScrollBar::handle:horizontal:hover { background:#8b5aaa; }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal { width:0; }
+        """)
+
+        preview_wrap = QWidget()
+        preview_grid = QGridLayout(preview_wrap)
+        preview_grid.setHorizontalSpacing(10)
+        preview_grid.setVerticalSpacing(0)
+        preview_grid.setContentsMargins(0, 0, 0, 8)
+
+        self.calibration_img_labels = []
+        self.reference_img_labels = []
+        self.img_labels = self.reference_img_labels
 
         for i, label_name in enumerate(self.labels):
             card = QFrame()
             card.setObjectName("InnerCard")
-            card.setFixedSize(250, 545)
-            card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            card.setMinimumWidth(232)
+            card.setMaximumWidth(272)
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
             card_l = QVBoxLayout(card)
-            card_l.setContentsMargins(12, 12, 12, 12)
-            card_l.setSpacing(10)
+            card_l.setContentsMargins(9, 8, 9, 9)
+            card_l.setSpacing(6)
 
-            top_row = QHBoxLayout()
-            title = QLabel(label_name.title())
-            title.setObjectName("SectionTitle")
-            top_row.addWidget(title)
-            top_row.addStretch(1)
-            click_lbl = QLabel("Click to zoom")
-            click_lbl.setObjectName("HintText")
-            top_row.addWidget(click_lbl)
-            card_l.addLayout(top_row)
+            side_title = QLabel(label_name.title())
+            side_title.setObjectName("SectionTitle")
+            side_title.setAlignment(Qt.AlignCenter)
+            card_l.addWidget(side_title)
 
-            image_shell = QFrame()
-            image_shell.setStyleSheet("""
-                QFrame {
-                    background: #f7f4fb;
-                    border: 1px solid #e9e1f1;
-                    border-radius: 14px;
-                }
-            """)
-            image_shell.setFixedSize(226, 454)
-            image_shell_l = QVBoxLayout(image_shell)
-            image_shell_l.setContentsMargins(8, 8, 8, 8)
-            img = AspectImageLabel(title=label_name.title())
-            image_shell_l.addWidget(img, 0, Qt.AlignCenter)
-            card_l.addWidget(image_shell, 1)
+            thumbs_row = QHBoxLayout()
+            thumbs_row.setSpacing(7)
 
-            footer_lbl = QLabel("Latest preview")
-            footer_lbl.setAlignment(Qt.AlignCenter)
-            footer_lbl.setObjectName("HintText")
-            card_l.addWidget(footer_lbl)
+            def build_thumb(stage_name: str, title_text: str):
+                wrap = QFrame()
+                wrap.setStyleSheet("""
+                    QFrame {
+                        background:#f7f4fb;
+                        border:1px solid #e9e1f1;
+                        border-radius:10px;
+                    }
+                """)
+                wrap_l = QVBoxLayout(wrap)
+                wrap_l.setContentsMargins(5, 5, 5, 5)
+                wrap_l.setSpacing(4)
 
-            self.img_labels.append(img)
-            preview_grid.addWidget(card, 0, i, Qt.AlignTop | Qt.AlignHCenter)
+                image_label = AspectImageLabel(title=title_text)
+                image_label.setToolTip(
+                    "Click to open the original full-resolution image. "
+                    "Use the popup controls or Ctrl + mouse wheel to zoom."
+                )
+                wrap_l.addWidget(image_label, 0, Qt.AlignCenter)
+
+                stage_lbl = QLabel(stage_name)
+                stage_lbl.setAlignment(Qt.AlignCenter)
+                stage_lbl.setStyleSheet(
+                    "font:700 9px 'Segoe UI'; color:#6b5a78; background:transparent; border:none;"
+                )
+                wrap_l.addWidget(stage_lbl)
+                return wrap, image_label
+
+            calibration_wrap, calibration_img = build_thumb(
+                "Calibration",
+                f"{label_name.title()} — Calibration",
+            )
+            reference_wrap, reference_img = build_thumb(
+                "Reference",
+                f"{label_name.title()} — Reference",
+            )
+
+            thumbs_row.addWidget(calibration_wrap)
+            thumbs_row.addWidget(reference_wrap)
+            card_l.addLayout(thumbs_row)
+
+            self.calibration_img_labels.append(calibration_img)
+            self.reference_img_labels.append(reference_img)
+            preview_grid.addWidget(card, 0, i)
 
         for col in range(len(self.labels)):
             preview_grid.setColumnStretch(col, 1)
-        main_l.addLayout(preview_grid)
+        preview_wrap.setMinimumWidth(len(self.labels) * 240)
+        preview_scroll.setWidget(preview_wrap)
+        main_l.addWidget(preview_scroll)
+
+        # --------------------------------------------------------------
+        # Actions + status
+        # --------------------------------------------------------------
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(10)
 
         action_bar = QFrame()
         action_bar.setObjectName("ActionBar")
-        action_bar.setFixedHeight(62)
         action_l = QHBoxLayout(action_bar)
-        action_l.setContentsMargins(14, 10, 14, 10)
-        action_l.setSpacing(10)
+        action_l.setContentsMargins(12, 9, 12, 9)
+        action_l.setSpacing(8)
 
-        self.capture_btn = self._make_button("Start Capture", "primary")
+        self.capture_btn = self._make_button("Capture Calibration + Reference", "primary")
         self.capture_btn.clicked.connect(self.confirm_and_start_capture)
         self.image_processing_btn = self._make_button("Next: Image Processing", "secondary")
         self.image_processing_btn.clicked.connect(
@@ -3280,32 +3786,122 @@ class NewSKUPage(QWidget):
         self.close_btn.clicked.connect(self.close_page)
 
         action_l.addWidget(self.capture_btn)
-        action_l.addWidget(self.image_processing_btn)
         action_l.addWidget(self.refresh_btn)
+        action_l.addWidget(self.image_processing_btn)
         action_l.addStretch(1)
         action_l.addWidget(self.close_btn)
-        main_l.addWidget(action_bar)
 
         status_card = QFrame()
         status_card.setObjectName("StatusCard")
-        status_card.setFixedHeight(66)
+        status_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         status_l = QVBoxLayout(status_card)
-        status_l.setContentsMargins(14, 10, 14, 10)
-        status_title = QLabel("Status")
+        status_l.setContentsMargins(12, 8, 12, 8)
+        status_l.setSpacing(3)
+        status_title = QLabel("Capture Status")
         status_title.setObjectName("SectionTitle")
         status_l.addWidget(status_title)
-        self.status_lbl = QLabel("Ready")
+        self.status_lbl = QLabel("Ready — select a camera profile, then start capture")
         self.status_lbl.setObjectName("HintText")
         self.status_lbl.setWordWrap(True)
         status_l.addWidget(self.status_lbl)
-        main_l.addWidget(status_card)
+
+        bottom_row.addWidget(action_bar, 3)
+        bottom_row.addWidget(status_card, 2)
+        main_l.addLayout(bottom_row)
+
+        # --------------------------------------------------------------
+        # Compact capture console. It receives profile, capture, completion
+        # and error messages without changing the camera/backend flow.
+        # --------------------------------------------------------------
+        console_card = QFrame()
+        console_card.setObjectName("InnerCard")
+        console_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        console_l = QVBoxLayout(console_card)
+        console_l.setContentsMargins(10, 7, 10, 9)
+        console_l.setSpacing(5)
+
+        console_header = QHBoxLayout()
+        console_header.setSpacing(7)
+        console_title = QLabel("Capture Console")
+        console_title.setObjectName("SectionTitle")
+        console_header.addWidget(console_title)
+
+        console_hint = QLabel("Profile • PLC capture stages • save completion • errors")
+        console_hint.setObjectName("HintText")
+        console_header.addWidget(console_hint)
+        console_header.addStretch(1)
+
+        self.capture_console_state_lbl = QLabel("READY")
+        self.capture_console_state_lbl.setAlignment(Qt.AlignCenter)
+        self._set_capture_console_state("READY")
+        console_header.addWidget(self.capture_console_state_lbl)
+
+        self.capture_console_toggle_btn = self._make_button("Hide Console", "secondary")
+        self.capture_console_toggle_btn.setFixedWidth(104)
+        self.capture_console_toggle_btn.setFixedHeight(25)
+        self.capture_console_toggle_btn.clicked.connect(self._toggle_capture_console)
+        console_header.addWidget(self.capture_console_toggle_btn)
+
+        self.capture_console_clear_btn = self._make_button("Clear", "secondary")
+        self.capture_console_clear_btn.setFixedWidth(66)
+        self.capture_console_clear_btn.setFixedHeight(25)
+        self.capture_console_clear_btn.clicked.connect(self._clear_capture_console)
+        console_header.addWidget(self.capture_console_clear_btn)
+        console_l.addLayout(console_header)
+
+        self.capture_console = QPlainTextEdit()
+        self.capture_console.setReadOnly(True)
+        self.capture_console.setUndoRedoEnabled(False)
+        self.capture_console.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.capture_console.document().setMaximumBlockCount(500)
+        self.capture_console.setMinimumHeight(84)
+        self.capture_console.setMaximumHeight(104)
+        self.capture_console.setStyleSheet("""
+            QPlainTextEdit {
+                background:#17131b;
+                color:#efe8f4;
+                border:1px solid #33283b;
+                border-radius:8px;
+                padding:7px 9px;
+                selection-background-color:#6b2aa3;
+                selection-color:white;
+                font:10px 'Consolas';
+            }
+            QScrollBar:vertical {
+                background:#211a27; width:8px; border-radius:4px;
+            }
+            QScrollBar::handle:vertical {
+                background:#725184; border-radius:4px; min-height:22px;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical { height:0; }
+            QScrollBar:horizontal {
+                background:#211a27; height:8px; border-radius:4px;
+            }
+            QScrollBar::handle:horizontal {
+                background:#725184; border-radius:4px; min-width:22px;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal { width:0; }
+        """)
+        console_l.addWidget(self.capture_console)
+        main_l.addWidget(console_card)
 
         root.addWidget(main_card, 1)
+        self._update_capture_plan_labels()
 
     def _set_controls_enabled(self, enabled: bool):
-        for btn in [self.capture_btn, self.image_processing_btn, self.refresh_btn, self.close_btn]:
+        for btn in [
+            self.capture_btn,
+            self.image_processing_btn,
+            self.refresh_btn,
+            self.close_btn,
+            self.capture_profile_refresh_btn,
+        ]:
             if btn is not None:
                 btn.setEnabled(enabled)
+        if self.capture_profile_combo is not None:
+            self.capture_profile_combo.setEnabled(enabled)
         if self.tab_buttons:
             current_idx = self.stack.currentIndex() if self.stack else -1
             for idx, tab_btn in enumerate(self.tab_buttons):
@@ -3314,60 +3910,101 @@ class NewSKUPage(QWidget):
     def refresh_preview_only(self):
         if self.capture_in_progress:
             return
-        if not self.latest_preview_paths:
+        if not self.latest_preview_paths and not self.latest_calibration_preview_paths:
             self.load_raw_images_for_preview()
-        preview_paths = [self.latest_preview_paths.get(key, "") for key in self._preview_serial_order()]
-        while len(preview_paths) < len(self.labels):
-            preview_paths.append("")
-        for i in range(len(self.labels)):
-            if i < len(self.img_labels):
-                self.img_labels[i].set_image_path(preview_paths[i])
+            return
+        self._update_preview_from_latest()
 
     def refresh_preview_with_raw_load(self):
         if self.capture_in_progress:
             return
         self.load_raw_images_for_preview()
-        self.refresh_preview_only()
-        if self.status_lbl is not None:
-            if self.latest_preview_paths:
-                self.status_lbl.setText(f"Loaded {len(self.latest_preview_paths)} images from raw folder")
-            else:
-                self.status_lbl.setText("No images found in raw folder")
 
     def _update_preview_from_latest(self):
-        preview_paths = self._ordered_preview_paths()
-        while len(preview_paths) < len(self.labels):
-            preview_paths.append("")
-        for i in range(len(self.labels)):
-            if i < len(self.img_labels):
-                self.img_labels[i].set_image_path(preview_paths[i])
+        calibration_paths = self._ordered_stage_preview_paths(
+            self.latest_calibration_preview_paths
+        )
+        reference_paths = self._ordered_stage_preview_paths(
+            self.latest_preview_paths
+        )
+
+        for index in range(len(self.labels)):
+            if index < len(self.calibration_img_labels):
+                self.calibration_img_labels[index].set_image_path(
+                    calibration_paths[index] if index < len(calibration_paths) else ""
+                )
+            if index < len(self.reference_img_labels):
+                self.reference_img_labels[index].set_image_path(
+                    reference_paths[index] if index < len(reference_paths) else ""
+                )
 
     def _get_capture_plan(self):
-        """Fixed New SKU capture plan: two images for each of five sides."""
+        """Fixed New SKU plan: one calibration set plus one normal/reference set."""
         return CAPTURE_IMAGES_PER_SIDE, 0, len(CAPTURE_ROLE_ORDER)
+
+    def _validate_capture_profile_selection(self) -> str:
+        profile_sku = self._selected_capture_profile_sku()
+        if not profile_sku:
+            raise RuntimeError(
+                "No camera profile is selected. Click Refresh Profiles and select a profile."
+            )
+
+        profile_path = (
+            self._capture_profile_root()
+            / profile_sku
+            / "camera_profile.json"
+        )
+        if not profile_path.is_file():
+            raise RuntimeError(f"Camera profile file not found: {profile_path}")
+        return profile_sku
 
     def confirm_and_start_capture(self):
         if self.capture_in_progress:
             return
 
-        total, good_count, expected = self._get_capture_plan()
-        sku_name = self._get_sku_name()
+        sku_name = _safe_name(self._get_sku_name())
+        if sku_name == "unknown_sku":
+            self._set_capture_console_state("WARNING")
+            self._append_capture_console(
+                "WARNING",
+                "Capture blocked: complete and save SKU Setup first."
+            )
+            QMessageBox.warning(
+                self,
+                "SKU Required",
+                "Complete and save SKU Setup before starting image capture.",
+            )
+            return
+
+        try:
+            profile_sku = self._validate_capture_profile_selection()
+        except Exception as exc:
+            self._set_capture_console_state("ERROR")
+            self._append_capture_console("ERROR", f"Capture blocked: {exc}")
+            QMessageBox.warning(self, "Camera Profile Required", str(exc))
+            return
+
+        calibration_root = (
+            Path(self.media_path)
+            / "new_sku_images"
+            / sku_name
+            / "Calibration"
+        )
+        cycle_root = next_cycle_dir(self.media_path, sku_name, create=False)
 
         msg = (
-            f"Capture {CAPTURE_IMAGES_PER_SIDE} images for each tyre side "
-            f"({CAPTURE_EXPECTED_TOTAL} images total) for SKU: {sku_name}\n\n"
-            "Sides: Sidewall 1, Sidewall 2, Innerwall, Tread and Bead\n\n"
-            f"Save path:\n"
-            f"media/new_sku_images/{_safe_name(sku_name)}/Cycle_<N>/<side>/\n\n"
-            "After clicking OK, the camera streams will start once and the "
-            "system will wait for the PLC trigger.\n\n"
-            "Capture set 1:\n"
-            "  MAIN DB74.DBX0.3 -> Sidewall1, Sidewall2, Innerwall and Tread\n"
-            "  BEAD DB74.DBX86.0 -> Bead\n\n"
-            "The same two PLC rising edges are required again for capture set 2.\n\n"
-            "For each trigger set, software FFC must complete successfully before "
-            "that set is saved. After 10 corrected images are saved, all streams "
-            "will stop once."
+            f"Destination SKU: {sku_name}\n"
+            f"Camera profile: {profile_sku}\n\n"
+            "The cameras will start once and wait for two complete PLC trigger sets.\n\n"
+            "SET 1 — CALIBRATION\n"
+            "  BEAD trigger: Sidewall1 + Sidewall2 + Tread + Bead\n"
+            "  MAIN trigger: Innerwall\n"
+            f"  Save: {calibration_root}/<side>/\n\n"
+            "SET 2 — REFERENCE / NORMAL\n"
+            "  BEAD trigger: Sidewall1 + Sidewall2 + Tread + Bead\n"
+            "  MAIN trigger: Innerwall\n"
+            f"  Save: {cycle_root}/<side>/\n\n"
+            "All ten files are FFC-corrected. Streams stop once after both sets."
         )
 
         reply = QMessageBox.question(
@@ -3377,16 +4014,25 @@ class NewSKUPage(QWidget):
             QMessageBox.Ok | QMessageBox.Cancel,
             QMessageBox.Cancel,
         )
-
         if reply == QMessageBox.Ok:
+            self._append_capture_console(
+                "START",
+                f"Operator confirmed capture | destination={sku_name} | profile={profile_sku}"
+            )
             self.start_capture()
-
+        else:
+            self._append_capture_console("INFO", "Capture confirmation cancelled by operator.")
 
     def start_capture(self):
         if self.capture_in_progress:
             return
 
         if capture_new_sku_images is None:
+            self._set_capture_console_state("ERROR")
+            self._append_capture_console(
+                "ERROR",
+                "Capture module import failed: src/camera/new_sku_software_capture.py"
+            )
             QMessageBox.critical(
                 self,
                 "Capture Error",
@@ -3396,15 +4042,33 @@ class NewSKUPage(QWidget):
             return
 
         if self.multi_camera_manager is None:
+            self._set_capture_console_state("ERROR")
+            self._append_capture_console(
+                "ERROR",
+                "No connected camera manager is available. Run Hardware Test and connect cameras."
+            )
             QMessageBox.critical(
                 self,
                 "Camera Error",
                 "No connected camera manager found.\n\n"
-                "Please run Test Mode first and connect cameras."
+                "Run Hardware Test first and connect the cameras.",
             )
             return
 
+        try:
+            profile_sku = self._validate_capture_profile_selection()
+        except Exception as exc:
+            self._set_capture_console_state("ERROR")
+            self._append_capture_console("ERROR", f"Profile validation failed: {exc}")
+            QMessageBox.warning(self, "Camera Profile Required", str(exc))
+            return
+
         self.capture_in_progress = True
+        self._set_capture_console_state("RUNNING", "CAPTURING")
+        self._append_capture_console(
+            "START",
+            f"Starting two-set PLC software capture | SKU={_safe_name(self._get_sku_name())} | profile={profile_sku}"
+        )
         self._set_controls_enabled(False)
 
         if self.preview_timer:
@@ -3412,15 +4076,20 @@ class NewSKUPage(QWidget):
 
         self._switch_tab(TAB_CAPTURE)
 
-        images_per_camera, good_folder_count, expected_cameras = self._get_capture_plan()
+        images_per_camera, good_folder_count, _expected_cameras = self._get_capture_plan()
         sku_name = _safe_name(self._get_sku_name())
 
         self.latest_preview_paths = {}
+        self.latest_calibration_preview_paths = {}
+        self._update_preview_from_latest()
+
+        if self.capture_workflow_sku_lbl is not None:
+            self.capture_workflow_sku_lbl.setText(sku_name)
 
         if self.status_lbl is not None:
             self.status_lbl.setText(
-                f"Loading SKU camera profile and arming PLC capture | SKU={sku_name} | "
-                f"2 corrected images/side | Waiting for MAIN and BEAD trigger sets"
+                f"Applying profile {profile_sku} and arming stage 1/2 — Calibration | "
+                "waiting for BEAD and MAIN PLC edges"
             )
 
         self.capture_worker = CaptureWorker(
@@ -3432,16 +4101,14 @@ class NewSKUPage(QWidget):
             sku_meta=self.sku_meta,
             meta_collection=self.meta_collection,
             gridfs_bucket=self.gridfs_bucket,
+            camera_profile_sku=profile_sku,
             parent=self,
         )
 
         self.capture_worker.status_signal.connect(self._on_capture_status)
         self.capture_worker.finished_signal.connect(self._on_capture_finished)
         self.capture_worker.error_signal.connect(self._on_capture_error)
-
         self.capture_worker.start()
-
-
 
     # ======================================================================
     # F-019 VALIDATION

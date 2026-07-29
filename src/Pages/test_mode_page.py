@@ -19,38 +19,162 @@ from src.Pages.alarm_center_page import AlarmCenterPage
 from src.Pages.lab_camera_mode_page import LabCameraModeTab
 
 
-def _card():
-    fr = QFrame()
-    fr.setStyleSheet("""
-        QFrame {
-            background: white;
-            border-radius: 14px;
-            border: 1px solid #ececec;
-        }
-    """)
-    return fr
+MODERN_MESSAGE_BOX_STYLE = """
+    QMessageBox {
+        background-color: #FFFFFF;
+        color: #172033;
+    }
+    QMessageBox QWidget {
+        background-color: #FFFFFF;
+        color: #172033;
+    }
+    QMessageBox QLabel {
+        background: transparent;
+        color: #172033;
+        font: 600 10px 'Segoe UI';
+        min-width: 440px;
+    }
+    QMessageBox QPushButton {
+        min-width: 92px;
+        min-height: 32px;
+        padding: 0 14px;
+        border-radius: 7px;
+        border: 1px solid #CFC5E3;
+        background: #FFFFFF;
+        color: #4C1D72;
+        font: 700 10px 'Segoe UI';
+    }
+    QMessageBox QPushButton:hover {
+        background: #F5F3FF;
+        border-color: #7C3AED;
+        color: #5B21B6;
+    }
+    QMessageBox QPushButton:default {
+        background: #6D28D9;
+        border-color: #6D28D9;
+        color: #FFFFFF;
+    }
+    QMessageBox QPushButton:default:hover {
+        background: #5B21B6;
+        border-color: #5B21B6;
+    }
+    QMessageBox QPlainTextEdit,
+    QMessageBox QTextEdit {
+        background: #F8FAFC;
+        color: #172033;
+        border: 1px solid #DCE3EC;
+        border-radius: 7px;
+        padding: 7px;
+        font: 500 9px 'Consolas';
+    }
+"""
+
+
+def show_modern_message_box(
+    parent,
+    icon,
+    title,
+    text,
+    informative_text="",
+    detailed_text="",
+    buttons=QMessageBox.Ok,
+    default_button=None,
+):
+    """Show a readable white Apollo-themed message box."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(str(title or "Apollo"))
+    box.setIcon(icon)
+    box.setTextFormat(Qt.PlainText)
+    box.setText(str(text or ""))
+    if informative_text:
+        box.setInformativeText(str(informative_text))
+    if detailed_text:
+        box.setDetailedText(str(detailed_text))
+    box.setStandardButtons(buttons)
+    if default_button is not None:
+        box.setDefaultButton(default_button)
+    box.setStyleSheet(MODERN_MESSAGE_BOX_STYLE)
+    box.setModal(True)
+    box.setMinimumWidth(560)
+    for label in box.findChildren(QLabel):
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    return box.exec_()
+
+
+def _card(object_name="ModernCard"):
+    frame = QFrame()
+    frame.setObjectName(object_name)
+    frame.setFrameShape(QFrame.NoFrame)
+    return frame
 
 
 def _set(dot: QLabel, txt: QLabel, state: str, msg: str):
-    colors = {
-        "ok": "#2f9e44",
-        "warn": "#ff9800",
-        "err": "#e03131",
-        "off": "#666666",
+    """Update a hardware card without changing the existing backend contract."""
+    state = str(state or "off").strip().lower()
+    meta = {
+        "ok": {
+            "label": "READY",
+            "fg": "#15803D",
+            "bg": "#DCFCE7",
+            "border": "#BBF7D0",
+            "detail": "#166534",
+        },
+        "warn": {
+            "label": "CHECKING",
+            "fg": "#B45309",
+            "bg": "#FEF3C7",
+            "border": "#FDE68A",
+            "detail": "#92400E",
+        },
+        "err": {
+            "label": "FAILED",
+            "fg": "#B91C1C",
+            "bg": "#FEE2E2",
+            "border": "#FECACA",
+            "detail": "#991B1B",
+        },
+        "off": {
+            "label": "WAITING",
+            "fg": "#64748B",
+            "bg": "#F1F5F9",
+            "border": "#E2E8F0",
+            "detail": "#475569",
+        },
     }
+    cfg = meta.get(state, meta["off"])
 
-    c = colors.get(state, "#666666")
+    dot.setProperty("hardwareState", state)
+    dot.setText(cfg["label"])
+    dot.setStyleSheet(f"""
+        QLabel {{
+            color: {cfg['fg']};
+            background: {cfg['bg']};
+            border: 1px solid {cfg['border']};
+            border-radius: 10px;
+            padding: 3px 9px;
+            font: 800 9px 'Segoe UI';
+        }}
+    """)
 
-    dot.setStyleSheet(f"QLabel {{ font: 900 16px 'Segoe UI'; color: {c}; }}")
     txt.setStyleSheet(f"""
         QLabel {{
-            font: 700 11px 'Segoe UI';
-            color: {c};
+            font: 600 10px 'Segoe UI';
+            color: {cfg['detail']};
             background: transparent;
             border: none;
+            padding: 2px;
         }}
     """)
     txt.setText(msg)
+
+    owner = dot.parent()
+    while owner is not None:
+        refresh = getattr(owner, "_refresh_summary", None)
+        if callable(refresh):
+            refresh()
+            break
+        owner = owner.parent()
 
 
 class HardwareTestTab(QWidget):
@@ -73,209 +197,388 @@ class HardwareTestTab(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        self.setStyleSheet("QWidget { background-color: #f5f5f5; }")
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(10)
-
-        top = QFrame()
-        top.setStyleSheet("QFrame { background:#571c86; border-radius:12px; }")
-        tl = QHBoxLayout(top)
-        tl.setContentsMargins(16, 10, 16, 10)
-
-        title = QLabel("System Test Monitor")
-        title.setStyleSheet("font: 900 14px 'Segoe UI'; color:white; border:none;")
-        tl.addWidget(title)
-
-        tl.addStretch()
-
-        badge = QLabel("● HARDWARE CHECK")
-        badge.setStyleSheet("font: 900 11px 'Segoe UI'; color:#ffcc00; border:none;")
-        tl.addWidget(badge)
-
-        root.addWidget(top)
-
-        page_scroll = QScrollArea()
-        page_scroll.setWidgetResizable(True)
-        page_scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background: #f5f5f5;
+        self.setObjectName("HardwareTestTab")
+        self.setStyleSheet("""
+            QWidget#HardwareTestTab {
+                background: #F4F6FA;
+                color: #172033;
             }
-            QScrollBar:vertical {
-                border: none;
-                background: #f1f1f1;
-                width: 10px;
-                border-radius: 5px;
+            QWidget#HardwareTestTab QToolTip {
+                background: #FFFFFF;
+                color: #172033;
+                border: 1px solid #D9D3E8;
+                border-radius: 6px;
+                padding: 6px 8px;
+                font: 600 10px 'Segoe UI';
             }
-            QScrollBar::handle:vertical {
-                background: #c9c9c9;
-                border-radius: 5px;
-                min-height: 30px;
+            QWidget#HardwareTestTab QFrame#HeaderCard,
+            QWidget#HardwareTestTab QFrame#ProgressCard,
+            QWidget#HardwareTestTab QFrame#ActionCard,
+            QWidget#HardwareTestTab QFrame#GridCard,
+            QWidget#HardwareTestTab QFrame#StatusCard {
+                background: #FFFFFF;
+                border: 1px solid #DCE3EC;
+                border-radius: 10px;
+            }
+            QWidget#HardwareTestTab QFrame#StatusBody {
+                background: #F8FAFC;
+                border: 1px solid #E8EDF4;
+                border-radius: 8px;
+            }
+            QWidget#HardwareTestTab QLabel {
+                background: transparent;
+            }
+            QWidget#HardwareTestTab QCheckBox {
+                color: #263247;
+                spacing: 8px;
+                font: 600 10px 'Segoe UI';
+            }
+            QWidget#HardwareTestTab QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #B9C3D0;
+                border-radius: 4px;
+                background: #FFFFFF;
+            }
+            QWidget#HardwareTestTab QCheckBox::indicator:hover {
+                border-color: #7C3AED;
+            }
+            QWidget#HardwareTestTab QCheckBox::indicator:checked {
+                background: #6D28D9;
+                border-color: #6D28D9;
+            }
+            QWidget#HardwareTestTab QPushButton {
+                min-height: 34px;
+                border-radius: 7px;
+                padding: 0 13px;
+                font: 700 10px 'Segoe UI';
+            }
+            QWidget#HardwareTestTab QPushButton#PrimaryButton {
+                background: #6D28D9;
+                color: #FFFFFF;
+                border: 1px solid #6D28D9;
+            }
+            QWidget#HardwareTestTab QPushButton#PrimaryButton:hover {
+                background: #5B21B6;
+                border-color: #5B21B6;
+            }
+            QWidget#HardwareTestTab QPushButton#SuccessButton {
+                background: #15803D;
+                color: #FFFFFF;
+                border: 1px solid #15803D;
+            }
+            QWidget#HardwareTestTab QPushButton#SuccessButton:hover {
+                background: #166534;
+            }
+            QWidget#HardwareTestTab QPushButton#DangerButton {
+                background: #DC2626;
+                color: #FFFFFF;
+                border: 1px solid #DC2626;
+            }
+            QWidget#HardwareTestTab QPushButton#DangerButton:hover {
+                background: #B91C1C;
+            }
+            QWidget#HardwareTestTab QPushButton#SecondaryButton {
+                background: #FFFFFF;
+                color: #5B21B6;
+                border: 1px solid #B99BE8;
+            }
+            QWidget#HardwareTestTab QPushButton#SecondaryButton:hover {
+                background: #F5F3FF;
+                border-color: #7C3AED;
+            }
+            QWidget#HardwareTestTab QPushButton#DarkButton {
+                background: #253044;
+                color: #FFFFFF;
+                border: 1px solid #253044;
+            }
+            QWidget#HardwareTestTab QPushButton#DarkButton:hover {
+                background: #111827;
+            }
+            QWidget#HardwareTestTab QPushButton:disabled {
+                background: #EEF2F7;
+                color: #94A3B8;
+                border-color: #DCE3EC;
+            }
+            QWidget#HardwareTestTab QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QWidget#HardwareTestTab QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+            QWidget#HardwareTestTab QScrollBar:vertical {
+                background: #EEF2F7;
+                width: 9px;
+                margin: 2px;
+                border-radius: 4px;
+            }
+            QWidget#HardwareTestTab QScrollBar::handle:vertical {
+                background: #B7A1D5;
+                min-height: 28px;
+                border-radius: 4px;
+            }
+            QWidget#HardwareTestTab QScrollBar::handle:vertical:hover {
+                background: #7C3AED;
+            }
+            QWidget#HardwareTestTab QScrollBar::add-line:vertical,
+            QWidget#HardwareTestTab QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 8, 10, 10)
+        root.setSpacing(9)
+
+        # ------------------------------------------------------------------
+        # Header
+        # ------------------------------------------------------------------
+        header = _card("HeaderCard")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 12, 16, 12)
+        header_layout.setSpacing(12)
+
+        accent = QFrame()
+        accent.setFixedWidth(5)
+        accent.setStyleSheet("background:#6D28D9; border:none; border-radius:2px;")
+        header_layout.addWidget(accent)
+
+        title_wrap = QVBoxLayout()
+        title_wrap.setSpacing(1)
+        title = QLabel("Hardware Readiness Center")
+        title.setStyleSheet("font: 800 17px 'Segoe UI'; color:#172033;")
+        subtitle = QLabel(
+            "Verify lighting, cameras, lasers and PLC communication before production inspection."
+        )
+        subtitle.setStyleSheet("font: 500 10px 'Segoe UI'; color:#667085;")
+        title_wrap.addWidget(title)
+        title_wrap.addWidget(subtitle)
+        header_layout.addLayout(title_wrap)
+        header_layout.addStretch()
+
+        last_check_wrap = QVBoxLayout()
+        last_check_wrap.setSpacing(0)
+        last_caption = QLabel("LAST CHECK")
+        last_caption.setAlignment(Qt.AlignRight)
+        last_caption.setStyleSheet("font: 700 8px 'Segoe UI'; color:#98A2B3;")
+        self.last_check_label = QLabel("Not run yet")
+        self.last_check_label.setAlignment(Qt.AlignRight)
+        self.last_check_label.setStyleSheet("font: 700 10px 'Segoe UI'; color:#344054;")
+        last_check_wrap.addWidget(last_caption)
+        last_check_wrap.addWidget(self.last_check_label)
+        header_layout.addLayout(last_check_wrap)
+
+        self.overall_badge = QLabel("WAITING")
+        self.overall_badge.setAlignment(Qt.AlignCenter)
+        self.overall_badge.setMinimumWidth(92)
+        self.overall_badge.setStyleSheet("""
+            QLabel {
+                color:#64748B;
+                background:#F1F5F9;
+                border:1px solid #E2E8F0;
+                border-radius:12px;
+                padding:5px 12px;
+                font:800 9px 'Segoe UI';
+            }
+        """)
+        header_layout.addWidget(self.overall_badge)
+        root.addWidget(header)
+
+        # ------------------------------------------------------------------
+        # Progress and summary
+        # ------------------------------------------------------------------
+        progress_card = _card("ProgressCard")
+        progress_layout = QHBoxLayout(progress_card)
+        progress_layout.setContentsMargins(14, 9, 14, 9)
+        progress_layout.setSpacing(12)
+
+        status_wrap = QVBoxLayout()
+        status_wrap.setSpacing(1)
+        status_caption = QLabel("SYSTEM CHECK STATUS")
+        status_caption.setStyleSheet("font:700 8px 'Segoe UI'; color:#98A2B3;")
+        self.p_label = QLabel("System Status: WAITING FOR HARDWARE CHECK")
+        self.p_label.setStyleSheet("font:800 10px 'Segoe UI'; color:#344054;")
+        status_wrap.addWidget(status_caption)
+        status_wrap.addWidget(self.p_label)
+        progress_layout.addLayout(status_wrap, 2)
+
+        self.pbar = QProgressBar()
+        self.pbar.setRange(0, 100)
+        self.pbar.setValue(0)
+        self.pbar.setTextVisible(False)
+        self.pbar.setFixedHeight(9)
+        self.pbar.setStyleSheet("""
+            QProgressBar {
+                background:#E9EDF3;
+                border:none;
+                border-radius:4px;
+            }
+            QProgressBar::chunk {
+                background:#6D28D9;
+                border-radius:4px;
+            }
+        """)
+        progress_layout.addWidget(self.pbar, 4)
+
+        def summary_stat(caption, initial, fg, bg):
+            frame = QFrame()
+            frame.setStyleSheet(
+                f"QFrame {{ background:{bg}; border:none; border-radius:7px; }}"
+            )
+            frame.setMinimumWidth(74)
+            layout = QVBoxLayout(frame)
+            layout.setContentsMargins(9, 4, 9, 4)
+            layout.setSpacing(0)
+            value = QLabel(initial)
+            value.setAlignment(Qt.AlignCenter)
+            value.setStyleSheet(f"font:800 13px 'Segoe UI'; color:{fg};")
+            label = QLabel(caption)
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet(f"font:700 7px 'Segoe UI'; color:{fg};")
+            layout.addWidget(value)
+            layout.addWidget(label)
+            return frame, value
+
+        ready_card, self.ready_count_label = summary_stat("READY", "0", "#15803D", "#ECFDF3")
+        check_card, self.checking_count_label = summary_stat("CHECKING", "0", "#B45309", "#FFFAEB")
+        fail_card, self.failed_count_label = summary_stat("FAILED", "0", "#B91C1C", "#FEF3F2")
+        wait_card, self.waiting_count_label = summary_stat("WAITING", "4", "#64748B", "#F2F4F7")
+        for card in (ready_card, check_card, fail_card, wait_card):
+            progress_layout.addWidget(card)
+
+        root.addWidget(progress_card)
+
+        # ------------------------------------------------------------------
+        # Hardware cards
+        # ------------------------------------------------------------------
+        page_scroll = QScrollArea()
+        page_scroll.setWidgetResizable(True)
 
         scroll_widget = QWidget()
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setContentsMargins(0, 0, 0, 0)
-        scroll_layout.setSpacing(10)
+        scroll_layout.setSpacing(8)
 
-        grid_wrap = _card()
+        grid_wrap = _card("GridCard")
         grid = QGridLayout(grid_wrap)
-        grid.setContentsMargins(14, 14, 14, 14)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
+        grid.setContentsMargins(11, 11, 11, 11)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
 
-        def status_card(name, icon_file, detail_height=150, with_light_checkboxes=False):
-            fr = _card()
-            fr.setMinimumHeight(detail_height + 85)
-            fr.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        def status_card(name, icon_file, fallback, with_light_checkboxes=False):
+            frame = _card("StatusCard")
+            frame.setMinimumHeight(220)
+            frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-            v = QVBoxLayout(fr)
-            v.setContentsMargins(14, 12, 14, 12)
-            v.setSpacing(8)
+            card_layout = QVBoxLayout(frame)
+            card_layout.setContentsMargins(12, 11, 12, 11)
+            card_layout.setSpacing(8)
 
-            row = QHBoxLayout()
-            row.setSpacing(10)
+            header_row = QHBoxLayout()
+            header_row.setSpacing(9)
 
             icon_label = QLabel()
-            icon_label.setFixedSize(40, 40)
+            icon_label.setFixedSize(36, 36)
             icon_label.setAlignment(Qt.AlignCenter)
             icon_label.setStyleSheet("""
                 QLabel {
-                    background: #f7f7f7;
-                    border: 1px solid #e6e6e6;
-                    border-radius: 10px;
+                    background:#F5F3FF;
+                    color:#6D28D9;
+                    border:1px solid #E9DDF8;
+                    border-radius:8px;
+                    font:800 9px 'Segoe UI';
                 }
             """)
 
-            icon_path = ""
-            if self.media_path:
-                icon_path = os.path.join(self.media_path, "img", icon_file)
-
+            icon_path = os.path.join(self.media_path, "img", icon_file) if self.media_path else ""
             if icon_path and os.path.exists(icon_path):
-                pm = QPixmap(icon_path).scaled(
-                    28, 28,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
+                pixmap = QPixmap(icon_path).scaled(
+                    23, 23, Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
-                icon_label.setPixmap(pm)
+                icon_label.setPixmap(pixmap)
             else:
-                icon_label.setText("🖥️")
+                icon_label.setText(fallback)
 
+            title_wrap = QVBoxLayout()
+            title_wrap.setSpacing(0)
             name_label = QLabel(name)
-            name_label.setStyleSheet("""
-                QLabel {
-                    font: 900 12px 'Segoe UI';
-                    color:#222;
-                    border:none;
-                    background: transparent;
-                }
-            """)
+            name_label.setStyleSheet("font:800 11px 'Segoe UI'; color:#172033;")
+            description = {
+                "Lighting System": "Operator confirmation for inspection illumination",
+                "Lasers": "Connectivity and acquisition readiness",
+                "Camera Array": "Expected camera discovery and communication",
+                "PLC": "Controller communication and result-bit verification",
+            }.get(name, "Hardware readiness")
+            description_label = QLabel(description)
+            description_label.setStyleSheet("font:500 8px 'Segoe UI'; color:#7A8699;")
+            title_wrap.addWidget(name_label)
+            title_wrap.addWidget(description_label)
 
-            dot = QLabel("●")
-            dot.setStyleSheet("QLabel { font:900 16px 'Segoe UI'; color:#666; border:none; }")
+            status_chip = QLabel("WAITING")
+            status_chip.setAlignment(Qt.AlignCenter)
+            status_chip.setMinimumWidth(72)
 
-            row.addWidget(icon_label)
-            row.addWidget(name_label)
-            row.addStretch()
-            row.addWidget(dot)
+            header_row.addWidget(icon_label)
+            header_row.addLayout(title_wrap)
+            header_row.addStretch()
+            header_row.addWidget(status_chip)
+            card_layout.addLayout(header_row)
 
-            v.addLayout(row)
-
-            content_widget = QWidget()
-            content_layout = QVBoxLayout(content_widget)
-            content_layout.setContentsMargins(4, 4, 4, 4)
-            content_layout.setSpacing(6)
+            body = QFrame()
+            body.setObjectName("StatusBody")
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(10, 9, 10, 9)
+            body_layout.setSpacing(7)
 
             if with_light_checkboxes:
-                cb_style = """
-                    QCheckBox {
-                        font: 700 12px 'Segoe UI';
-                        color: #333;
-                        spacing: 8px;
-                    }
-                    QCheckBox::indicator {
-                        width: 18px;
-                        height: 18px;
-                    }
-                """
-
+                checks_grid = QGridLayout()
+                checks_grid.setContentsMargins(0, 0, 0, 0)
+                checks_grid.setHorizontalSpacing(18)
+                checks_grid.setVerticalSpacing(7)
                 for i in range(1, 6):
                     key = f"light{i}"
-                    cb = QCheckBox(f"Light {i} working")
-                    cb.setStyleSheet(cb_style)
-                    self.light_checks[key] = cb
-                    content_layout.addWidget(cb)
+                    checkbox = QCheckBox(f"Light {i} working")
+                    checkbox.setCursor(Qt.PointingHandCursor)
+                    self.light_checks[key] = checkbox
+                    checks_grid.addWidget(checkbox, (i - 1) // 3, (i - 1) % 3)
+                body_layout.addLayout(checks_grid)
+
+                divider = QFrame()
+                divider.setFixedHeight(1)
+                divider.setStyleSheet("background:#E5EAF1; border:none;")
+                body_layout.addWidget(divider)
 
             detail_label = QLabel("Waiting...")
             detail_label.setWordWrap(True)
             detail_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            detail_label.setStyleSheet("""
-                QLabel {
-                    font: 700 11px 'Segoe UI';
-                    color:#666;
-                    background: white;
-                    border:none;
-                    padding: 4px;
-                }
-            """)
-
-            content_layout.addWidget(detail_label)
-            content_layout.addStretch()
+            detail_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
             detail_scroll = QScrollArea()
             detail_scroll.setWidgetResizable(True)
-            detail_scroll.setMinimumHeight(detail_height)
-            detail_scroll.setStyleSheet("""
-                QScrollArea {
-                    background: white;
-                    border: 1px solid #eeeeee;
-                    border-radius: 10px;
-                }
-                QScrollBar:vertical {
-                    border: none;
-                    background: #f0f0f0;
-                    width: 8px;
-                    border-radius: 4px;
-                }
-                QScrollBar::handle:vertical {
-                    background: #c7c7c7;
-                    border-radius: 4px;
-                    min-height: 25px;
-                }
-            """)
-            detail_scroll.setWidget(content_widget)
+            detail_scroll.setMinimumHeight(95)
+            detail_scroll.setWidget(detail_label)
+            body_layout.addWidget(detail_scroll, 1)
+            card_layout.addWidget(body, 1)
 
-            v.addWidget(detail_scroll)
-
-            return fr, dot, detail_label
+            return frame, status_chip, detail_label
 
         w1, self.lights_dot, self.lights_txt = status_card(
-            "Lighting System",
-            "lightbulb.png",
-            detail_height=170,
-            with_light_checkboxes=True,
+            "Lighting System", "lightbulb.png", "LGT", with_light_checkboxes=True
         )
-
         w2, self.laser_dot, self.laser_txt = status_card(
-            "Lasers",
-            "production.png",
-            detail_height=120
+            "Lasers", "production.png", "LSR"
         )
-
         w3, self.cam_dot, self.cam_txt = status_card(
-            "Camera Array",
-            "camera.png",
-            detail_height=180
+            "Camera Array", "camera.png", "CAM"
         )
-
         w4, self.m99_dot, self.m99_txt = status_card(
-            "PLC",
-            "plc.png",
-            detail_height=180
+            "PLC", "plc.png", "PLC"
         )
 
         grid.addWidget(w1, 0, 0)
@@ -284,138 +587,154 @@ class HardwareTestTab(QWidget):
         grid.addWidget(w4, 1, 1)
 
         scroll_layout.addWidget(grid_wrap)
-
         page_scroll.setWidget(scroll_widget)
         root.addWidget(page_scroll, 1)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
+        # ------------------------------------------------------------------
+        # Action bar
+        # ------------------------------------------------------------------
+        action_card = _card("ActionCard")
+        action_layout = QHBoxLayout(action_card)
+        action_layout.setContentsMargins(11, 8, 11, 8)
+        action_layout.setSpacing(8)
 
-        def mkbtn(text, bg, hover, fn):
-            b = QPushButton(text)
-            b.setFixedHeight(40)
-            b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(f"""
-                QPushButton {{
-                    background:{bg};
-                    color:white;
-                    border:none;
-                    border-radius:10px;
-                    font: 700 12px 'Segoe UI';
-                    padding: 0 16px;
-                }}
-                QPushButton:hover {{
-                    background:{hover};
-                }}
-            """)
-            b.clicked.connect(fn)
-            return b
+        def make_button(text, object_name, callback, tooltip=""):
+            button = QPushButton(text)
+            button.setObjectName(object_name)
+            button.setCursor(Qt.PointingHandCursor)
+            if tooltip:
+                button.setToolTip(tooltip)
+            button.clicked.connect(callback)
+            return button
 
-        btn_row.addWidget(
-            mkbtn(
-                "Run Full Hardware Check",
-                "#7C19EE",
-                "#873DDD",
-                self.run_full_hardware_check
-            )
+        self.run_check_btn = make_button(
+            "Run Full Hardware Check",
+            "PrimaryButton",
+            self.run_full_hardware_check,
+            "Run the complete lighting, laser, camera and PLC readiness sequence.",
+        )
+        self.accept_test_btn = make_button(
+            "Test ACCEPT Bit",
+            "SuccessButton",
+            lambda: self.test_result_bit("ACCEPT"),
+            "Pulse and verify the configured PLC ACCEPT result bit.",
+        )
+        self.reject_test_btn = make_button(
+            "Test REJECT Bit",
+            "DangerButton",
+            lambda: self.test_result_bit("REJECT"),
+            "Pulse and verify the configured PLC REJECT result bit.",
+        )
+        self.emergency_stop_btn = make_button(
+            "Emergency Stop",
+            "DangerButton",
+            self.emergency_stop,
+            "Request the Test Mode emergency-stop action.",
+        )
+        self.report_btn = make_button(
+            "Generate Report",
+            "SecondaryButton",
+            self.generate_report,
+            "Generate a text report from the latest full hardware check.",
+        )
+        self.close_btn = make_button(
+            "Close",
+            "DarkButton",
+            self.close_and_reset,
+            "Close Test Mode and return to the Live page.",
         )
 
-        btn_row.addWidget(
-            mkbtn(
-                "Test ACCEPT Bit",
-                "#2f9e44",
-                "#26813a",
-                lambda: self.test_result_bit("ACCEPT")
-            )
-        )
-
-        btn_row.addWidget(
-            mkbtn(
-                "Test REJECT Bit",
-                "#e03131",
-                "#c92a2a",
-                lambda: self.test_result_bit("REJECT")
-            )
-        )
-
-        btn_row.addWidget(
-            mkbtn(
-                "Emergency Stop",
-                "#7C19EE",
-                "#873DDD",
-                self.emergency_stop
-            )
-        )
-
-        btn_row.addWidget(
-            mkbtn(
-                "Generate Report",
-                "#7C19EE",
-                "#873DDD",
-                self.generate_report
-            )
-        )
-
-        btn_row.addStretch()
-
-        btn_row.addWidget(
-            mkbtn(
-                "Close",
-                "#130F0F",
-                "#555555",
-                self.close_and_reset
-            )
-        )
-
-        root.addLayout(btn_row)
-
-        pwrap = QFrame()
-        pwrap.setStyleSheet("""
-            QFrame {
-                background:#ffffff;
-                border-radius:12px;
-                border:1px solid #ececec;
-            }
-        """)
-
-        pl = QHBoxLayout(pwrap)
-        pl.setContentsMargins(14, 8, 14, 8)
-
-        self.p_label = QLabel("System Status: WAITING FOR HARDWARE CHECK")
-        self.p_label.setStyleSheet("""
-            QLabel {
-                font: 900 11px 'Segoe UI';
-                color:#333;
-                border:none;
-                background: transparent;
-            }
-        """)
-        pl.addWidget(self.p_label)
-
-        self.pbar = QProgressBar()
-        self.pbar.setRange(0, 100)
-        self.pbar.setValue(0)
-        self.pbar.setTextVisible(False)
-        self.pbar.setFixedHeight(10)
-        self.pbar.setStyleSheet("""
-            QProgressBar {
-                background:#eee;
-                border-radius:5px;
-                border:none;
-            }
-            QProgressBar::chunk {
-                background:#666;
-                border-radius:5px;
-            }
-        """)
-        pl.addWidget(self.pbar, 1)
-
-        root.addWidget(pwrap)
+        action_layout.addWidget(self.run_check_btn)
+        action_layout.addWidget(self.accept_test_btn)
+        action_layout.addWidget(self.reject_test_btn)
+        action_layout.addWidget(self.emergency_stop_btn)
+        action_layout.addWidget(self.report_btn)
+        action_layout.addStretch()
+        action_layout.addWidget(self.close_btn)
+        root.addWidget(action_card)
 
         _set(self.m99_dot, self.m99_txt, "off", "PLC check not started.")
         _set(self.lights_dot, self.lights_txt, "off", "Select Light 1 to Light 5 if working.")
         _set(self.laser_dot, self.laser_txt, "off", "Laser check not started.")
         _set(self.cam_dot, self.cam_txt, "off", "Camera check not started.")
+        self._refresh_summary()
+
+    def _refresh_summary(self):
+        dots = [
+            getattr(self, "lights_dot", None),
+            getattr(self, "laser_dot", None),
+            getattr(self, "cam_dot", None),
+            getattr(self, "m99_dot", None),
+        ]
+        states = [
+            dot.property("hardwareState") or "off"
+            for dot in dots
+            if dot is not None
+        ]
+        if not states:
+            return
+
+        ready = states.count("ok")
+        checking = states.count("warn")
+        failed = states.count("err")
+        waiting = states.count("off")
+
+        if hasattr(self, "ready_count_label"):
+            self.ready_count_label.setText(str(ready))
+            self.checking_count_label.setText(str(checking))
+            self.failed_count_label.setText(str(failed))
+            self.waiting_count_label.setText(str(waiting))
+
+        if not hasattr(self, "overall_badge"):
+            return
+
+        if failed:
+            label, fg, bg, border = "ATTENTION", "#B91C1C", "#FEE2E2", "#FECACA"
+        elif checking:
+            label, fg, bg, border = "CHECKING", "#B45309", "#FEF3C7", "#FDE68A"
+        elif ready == len(states):
+            label, fg, bg, border = "READY", "#15803D", "#DCFCE7", "#BBF7D0"
+        else:
+            label, fg, bg, border = "WAITING", "#64748B", "#F1F5F9", "#E2E8F0"
+
+        self.overall_badge.setText(label)
+        self.overall_badge.setStyleSheet(f"""
+            QLabel {{
+                color:{fg};
+                background:{bg};
+                border:1px solid {border};
+                border-radius:12px;
+                padding:5px 12px;
+                font:800 9px 'Segoe UI';
+            }}
+        """)
+
+    def show_modern_message(
+        self,
+        level,
+        title,
+        text,
+        informative_text="",
+        details="",
+        buttons=QMessageBox.Ok,
+        default_button=None,
+    ):
+        icon_map = {
+            "information": QMessageBox.Information,
+            "warning": QMessageBox.Warning,
+            "critical": QMessageBox.Critical,
+            "question": QMessageBox.Question,
+        }
+        return show_modern_message_box(
+            self,
+            icon_map.get(str(level).lower(), QMessageBox.Information),
+            title,
+            text,
+            informative_text=informative_text,
+            detailed_text=details,
+            buttons=buttons,
+            default_button=default_button,
+        )
 
     def get_light_feedback(self):
         return {
@@ -436,7 +755,17 @@ class HardwareTestTab(QWidget):
                 operator="",
             )
 
-            self.last_hardware_check_db_id = str(inserted.inserted_id)
+            if isinstance(inserted, dict):
+                inserted_id = (
+                    inserted.get("inserted_id")
+                    or inserted.get("_id")
+                    or inserted.get("id")
+                    or ""
+                )
+            else:
+                inserted_id = getattr(inserted, "inserted_id", "")
+
+            self.last_hardware_check_db_id = str(inserted_id or "")
 
             print(
                 f"[TEST MODE][DB] Hardware check saved to "
@@ -457,17 +786,18 @@ class HardwareTestTab(QWidget):
         """Pulse the configured PLC ACCEPT/REJECT bit and verify read-back."""
         decision = str(decision or "").strip().upper()
 
-        answer = QMessageBox.question(
-            self,
+        answer = self.show_modern_message(
+            "question",
             f"Test {decision} PLC Bit",
-            f"This will pulse the real PLC {decision} output using the current "
-            f".env configuration.\n\n"
-            f"ACCEPT: DB74.DBX0.1\n"
-            f"REJECT: DB74.DBX0.2\n"
-            f"Pulse: 300 ms\n\n"
-            f"Confirm the machine is in a safe test condition. Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            f"This will pulse the real PLC {decision} output.",
+            informative_text=(
+                "ACCEPT: DB74.DBX0.1\n"
+                "REJECT: DB74.DBX0.2\n"
+                "Pulse: 300 ms\n\n"
+                "Confirm the machine is in a safe test condition."
+            ),
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            default_button=QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
             return
@@ -503,10 +833,11 @@ class HardwareTestTab(QWidget):
             self.p_label.setText(
                 f"System Status: PLC {decision} BIT VERIFIED"
             )
-            QMessageBox.information(
-                self,
+            self.show_modern_message(
+                "information",
                 f"{decision} Test Passed",
-                f"{result.get('display')}\n\n{result.get('detail')}",
+                str(result.get("display") or "PLC test passed"),
+                informative_text=str(result.get("detail") or ""),
             )
         else:
             _set(
@@ -518,10 +849,11 @@ class HardwareTestTab(QWidget):
             self.p_label.setText(
                 f"System Status: PLC {decision} BIT TEST FAILED"
             )
-            QMessageBox.critical(
-                self,
+            self.show_modern_message(
+                "critical",
                 f"{decision} Test Failed",
-                f"{result.get('display')}\n\n{result.get('detail')}",
+                str(result.get("display") or "PLC test failed"),
+                informative_text=str(result.get("detail") or ""),
             )
 
     def emergency_stop(self):
@@ -540,10 +872,14 @@ class HardwareTestTab(QWidget):
         """)
         self.p_label.setText("System Status: EMERGENCY STOP REQUESTED")
 
-        QMessageBox.warning(
-            self,
+        self.show_modern_message(
+            "warning",
             "Emergency Stop",
-            "Emergency stop clicked.\n\nConnect this button to actual PLC emergency stop/reset logic if required."
+            "Emergency stop was requested from Test Mode.",
+            informative_text=(
+                "This button currently updates the Test Mode UI only. "
+                "It is not connected to a real PLC emergency-stop command."
+            ),
         )
 
     def generate_report(self):
@@ -552,10 +888,10 @@ class HardwareTestTab(QWidget):
         result = getattr(self, "last_hardware_check_result", None)
 
         if not result:
-            QMessageBox.warning(
-                self,
+            self.show_modern_message(
+                "warning",
                 "No Hardware Check",
-                "Please run Full Hardware Check before generating the report."
+                "Run Full Hardware Check before generating a report.",
             )
             return
 
@@ -616,32 +952,39 @@ MESSAGES:
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(content)
 
-            QMessageBox.information(
-                self,
+            self.show_modern_message(
+                "information",
                 "Report Saved",
-                f"Hardware check report saved:\n{fp}"
+                "Hardware check report saved successfully.",
+                informative_text=fp,
             )
 
         except Exception as e:
-            QMessageBox.critical(self, "Save Error", str(e))
+            self.show_modern_message(
+                "critical",
+                "Save Error",
+                "The hardware-check report could not be saved.",
+                informative_text=str(e),
+            )
 
     def close_and_reset(self):
         existing_thread = getattr(self, "_hardware_check_thread", None)
 
         if existing_thread is not None and existing_thread.isRunning():
-            QMessageBox.warning(
-                self,
+            self.show_modern_message(
+                "warning",
                 "Hardware Check Running",
-                "Hardware check is still running. Please wait until it completes."
+                "The hardware check is still running.",
+                informative_text="Wait for the check to complete before closing Test Mode.",
             )
             return
 
-        if QMessageBox.question(
-            self,
-            "Close",
-            "Close Test Mode and return to Live page?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
+        if self.show_modern_message(
+            "question",
+            "Close Test Mode",
+            "Return to the Live page?",
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            default_button=QMessageBox.Yes,
         ) == QMessageBox.Yes:
             if callable(self.on_close):
                 self.on_close()
@@ -671,36 +1014,47 @@ class TestModePage(QWidget):
         self.alarm_center_page = None
         self.lab_camera_tab = None
 
-        self.setStyleSheet("QWidget { background-color: #f5f5f5; }")
+        self.setObjectName("TestModePage")
+        self.setStyleSheet("""
+            QWidget#TestModePage {
+                background: #F4F6FA;
+            }
+            QWidget#TestModePage QTabWidget::pane {
+                border: 1px solid #DCE3EC;
+                background: #F4F6FA;
+                border-radius: 9px;
+                top: -1px;
+            }
+            QWidget#TestModePage QTabBar::tab {
+                background: #EEF2F7;
+                color: #475467;
+                min-width: 150px;
+                min-height: 34px;
+                padding: 0 18px;
+                margin-right: 2px;
+                border: 1px solid #DCE3EC;
+                border-bottom: none;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+                font: 700 10px 'Segoe UI';
+            }
+            QWidget#TestModePage QTabBar::tab:hover:!selected {
+                background: #F5F3FF;
+                color: #5B21B6;
+            }
+            QWidget#TestModePage QTabBar::tab:selected {
+                background: #5B2185;
+                color: #FFFFFF;
+                border-color: #5B2185;
+            }
+        """)
         root = QVBoxLayout(self)
-        # Keep this page visually compact. The sidebar already identifies it as
-        # System Monitor, so a second purple title banner is unnecessary.
         root.setContentsMargins(8, 0, 8, 8)
-        root.setSpacing(6)
+        root.setSpacing(5)
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #DCE3EC;
-                background: #F4F7FB;
-                border-radius: 8px;
-            }
-            QTabBar::tab {
-                background: #E9EDF3;
-                color: #344054;
-                min-width: 150px;
-                padding: 9px 18px;
-                margin-right: 3px;
-                border-top-left-radius: 7px;
-                border-top-right-radius: 7px;
-                font: 700 11px 'Segoe UI';
-            }
-            QTabBar::tab:selected {
-                background: #571C86;
-                color: white;
-            }
-        """)
+        self.tabs.setUsesScrollButtons(True)
 
         has_hardware = bool(
             session is None
