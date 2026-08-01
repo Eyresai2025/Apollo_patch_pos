@@ -119,7 +119,7 @@ class LaserCaptureTab(QWidget):
         title.setObjectName("PageTitle")
         subtitle = QLabel(
             "Production mode: waits for Siemens PLC DB74.DBX0.3 rising edge and saves "
-            "only reflectance 8-bit PNG, reflectance 16-bit PNG, and one full-resolution PLY."
+            "only height 8-bit PNG, height 16-bit PNG, and one full-resolution PLY."
         )
         subtitle.setObjectName("SubTitle")
         subtitle.setWordWrap(True)
@@ -269,7 +269,7 @@ class LaserCaptureTab(QWidget):
         self.full_ply_chk.setChecked(True)
         self.ply_format_combo = QComboBox()
         self.ply_format_combo.addItems(["binary", "ascii"])
-        self.ply_format_combo.setCurrentText("ascii")
+        self.ply_format_combo.setCurrentText("binary")
         self.debug_ply_step_spin = self.make_spin(1, 100, 1)
         self.center_z_chk = QCheckBox("Center Z by median")
         self.center_z_chk.setChecked(False)
@@ -283,9 +283,9 @@ class LaserCaptureTab(QWidget):
         out_left.addRow("Debug PLY Step", self.debug_ply_step_spin)
         out_left.addRow(self.center_z_chk)
         out_right.addRow("Invalid C Value", self.invalid_c_spin)
-        out_right.addRow("Fallback X Step µm", self.x_scaler_spin)
+        out_right.addRow("X Scaler µm", self.x_scaler_spin)
         out_right.addRow("Z Scaler µm", self.z_scaler_spin)
-        out_right.addRow("Fallback Y Step mm/profile", self.y_step_spin)
+        out_right.addRow("Y Step mm/profile", self.y_step_spin)
 
         output_grid.addLayout(out_left, 0, 0)
         output_grid.addLayout(out_right, 0, 1)
@@ -294,9 +294,9 @@ class LaserCaptureTab(QWidget):
         main.addWidget(output_box)
 
         production_note = QLabel(
-            "Current production output: one full-resolution Sapera-compatible ASCII PLY + "
-            "8-bit reflectance preview + 16-bit reflectance PNG only. X/Y geometry is read "
-            "from the active UserSet; metadata and RAW remain temporary unless checked."
+            "Production output: one full-resolution Sapera-compatible PLY in the selected binary or "
+            "ASCII format + 8-bit reflectance preview + 16-bit reflectance PNG. X/Y geometry "
+            "is read from the active UserSet; metadata and RAW remain temporary unless checked."
         )
         production_note.setObjectName("WarningNote")
         production_note.setWordWrap(True)
@@ -309,7 +309,7 @@ class LaserCaptureTab(QWidget):
 
         table_hint = QLabel(
             "Only rows marked Enabled are passed to the runner. Median Filter maps to "
-            "profileMedianFilterMode; Y Displacement is verified against streamed_displacementY. "
+            "profileMedianFilterMode; Y Displacement maps to displacementBetweenSamplesY. "
             "The connection/capture runner logs whether each feature was accepted by the laser."
         )
         table_hint.setObjectName("SubTitle")
@@ -405,7 +405,6 @@ class LaserCaptureTab(QWidget):
 
         self.setStyleSheet(self._style())
         self._on_run_mode_changed(self.run_mode_combo.currentText())
-        self._apply_global_config_mode(self.config_mode_combo.currentText())
 
     def _style(self) -> str:
         return f"""
@@ -533,7 +532,6 @@ class LaserCaptureTab(QWidget):
             )
 
     def _apply_global_config_mode(self, mode: str) -> None:
-        normalized = str(mode).strip().upper()
         for row in range(self.laser_table.rowCount()):
             combo = self.laser_table.cellWidget(row, 3)
             if isinstance(combo, QComboBox):
@@ -541,18 +539,6 @@ class LaserCaptureTab(QWidget):
             item = self.laser_table.item(row, 4)
             if item is not None:
                 item.setText(self.user_set_edit.text().strip() or "UserSet1")
-
-        # In USERSET1 mode, X/Y geometry comes from verified device readback.
-        # Manual values remain visible only as an emergency PYTHON-mode fallback.
-        userset_mode = normalized == "USERSET1"
-        if hasattr(self, "center_z_chk"):
-            if userset_mode:
-                self.center_z_chk.setChecked(False)
-            self.center_z_chk.setEnabled(not userset_mode)
-        if hasattr(self, "x_scaler_spin"):
-            self.x_scaler_spin.setEnabled(not userset_mode)
-        if hasattr(self, "y_step_spin"):
-            self.y_step_spin.setEnabled(not userset_mode)
 
     def load_default_laser_table(self) -> None:
         rows = [
@@ -662,8 +648,15 @@ class LaserCaptureTab(QWidget):
         ply_format = self.ply_format_combo.currentText().strip().lower()
         debug_step = self.debug_ply_step_spin.value()
 
+        if ply_format not in {"binary", "ascii"}:
+            raise ValueError(
+                f"Invalid PLY format selected: {ply_format!r}. "
+                "Expected 'binary' or 'ascii'."
+            )
+
+        # Full resolution controls point sampling only.
+        # It must never override the selected binary/ascii file format.
         if full_resolution:
-            ply_format = "ascii"
             debug_step = 1
 
         return {
@@ -714,19 +707,19 @@ class LaserCaptureTab(QWidget):
             if noise_level_text:
                 safe_features["noiseReductionLevel"] = self._to_int(noise_level_text, 0)
             if fir_size_text:
-                fir_value = fir_size_text.strip()
-                if fir_value.lower().startswith("fir"):
-                    safe_features["firSize"] = fir_value
-                else:
-                    safe_features["firSize"] = f"fir{self._to_int(fir_value, 0)}"
+                safe_features["firSize"] = (
+                    fir_size_text
+                    if fir_size_text.lower().startswith("fir")
+                    else f"fir{self._to_int(fir_size_text, 0)}"
+                )
             if median_filter_mode:
                 safe_features["profileMedianFilterMode"] = median_filter_mode
             if displacement_y is not None:
-                safe_features["displacementY"] = displacement_y
+                safe_features["displacementBetweenSamplesY"] = displacement_y
 
             optional_locked: Dict[str, object] = {}
             if profile_rate is not None:
-                optional_locked["AcquisitionLineRate"] = profile_rate
+                optional_locked["profileRate"] = profile_rate
             if exposure is not None:
                 optional_locked["ExposureTime"] = exposure
 
@@ -734,10 +727,7 @@ class LaserCaptureTab(QWidget):
                 "label": label,
                 "config_mode": config_mode,
                 "userset_name": user_set,
-                "expected_displacement_y_um": displacement_y,
-                "apply_safe_overrides_after_userset": (
-                    str(config_mode).strip().upper() != "USERSET1"
-                ),
+                "apply_safe_overrides_after_userset": config_mode.upper() != "USERSET1",
                 "write_locked_features": write_locked,
                 "safe_features": safe_features,
                 "optional_locked_features": optional_locked,
@@ -867,7 +857,7 @@ class LaserCaptureTab(QWidget):
                 f"[OUTPUT] full_ply={self.full_ply_chk.isChecked()} "
                 f"format={converter['ply_format']} "
                 f"debug_step={converter['debug_ply_step']} "
-                f"center_z={self.center_z_chk.isChecked()} geometry=USERSET_READBACK "
+                f"center_z={self.center_z_chk.isChecked()} y_step={self.y_step_spin.value()} "
                 "save=reflectance_preview_8bit,reflectance_16bit,ply_only"
             ),
         ]
