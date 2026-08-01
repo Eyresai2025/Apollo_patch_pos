@@ -7,6 +7,12 @@ input and target marker template change.
 The output keeps the legacy keys ``one_rev_tread_px`` and
 ``tread_tape1_center_y`` because the existing paired-view training pipeline
 expects those names. Generic role-aware keys are saved alongside them.
+
+For Inner Side, Tread and Bead, the AI-team crop-only validation is executed
+after calibration. It re-detects R1/R2 on each paired sidewall image, applies
+the calculated offset ratio and the target view's one-revolution height, uses
+the same four-case out-of-bounds fallback chain, and saves raw/resized crops
+plus debug overlays.
 """
 
 from __future__ import annotations
@@ -56,6 +62,311 @@ def _draw_boxes(image: np.ndarray, boxes: list[dict], labels: list[str]) -> np.n
             cv2.LINE_AA,
         )
     return preview
+
+
+def _draw_sidewall_r_overlay(
+    sidewall_img: np.ndarray,
+    r_boxes: list[dict],
+) -> np.ndarray:
+    """AI-team crop-only sidewall R1/R2 debug overlay."""
+    vis = tu.to_uint8_display(sidewall_img)
+    for index, box in enumerate(r_boxes[:2]):
+        x1 = int(box["x1"])
+        y1 = int(box["y1"])
+        x2 = int(box["x2"])
+        y2 = int(box["y2"])
+        color = (0, 255, 0) if index == 0 else (0, 0, 255)
+        label = "R1" if index == 0 else "R2"
+        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 6)
+        cv2.putText(
+            vis,
+            f"{label} y={y1} conf={float(box.get('conf', 0.0)):.4f}",
+            (max(0, x1 - 200), max(60, y1 - 30)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.6,
+            color,
+            4,
+            cv2.LINE_AA,
+        )
+    return vis
+
+
+def _draw_target_crop_overlay(
+    target_img: np.ndarray,
+    start_y: int,
+    end_y: int,
+    r1_top_y: int,
+    r2_top_y: int,
+) -> np.ndarray:
+    """AI-team crop-only full-target crop-window debug overlay."""
+    vis = tu.to_uint8_display(target_img)
+    height, width = vis.shape[:2]
+    max_value = 255
+    green = (0, max_value, 0)
+    white = (max_value, max_value, max_value)
+
+    cv2.rectangle(vis, (0, start_y), (width - 1, end_y), green, 5, cv2.LINE_8)
+    for label, y_pos in (
+        (f"Sidewall R1_top_y = {r1_top_y}  ->  crop start = {start_y}", start_y),
+        (f"Sidewall R2_top_y = {r2_top_y}  ->  crop end   = {end_y}", end_y),
+    ):
+        (text_width, text_height), baseline = cv2.getTextSize(
+            label, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2
+        )
+        text_y = max(
+            text_height + 10,
+            min(height - baseline - 5, y_pos + text_height + 8),
+        )
+        cv2.rectangle(
+            vis,
+            (0, text_y - text_height - 6),
+            (text_width + 10, text_y + baseline + 4),
+            white,
+            -1,
+        )
+        cv2.putText(
+            vis,
+            label,
+            (5, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2,
+            green,
+            2,
+            cv2.LINE_AA,
+        )
+    return vis
+
+
+def _resolve_recipe_template(recipe_path: Path) -> Path:
+    payload = json.loads(Path(recipe_path).read_text(encoding="utf-8"))
+    raw_path = str(payload.get("template_path") or "").strip()
+    if not raw_path:
+        raise KeyError(
+            "Fast R recipe does not contain template_path. Recreate the R recipe."
+        )
+    template_path = Path(raw_path).expanduser()
+    if not template_path.is_absolute():
+        template_path = Path(recipe_path).parent / template_path
+    template_path = template_path.resolve()
+    if not template_path.is_file():
+        raise FileNotFoundError(f"Fast R recipe template not found: {template_path}")
+    return template_path
+
+
+def _run_target_crop_only_validation(
+    *,
+    role: str,
+    display_name: str,
+    sidewall_input: Path,
+    target_input: Path,
+    r_recipe_path: Path,
+    target_marker_template: Path,
+    output_dir: Path,
+    offset_ratio: float,
+    one_rev_target_px: int,
+    resize_width: int,
+    resize_height: int,
+    status_callback: StatusCallback,
+    progress_callback: ProgressCallback,
+) -> dict:
+    """Run the supplied crop-only offset logic for any paired target view.
+
+    The AI-team file is named for tread, but its formula and fallback chain are
+    target-agnostic. Inner Side, Tread and Bead all use the same sidewall R
+    anchor, offset ratio and one-revolution target crop calculation.
+    """
+    role = str(role).strip().lower()
+    display_name = str(display_name or role).strip()
+    file_token = role.upper()
+    sidewall_input = Path(sidewall_input).expanduser().resolve()
+    target_input = Path(target_input).expanduser().resolve()
+    output_dir = Path(output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    r_template_path = _resolve_recipe_template(r_recipe_path)
+    r_template = tu.load_r_template(str(r_template_path))
+
+    pairs, missing_in_target, missing_in_sidewall = tu.build_matched_pairs(
+        str(sidewall_input),
+        str(target_input),
+        exclude_sw=[str(r_template_path)],
+        exclude_tr=[str(target_marker_template)],
+    )
+
+    successful = 0
+    failed = 0
+    pair_summaries: list[dict] = []
+    total = max(1, len(pairs))
+
+    for pair_index, pair in enumerate(pairs, start=1):
+        cycle_key = str(pair["cycle_key"])
+        prefix = f"{cycle_key}_"
+        sidewall_path = str(pair["sidewall_path"])
+        target_path = str(pair["tread_path"])
+        _emit_status(
+            status_callback,
+            f"Validating {display_name} crop {pair_index}/{len(pairs)}: {cycle_key}",
+        )
+        try:
+            sidewall_img = cv2.imread(sidewall_path, cv2.IMREAD_UNCHANGED)
+            target_img = cv2.imread(target_path, cv2.IMREAD_UNCHANGED)
+            if sidewall_img is None:
+                raise RuntimeError(f"Cannot read sidewall: {sidewall_path}")
+            if target_img is None:
+                raise RuntimeError(f"Cannot read {display_name}: {target_path}")
+
+            r_boxes = tu.detect_r_boxes_sidewall(r_template, sidewall_img)
+            r_anchor = tu.get_r1_r2_anchor(r_boxes)
+            start_y, end_y = tu.calculate_tread_crop_window(
+                r_anchor=r_anchor,
+                tread_img_height=int(target_img.shape[0]),
+                offset_ratio=float(offset_ratio),
+                one_rev_tread_px=int(one_rev_target_px),
+            )
+
+            target_crop = target_img[start_y:end_y, :]
+            if target_crop.shape[0] != int(one_rev_target_px):
+                raise RuntimeError(
+                    f"{display_name} crop height mismatch: "
+                    f"got={target_crop.shape[0]}, expected={one_rev_target_px}"
+                )
+
+            raw_crop_path = output_dir / f"{prefix}00_{file_token}_CROP_RAW.png"
+            resized_path = output_dir / (
+                f"{prefix}01_{file_token}_CROP_RESIZED_"
+                f"{resize_width}x{resize_height}.png"
+            )
+            sidewall_overlay_path = output_dir / f"{prefix}02_sidewall_R_overlay.png"
+            target_overlay_path = output_dir / (
+                f"{prefix}03_{role}_crop_window_overlay.png"
+            )
+
+            if not cv2.imwrite(
+                str(raw_crop_path), target_crop, [cv2.IMWRITE_PNG_COMPRESSION, 0]
+            ):
+                raise OSError(f"Cannot save raw {display_name} crop: {raw_crop_path}")
+
+            resized = cv2.resize(
+                target_crop, (int(resize_width), int(resize_height))
+            )
+            if not cv2.imwrite(
+                str(resized_path), resized, [cv2.IMWRITE_PNG_COMPRESSION, 0]
+            ):
+                raise OSError(
+                    f"Cannot save resized {display_name} crop: {resized_path}"
+                )
+
+            if not cv2.imwrite(
+                str(sidewall_overlay_path),
+                _draw_sidewall_r_overlay(sidewall_img, r_boxes),
+                [cv2.IMWRITE_PNG_COMPRESSION, 0],
+            ):
+                raise OSError(
+                    f"Cannot save sidewall R overlay: {sidewall_overlay_path}"
+                )
+
+            if not cv2.imwrite(
+                str(target_overlay_path),
+                _draw_target_crop_overlay(
+                    target_img,
+                    start_y,
+                    end_y,
+                    int(r_anchor["R1_top_y"]),
+                    int(r_anchor["R2_top_y"]),
+                ),
+                [cv2.IMWRITE_PNG_COMPRESSION, 0],
+            ):
+                raise OSError(
+                    f"Cannot save {display_name} crop overlay: {target_overlay_path}"
+                )
+
+            summary = {
+                "status": "success",
+                "role": role,
+                "display_name": display_name,
+                "pair_index": pair_index,
+                "cycle_key": cycle_key,
+                "sidewall_image": sidewall_path,
+                "target_image": target_path,
+                "R1_top_y": int(r_anchor["R1_top_y"]),
+                "R2_top_y": int(r_anchor["R2_top_y"]),
+                "one_rev_height": int(r_anchor["one_rev_height"]),
+                "crop_start_y": int(start_y),
+                "crop_end_y": int(end_y),
+                "crop_height": int(end_y - start_y),
+                "raw_target_shape": list(target_img.shape),
+                "target_crop_shape": list(target_crop.shape),
+                "resized_crop_shape": list(resized.shape),
+                "offset_ratio": float(offset_ratio),
+                "one_rev_target_px": int(one_rev_target_px),
+                "outputs": {
+                    "raw_target_crop": str(raw_crop_path.resolve()),
+                    "resized_target_crop": str(resized_path.resolve()),
+                    "sidewall_r_overlay": str(sidewall_overlay_path.resolve()),
+                    "target_crop_overlay": str(target_overlay_path.resolve()),
+                },
+            }
+            # Preserve the standalone tread script's keys for tread consumers.
+            if role == "tread":
+                summary.update({
+                    "tread_image": target_path,
+                    "raw_tread_shape": list(target_img.shape),
+                    "tread_crop_shape": list(target_crop.shape),
+                    "one_rev_tread_px": int(one_rev_target_px),
+                })
+                summary["outputs"].update({
+                    "raw_tread_crop": str(raw_crop_path.resolve()),
+                    "resized_tread_crop": str(resized_path.resolve()),
+                    "tread_crop_overlay": str(target_overlay_path.resolve()),
+                })
+
+            summary_path = output_dir / f"{prefix}crop_summary.json"
+            summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            summary["summary_json"] = str(summary_path.resolve())
+            pair_summaries.append(summary)
+            successful += 1
+        except Exception as exc:
+            failed += 1
+            failure = {
+                "status": "failed",
+                "role": role,
+                "display_name": display_name,
+                "pair_index": pair_index,
+                "cycle_key": cycle_key,
+                "sidewall_image": sidewall_path,
+                "target_image": target_path,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            failure_path = output_dir / f"{prefix}crop_summary.json"
+            failure_path.write_text(json.dumps(failure, indent=2), encoding="utf-8")
+            failure["summary_json"] = str(failure_path.resolve())
+            pair_summaries.append(failure)
+
+        _emit_progress(
+            progress_callback,
+            91 + int(8 * pair_index / total),
+            f"Validated {display_name} crop {pair_index}/{len(pairs)}",
+        )
+
+    run_summary = {
+        "status": "completed",
+        "role": role,
+        "display_name": display_name,
+        "output_dir": str(output_dir),
+        "pair_count": len(pairs),
+        "successful": successful,
+        "failed": failed,
+        "missing_in_target": list(missing_in_target),
+        "missing_in_sidewall": list(missing_in_sidewall),
+        "pairs": pair_summaries,
+    }
+    # Keep the old tread-specific summary key when the target is tread.
+    if role == "tread":
+        run_summary["missing_in_tread"] = list(missing_in_target)
+    run_summary_path = output_dir / "crop_validation_summary.json"
+    run_summary_path.write_text(json.dumps(run_summary, indent=2), encoding="utf-8")
+    run_summary["summary_json"] = str(run_summary_path.resolve())
+    return run_summary
 
 
 def _process_sidewall_image(
@@ -220,6 +531,7 @@ def calculate_offset_calibration(
     role: str,
     display_name: str,
     r_recipe_path: Path,
+    sidewall_input: Optional[Path],
     target_input: Path,
     target_marker_template: Path,
     output_json_path: Path,
@@ -231,10 +543,10 @@ def calculate_offset_calibration(
     patch_stride_y: int = 448,
     cover_complete: bool = True,
     percentile: float = 99.0,
-    detection_patch_h: int = 6000,
+    detection_patch_h: int = 4200,
     detection_patch_w: int = 4096,
-    r_match_threshold: float = 0.50,
-    target_match_threshold: float = 0.50,
+    r_match_threshold: float = 0.70,
+    target_match_threshold: float = 0.55,
     save_diagnostics: bool = True,
     status_callback: StatusCallback = None,
     progress_callback: ProgressCallback = None,
@@ -247,6 +559,11 @@ def calculate_offset_calibration(
     Only the selected target view marker is detected during offset calculation.
     """
     r_recipe_path = Path(r_recipe_path).expanduser().resolve()
+    sidewall_input = (
+        Path(sidewall_input).expanduser().resolve()
+        if sidewall_input is not None
+        else None
+    )
     target_input = Path(target_input).expanduser().resolve()
     target_marker_template = Path(target_marker_template).expanduser().resolve()
     output_json_path = Path(output_json_path).expanduser().resolve()
@@ -346,11 +663,79 @@ def calculate_offset_calibration(
             cover_edges=settings["cover_complete"], source="offset_calibration_fast_recipe_ui",
         )
 
+        _emit_progress(progress_callback, 90, "Offset values calculated")
+
+        crop_validation = {
+            "status": "not_applicable",
+            "role": str(role),
+            "display_name": str(display_name),
+            "output_dir": "",
+            "pair_count": 0,
+            "successful": 0,
+            "failed": 0,
+            "pairs": [],
+        }
+        if sidewall_input is None or not sidewall_input.exists():
+            crop_validation = {
+                "status": "skipped",
+                "role": str(role),
+                "display_name": str(display_name),
+                "reason": "Paired sidewall input was not supplied or does not exist.",
+                "output_dir": "",
+                "pair_count": 0,
+                "successful": 0,
+                "failed": 0,
+                "pairs": [],
+            }
+        else:
+            _emit_status(
+                status_callback,
+                f"Running AI-team {display_name} crop-only validation...",
+            )
+            crop_validation_dir = output_json_path.parent / "crop_only_validation"
+            try:
+                crop_validation = _run_target_crop_only_validation(
+                    role=role,
+                    display_name=display_name,
+                    sidewall_input=sidewall_input,
+                    target_input=target_input,
+                    r_recipe_path=r_recipe_path,
+                    target_marker_template=target_marker_template,
+                    output_dir=crop_validation_dir,
+                    offset_ratio=offset_ratio,
+                    one_rev_target_px=int(avg_target_rev),
+                    resize_width=settings["resize_width"],
+                    resize_height=settings["resize_height"],
+                    status_callback=status_callback,
+                    progress_callback=progress_callback,
+                )
+            except Exception as exc:
+                # The crop-only stage remains a debugging validation stage and
+                # does not change the established calibration pass/fail contract.
+                crop_validation = {
+                    "status": "failed",
+                    "role": str(role),
+                    "display_name": str(display_name),
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "output_dir": str(crop_validation_dir.resolve()),
+                    "pair_count": 0,
+                    "successful": 0,
+                    "failed": 1,
+                    "pairs": [],
+                }
+                _emit_status(
+                    status_callback,
+                    f"{display_name} offset was calculated, but crop-only "
+                    f"validation failed: {exc}",
+                )
+
         payload = {
             "sku_name": str(sku_name), "target_role": str(role),
             "target_display_name": str(display_name),
             "r_recipe_path": str(r_recipe_path), "r_anchor_source": r_anchor["source"],
-            "r_anchor": r_anchor, "source_target_input": str(target_input),
+            "r_anchor": r_anchor,
+            "source_sidewall_input": str(sidewall_input) if sidewall_input else "",
+            "source_target_input": str(target_input),
             "target_marker_template": str(target_marker_template),
             "detection_patch_h": detection_patch_h,
             "detection_patch_w": detection_patch_w,
@@ -384,9 +769,14 @@ def calculate_offset_calibration(
             "target_cropped_image_count": len(successes),
             "resized_target_folder": str(resized_dir.resolve()),
             "resized_target_image_count": len(successes),
+            "crop_validation": crop_validation,
+            "crop_validation_folder": str(crop_validation.get("output_dir", "")),
+            "crop_validation_pair_count": int(crop_validation.get("pair_count", 0) or 0),
+            "crop_validation_successful": int(crop_validation.get("successful", 0) or 0),
+            "crop_validation_failed": int(crop_validation.get("failed", 0) or 0),
             "sku_resize_configuration_path": str(resize_config.get("config_path", "")),
         }
-        _emit_progress(progress_callback, 90, "Saving calibration output")
+        _emit_progress(progress_callback, 99, "Saving calibration output")
         output_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         result = {
             "sku_name": str(sku_name), "role": str(role), "display_name": str(display_name),
@@ -403,6 +793,11 @@ def calculate_offset_calibration(
             "target_cropped_image_count": len(successes),
             "resized_target_folder": payload["resized_target_folder"],
             "resized_target_image_count": len(successes),
+            "crop_validation_folder": payload["crop_validation_folder"],
+            "crop_validation_pair_count": payload["crop_validation_pair_count"],
+            "crop_validation_successful": payload["crop_validation_successful"],
+            "crop_validation_failed": payload["crop_validation_failed"],
+            "crop_validation": crop_validation,
             "sku_resize_configuration_path": payload["sku_resize_configuration_path"],
             "detection_patch_h": detection_patch_h,
             "detection_patch_w": detection_patch_w,

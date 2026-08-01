@@ -7,9 +7,9 @@ import pyvista as pv
 PLY_PATH = Path(
     r"C:\Users\YerriswamyChakala\Desktop\Apollo_Application"
     r"\Apollo_patch_pos\media\Laser_Capture"
-    r"\run_20260729_153338_cycle_0001"
+    r"\run_20260729_162059_cycle_0001"
     r"\01_laser_1_ztrak_2k_M0006674"
-    r"\ztrak_M0006674_20260729_153340_pointcloud_fullres_ascii_sapera_um.ply"
+    r"\ztrak_M0006674_20260729_162102_pointcloud_fullres_ascii_sapera_um.ply"
 )
 
 if not PLY_PATH.is_file():

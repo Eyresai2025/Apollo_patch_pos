@@ -21,11 +21,11 @@ import numpy as np
 # ============================================================
 # DETECTION SETTINGS
 # ============================================================
-PATCH_H = 6000
+PATCH_H = 4200
 PATCH_W = 4096
 
-R_MATCH_THRESHOLD    = 0.50
-TAPE_MATCH_THRESHOLD = 0.50
+R_MATCH_THRESHOLD    = 0.7
+TAPE_MATCH_THRESHOLD = 0.55
 
 MIN_BAND_HEIGHT = 20
 ROW_GAP         = 5
@@ -123,11 +123,15 @@ def detect_r_boxes_sidewall(
     th, tw = template.shape[:2]
     matches: list[dict] = []
 
+    # Tiles overlap by (template_size - 1) at each boundary so a match whose
+    # top-left corner falls near the end of a tile's core [y, y+PATCH_H) range
+    # still has room for the full template — otherwise it gets silently missed
+    # whenever it straddles a tile boundary (see TREAD_PIPELINE.md).
     for y in range(0, h, PATCH_H):
-        y2 = min(y + PATCH_H, h)
+        y2 = min(y + PATCH_H + th - 1, h)
 
         for x in range(0, w, PATCH_W):
-            x2    = min(x + PATCH_W, w)
+            x2    = min(x + PATCH_W + tw - 1, w)
             patch = gray[y:y2, x:x2]
 
             if patch.shape[0] < th or patch.shape[1] < tw:
@@ -241,11 +245,13 @@ def detect_tape_bands_tread(
     th, tw = template.shape[:2]
     matches: list[dict] = []
 
+    # Tiles overlap by (template_size - 1) at each boundary — see the identical
+    # comment in detect_r_boxes_sidewall for why this is needed.
     for y in range(0, h, PATCH_H):
-        y2 = min(y + PATCH_H, h)
+        y2 = min(y + PATCH_H + th - 1, h)
 
         for x in range(0, w, PATCH_W):
-            x2    = min(x + PATCH_W, w)
+            x2    = min(x + PATCH_W + tw - 1, w)
             patch = gray[y:y2, x:x2]
 
             if patch.shape[0] < th or patch.shape[1] < tw:

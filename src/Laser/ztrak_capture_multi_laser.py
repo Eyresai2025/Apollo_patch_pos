@@ -355,14 +355,20 @@ from DALSA.SaperaLT.SapClassBasic import (
 # =============================================================================
 
 def apply_global_ply_mode_to_all_configs():
+    """Apply full-resolution selection without overriding the chosen PLY format."""
+
     if not GLOBAL_FULL_ASCII_PLY_FOR_ALL:
         return
 
     for cfg in LASER_CONFIGS.values():
         conv = cfg.setdefault("converter", {})
+
+        # Full-resolution and file format are independent controls.
         conv["full_resolution_ply"] = True
-        conv["ply_format"] = "ascii"
         conv["debug_ply_step"] = 1
+
+        # Do not force ASCII here.
+        # Preserve binary/ascii selected in the GUI.
 
 
 def safe_folder_name(text):
