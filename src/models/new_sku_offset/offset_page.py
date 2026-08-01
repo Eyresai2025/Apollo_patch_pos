@@ -184,8 +184,8 @@ class OffsetCalculationPage(QWidget):
 
     # Detection defaults are exposed per target role and passed directly to
     # the backend. Each Inner/Tread/Bead tab keeps an independent setting state.
-    DEFAULT_R_MATCH_THRESHOLD = 0.50
-    DEFAULT_TARGET_MATCH_THRESHOLD = 0.50
+    DEFAULT_R_MATCH_THRESHOLD = 0.70
+    DEFAULT_TARGET_MATCH_THRESHOLD = 0.55
     DEFAULT_SAVE_DIAGNOSTICS = True
 
     def __init__(
@@ -503,25 +503,25 @@ class OffsetCalculationPage(QWidget):
             layout.addWidget(widget)
             return field
 
-        self.detection_patch_h_spin = _int_detection_setting(6000)
+        self.detection_patch_h_spin = _int_detection_setting(4200)
         self.detection_patch_w_spin = _int_detection_setting(4096)
-        self.r_match_threshold_spin = _threshold_setting(0.50)
-        self.tape_match_threshold_spin = _threshold_setting(0.50)
+        self.r_match_threshold_spin = _threshold_setting(0.70)
+        self.tape_match_threshold_spin = _threshold_setting(0.55)
 
         detection_grid = QGridLayout()
         detection_grid.setContentsMargins(0, 0, 0, 0)
         detection_grid.setHorizontalSpacing(12)
         detection_grid.addWidget(
-            _setting_card("Patch Height", self.detection_patch_h_spin, "PATCH_H used by tiled detection"), 0, 0
+            _setting_card("Patch Height", self.detection_patch_h_spin, "PATCH_H used by target-marker tiled detection"), 0, 0
         )
         detection_grid.addWidget(
             _setting_card("Patch Width", self.detection_patch_w_spin, "PATCH_W used by tiled detection"), 0, 1
         )
         detection_grid.addWidget(
-            _setting_card("R Match Threshold", self.r_match_threshold_spin, "R_MATCH_THRESHOLD stored with calibration"), 0, 2
+            _setting_card("R Match Threshold", self.r_match_threshold_spin, "R_MATCH_THRESHOLD retained for recipe compatibility"), 0, 2
         )
         detection_grid.addWidget(
-            _setting_card("Tape Match Threshold", self.tape_match_threshold_spin, "TAPE_MATCH_THRESHOLD used for target marker detection"), 0, 3
+            _setting_card("Tape Match Threshold", self.tape_match_threshold_spin, "Target marker match threshold for Inner Side, Tread and Bead"), 0, 3
         )
         for column in range(4):
             detection_grid.setColumnStretch(column, 1)
@@ -726,18 +726,7 @@ class OffsetCalculationPage(QWidget):
             / f"{sku}_{role}_calibration.json"
         ).resolve()
 
-    def _role_detection_defaults(self, role: str) -> Dict[str, Any]:
-        """Use the supplied AI-team detection defaults for all offset views."""
-        del role
-        return {
-            "detection_patch_h": 4200,
-            "detection_patch_w": 4096,
-            "r_match_threshold": 0.70,
-            "tape_match_threshold": 0.55,
-        }
-
     def _empty_state(self, role: str) -> Dict[str, Any]:
-        detection_defaults = self._role_detection_defaults(role)
         return {
             "anchor_role": "sidewall1",
             "r_recipe_path": "",
@@ -753,7 +742,10 @@ class OffsetCalculationPage(QWidget):
             "patch_stride_y": 448,
             "cover_complete": True,
             "percentile": 99.0,
-            **detection_defaults,
+            "detection_patch_h": 4200,
+            "detection_patch_w": 4096,
+            "r_match_threshold": 0.70,
+            "tape_match_threshold": 0.55,
             "result": {},
         }
 
@@ -863,11 +855,10 @@ class OffsetCalculationPage(QWidget):
                 edit.setText(str(state.get(key) or ""))
             anchor = str(state.get("anchor_role") or "sidewall1")
             self.anchor_combo.setCurrentIndex(max(0, self.anchor_combo.findData(anchor)))
-            defaults = self._role_detection_defaults(self.active_role)
-            self.detection_patch_h_spin.setValue(int(state.get("detection_patch_h", defaults["detection_patch_h"])))
-            self.detection_patch_w_spin.setValue(int(state.get("detection_patch_w", defaults["detection_patch_w"])))
-            self.r_match_threshold_spin.setValue(float(state.get("r_match_threshold", defaults["r_match_threshold"])))
-            self.tape_match_threshold_spin.setValue(float(state.get("tape_match_threshold", defaults["tape_match_threshold"])))
+            self.detection_patch_h_spin.setValue(int(state.get("detection_patch_h", 4200)))
+            self.detection_patch_w_spin.setValue(int(state.get("detection_patch_w", 4096)))
+            self.r_match_threshold_spin.setValue(float(state.get("r_match_threshold", 0.70)))
+            self.tape_match_threshold_spin.setValue(float(state.get("tape_match_threshold", 0.55)))
             self._show_result(dict(state.get("result") or {}))
         finally:
             self._loading = False
@@ -948,19 +939,6 @@ class OffsetCalculationPage(QWidget):
         target_input = Path(str(state.get("target_input") or ""))
         target_template = Path(str(state.get("target_template") or ""))
         output_text = str(state.get("output_json") or "").strip()
-        anchor_role = str(state.get("anchor_role") or "sidewall1")
-        try:
-            sidewall_input, _paired_target = self._paired_capture_folders(
-                anchor_role, role
-            )
-        except Exception as exc:
-            QMessageBox.warning(
-                self,
-                "Offset Calculation",
-                "Could not resolve the paired sidewall folder required for "
-                f"the {display} crop validation.\n\n{exc}",
-            )
-            return None
 
         if not r_recipe_path.is_file():
             QMessageBox.warning(
@@ -976,14 +954,6 @@ class OffsetCalculationPage(QWidget):
                 f"Choose a valid {display} calibration input.",
             )
             return None
-        if sidewall_input is None or not sidewall_input.exists():
-            QMessageBox.warning(
-                self,
-                "Offset Calculation",
-                f"The paired sidewall input required for {display} crop validation "
-                "was not found.",
-            )
-            return None
         if not target_template.is_file():
             QMessageBox.warning(
                 self,
@@ -997,13 +967,11 @@ class OffsetCalculationPage(QWidget):
             )
             return None
 
-        defaults = self._role_detection_defaults(role)
         return {
             "sku_name": sku,
             "role": role,
             "display_name": display,
             "r_recipe_path": r_recipe_path,
-            "sidewall_input": sidewall_input,
             "target_input": target_input,
             "target_marker_template": target_template,
             "output_json_path": Path(output_text),
@@ -1015,10 +983,10 @@ class OffsetCalculationPage(QWidget):
             "patch_stride_y": int(state.get("patch_stride_y", 448)),
             "cover_complete": bool(state.get("cover_complete", True)),
             "percentile": float(state.get("percentile", 99.0)),
-            "detection_patch_h": int(state.get("detection_patch_h", defaults["detection_patch_h"])),
-            "detection_patch_w": int(state.get("detection_patch_w", defaults["detection_patch_w"])),
-            "r_match_threshold": float(state.get("r_match_threshold", defaults["r_match_threshold"])),
-            "target_match_threshold": float(state.get("tape_match_threshold", defaults["tape_match_threshold"])),
+            "detection_patch_h": int(state.get("detection_patch_h", 4200)),
+            "detection_patch_w": int(state.get("detection_patch_w", 4096)),
+            "r_match_threshold": float(state.get("r_match_threshold", 0.70)),
+            "target_match_threshold": float(state.get("tape_match_threshold", 0.55)),
             "save_diagnostics": self.DEFAULT_SAVE_DIAGNOSTICS,
         }
 
@@ -1132,9 +1100,6 @@ class OffsetCalculationPage(QWidget):
             f"Calibration JSON: {result.get('calibration_json_path', '')}\n"
             f"Cropped images: {result.get('cropped_images_folder', '')}\n"
             f"Resized target images: {result.get('resized_target_folder', '')}\n"
-            f"Crop validation: {result.get('crop_validation_folder', '')}\n"
-            f"Crop validation pairs: {result.get('crop_validation_successful', 0)} successful / "
-            f"{result.get('crop_validation_failed', 0)} failed\n"
             f"SKU resize JSON: {result.get('sku_resize_configuration_path', '')}\n"
             f"Saved target crops: {result.get('target_cropped_image_count', 0)}\n"
             f"Offset ratio: {float(result.get('offset_ratio', 0.0)):.8f}   |   "

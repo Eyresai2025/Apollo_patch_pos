@@ -1,11 +1,12 @@
 """
 tread_offset_utils.py
 
-Core utilities shared by all three tread PatchCore pipeline scripts:
-  - R detection on sidewall images
-  - Tape detection on tread images  (calibration only)
-  - Tread crop window calculation with 3-step fallback chain
-  - Sidewall / tread image pairing by filename stem
+Core utilities shared by the offset/crop pipeline:
+  - Load saved R1/R2 coordinates directly from the taught R recipe JSON
+  - Optional legacy R detection on sidewall images
+  - Tape detection on tread images (calibration only)
+  - Generic target crop-window calculation with fallback/clamp handling
+  - Legacy sidewall/tread image pairing by filename stem
   - Calibration JSON loading
 """
 
@@ -207,6 +208,159 @@ def get_r1_r2_anchor(r_boxes: list[dict]) -> dict:
     }
 
 
+
+
+# ============================================================
+# SAVED R ANCHOR LOADING  (preferred runtime path)
+# ============================================================
+
+def _first_present(mapping: dict, keys: tuple[str, ...]):
+    """Return the first non-None value found for any key, else None."""
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def load_r_anchor_from_recipe(
+    recipe_json_path: str,
+    *,
+    gap_tolerance_px: int = 2,
+) -> dict:
+    """Load R1/R2 reference coordinates from a taught fast-recipe JSON.
+
+    Supported recipe layouts:
+
+      1. Preferred nested layout::
+
+            {
+              "r_anchor": {
+                "R1_top_y": 123,
+                "R2_top_y": 456,
+                "one_rev_height": 333
+              }
+            }
+
+      2. Flat compatibility layout::
+
+            {
+              "r1_top_y": 123,
+              "r2_top_y": 456,
+              "one_rev_height": 333
+            }
+
+    No sidewall image and no sidewall ROI/template are loaded. The returned
+    dictionary has the same three keys consumed by calculate_*_crop_window().
+    """
+    path = Path(recipe_json_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"R recipe JSON not found: {path}")
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid R recipe JSON: {path}: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"R recipe JSON root must be an object: {path}")
+
+    nested = payload.get("r_anchor")
+    anchor_payload = nested if isinstance(nested, dict) else payload
+
+    r1_value = _first_present(
+        anchor_payload,
+        ("R1_top_y", "r1_top_y"),
+    )
+    r2_value = _first_present(
+        anchor_payload,
+        ("R2_top_y", "r2_top_y"),
+    )
+    one_rev_value = _first_present(
+        anchor_payload,
+        ("one_rev_height", "circumference_px"),
+    )
+
+    # Some recipes keep the convenient flat keys only at the root even when
+    # an r_anchor object exists. Fall back to the root for compatibility.
+    if r1_value is None:
+        r1_value = _first_present(payload, ("R1_top_y", "r1_top_y"))
+    if r2_value is None:
+        r2_value = _first_present(payload, ("R2_top_y", "r2_top_y"))
+    if one_rev_value is None:
+        one_rev_value = _first_present(
+            payload,
+            ("one_rev_height", "circumference_px"),
+        )
+
+    missing = []
+    if r1_value is None:
+        missing.append("R1_top_y/r1_top_y")
+    if r2_value is None:
+        missing.append("R2_top_y/r2_top_y")
+
+    if missing:
+        raise KeyError(
+            "R recipe JSON is missing required saved anchor field(s): "
+            f"{', '.join(missing)}\nFile: {path}"
+        )
+
+    try:
+        r1_y = int(round(float(r1_value)))
+        r2_y = int(round(float(r2_value)))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"R recipe coordinates must be numeric: R1={r1_value!r}, "
+            f"R2={r2_value!r}; file={path}"
+        ) from exc
+
+    if r1_y < 0:
+        raise RuntimeError(f"Invalid saved R1_top_y={r1_y}; file={path}")
+    if r2_y <= r1_y:
+        raise RuntimeError(
+            f"Invalid saved R order: R1_top_y={r1_y}, R2_top_y={r2_y}; "
+            f"file={path}"
+        )
+
+    measured_gap = r2_y - r1_y
+
+    if one_rev_value is None:
+        one_rev_height = measured_gap
+    else:
+        try:
+            one_rev_height = int(round(float(one_rev_value)))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Saved one_rev_height must be numeric: {one_rev_value!r}; "
+                f"file={path}"
+            ) from exc
+
+        if one_rev_height <= 0:
+            raise RuntimeError(
+                f"Invalid saved one_rev_height={one_rev_height}; file={path}"
+            )
+
+        difference = abs(one_rev_height - measured_gap)
+        if difference > max(0, int(gap_tolerance_px)):
+            raise RuntimeError(
+                "Saved R anchor is internally inconsistent: "
+                f"R2-R1={measured_gap}px but one_rev_height="
+                f"{one_rev_height}px (difference={difference}px); file={path}"
+            )
+
+    return {
+        "R1_top_y": int(r1_y),
+        "R2_top_y": int(r2_y),
+        "one_rev_height": int(one_rev_height),
+        "source": "r_recipe_json",
+        "recipe_json": str(path),
+        "recipe_model": payload.get("model"),
+        "sidewall": anchor_payload.get("sidewall"),
+        "roi_side": anchor_payload.get("roi_side", payload.get("roi_side")),
+        "golden_image": anchor_payload.get("golden_image"),
+        "coordinate_space": anchor_payload.get("coordinate_space"),
+    }
+
+
 # ============================================================
 # TAPE DETECTION  (tread — calibration only)
 # ============================================================
@@ -331,6 +485,103 @@ def get_tape1_tape2_anchor(tape_boxes: list[dict]) -> dict:
     }
 
 
+
+
+# ============================================================
+# GENERIC OFFSET CROP WINDOW
+# ============================================================
+
+def calculate_offset_crop_window(
+    r_anchor: dict,
+    target_img_height: int,
+    offset_ratio: float,
+    one_rev_target_px: int,
+    *,
+    target_name: str = "target",
+) -> tuple[int, int]:
+    """Compute one-revolution crop coordinates for tread, bead, or inner.
+
+    The anchor is loaded once from the saved sidewall R recipe. No sidewall
+    image or R template is required at offset/inference time.
+
+    Formula retained from the existing pipeline::
+
+        start_y = R1_top_y + offset_ratio * one_rev_height
+        end_y   = start_y + one_rev_target_px
+
+    The original fallback and final clamp behaviour are preserved.
+    """
+    r1_y = int(r_anchor["R1_top_y"])
+    one_rev_height = int(r_anchor["one_rev_height"])
+    target_img_height = int(target_img_height)
+    one_rev_target_px = int(one_rev_target_px)
+    target_label = str(target_name).strip() or "target"
+
+    if r1_y < 0:
+        raise RuntimeError(f"Invalid R1_top_y: {r1_y}")
+    if one_rev_height <= 0:
+        raise RuntimeError(f"Invalid one_rev_height: {one_rev_height}")
+    if target_img_height <= 0:
+        raise RuntimeError(
+            f"Invalid {target_label} image height: {target_img_height}"
+        )
+    if one_rev_target_px <= 0:
+        raise RuntimeError(
+            f"Invalid one_rev_{target_label}_px: {one_rev_target_px}"
+        )
+    if one_rev_target_px > target_img_height:
+        raise RuntimeError(
+            f"one_rev_{target_label}_px ({one_rev_target_px}) exceeds "
+            f"{target_label} image height ({target_img_height}) — crop cannot "
+            "fit at any position."
+        )
+
+    start_y = int(round(r1_y + float(offset_ratio) * one_rev_height))
+
+    if start_y < 0:
+        start_y = int(round(r1_y + abs(float(offset_ratio)) * one_rev_height))
+        print(
+            f"[WARN] {target_label}: start_y was negative — fallback: "
+            f"go below R1, start_y={start_y}"
+        )
+
+    end_y = start_y + one_rev_target_px
+
+    if end_y > target_img_height:
+        start_y = int(round(r1_y - abs(float(offset_ratio)) * one_rev_height))
+        end_y = start_y + one_rev_target_px
+        print(
+            f"[WARN] {target_label}: end_y overflowed — fallback: "
+            f"go above R1, start_y={start_y}, end_y={end_y}"
+        )
+
+        if start_y < 0:
+            start_y = int(
+                round(r1_y + abs(float(offset_ratio)) * one_rev_height)
+            )
+            end_y = start_y + one_rev_target_px
+            print(
+                f"[WARN] {target_label}: above-R1 start_y negative — "
+                f"fallback: go below R1, start_y={start_y}, end_y={end_y}"
+            )
+
+    if start_y < 0 or end_y > target_img_height:
+        clamped_start = max(
+            0,
+            min(start_y, target_img_height - one_rev_target_px),
+        )
+        clamped_end = clamped_start + one_rev_target_px
+        print(
+            f"[WARN] {target_label}: all anchored fallbacks out of bounds — "
+            f"clamping to fit (no padding): start_y={clamped_start}, "
+            f"end_y={clamped_end} "
+            f"(shifted {clamped_start - start_y}px from anchored position)"
+        )
+        start_y, end_y = clamped_start, clamped_end
+
+    return int(start_y), int(end_y)
+
+
 # ============================================================
 # TREAD CROP WINDOW  (3-step fallback chain)
 # ============================================================
@@ -341,63 +592,14 @@ def calculate_tread_crop_window(
     offset_ratio: float,
     one_rev_tread_px: int,
 ) -> tuple[int, int]:
-    """
-    Compute (start_y, end_y) for the one-revolution tread crop.
-
-    Fallback chain (all triggered only when R1 and R2 are both detected):
-      1. start_y < 0  (negative offset pushed crop above image top)
-         → go below R1:  start_y = R1 + abs(offset) * one_rev
-      2. end_y > image_height  (positive offset + R1 far down)
-         → go above R1:  start_y = R1 - abs(offset) * one_rev
-      3. above-R1 start_y < 0  (edge case)
-         → go below R1 again
-      4. still out of bounds  (both anchored positions overflow)
-         → clamp start_y into [0, image_height - one_rev_tread_px], no padding.
-           Crop height stays exactly one_rev_tread_px; every pixel is real
-           image data, just shifted off the R1-anchored offset by whatever
-           overflow remained.
-    """
-    r1_y           = int(r_anchor["R1_top_y"])
-    one_rev_height = int(r_anchor["one_rev_height"])
-
-    if one_rev_height <= 0:
-        raise RuntimeError(f"Invalid one_rev_height: {one_rev_height}")
-
-    if one_rev_tread_px > tread_img_height:
-        raise RuntimeError(
-            f"one_rev_tread_px ({one_rev_tread_px}) exceeds image height "
-            f"({tread_img_height}) — crop cannot fit at any position."
-        )
-
-    start_y = int(round(r1_y + offset_ratio * one_rev_height))
-
-    if start_y < 0:
-        start_y = int(round(r1_y + abs(offset_ratio) * one_rev_height))
-        print(f"[WARN] start_y was negative — fallback: go below R1, start_y={start_y}")
-
-    end_y = start_y + one_rev_tread_px
-
-    if end_y > tread_img_height:
-        start_y = int(round(r1_y - abs(offset_ratio) * one_rev_height))
-        end_y   = start_y + one_rev_tread_px
-        print(f"[WARN] end_y overflowed — fallback: go above R1, start_y={start_y}, end_y={end_y}")
-
-        if start_y < 0:
-            start_y = int(round(r1_y + abs(offset_ratio) * one_rev_height))
-            end_y   = start_y + one_rev_tread_px
-            print(f"[WARN] above-R1 start_y negative — fallback: go below R1, start_y={start_y}, end_y={end_y}")
-
-    if start_y < 0 or end_y > tread_img_height:
-        clamped_start = max(0, min(start_y, tread_img_height - one_rev_tread_px))
-        clamped_end   = clamped_start + one_rev_tread_px
-        print(
-            f"[WARN] All anchored fallbacks out of bounds — clamping to fit "
-            f"(no padding): start_y={clamped_start}, end_y={clamped_end} "
-            f"(shifted {clamped_start - start_y}px from anchored position)"
-        )
-        start_y, end_y = clamped_start, clamped_end
-
-    return int(start_y), int(end_y)
+    """Backward-compatible tread wrapper around the generic calculator."""
+    return calculate_offset_crop_window(
+        r_anchor=r_anchor,
+        target_img_height=tread_img_height,
+        offset_ratio=offset_ratio,
+        one_rev_target_px=one_rev_tread_px,
+        target_name="tread",
+    )
 
 
 # ============================================================
@@ -429,6 +631,14 @@ def _list_images(path: str, exclude: list[str] | None = None) -> list[str]:
     ]
 
     return sorted(files, key=_natural_key)
+
+
+def list_images(
+    path: str,
+    exclude: list[str] | None = None,
+) -> list[str]:
+    """Public file-or-folder image listing used by recipe-anchor pipelines."""
+    return _list_images(path, exclude=exclude)
 
 
 def build_matched_pairs(
