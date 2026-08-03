@@ -13,11 +13,12 @@ from PyQt5.QtPrintSupport import QPrinter
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -26,6 +27,7 @@ from PyQt5.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -35,61 +37,212 @@ from src.COMMON.security import Permission, SessionContext
 from src.COMMON.structured_logging import get_logger
 from src.UI.alarm_workers import AlarmActionWorker, AlarmDetailsWorker, AlarmQueryWorker
 from src.UI.gui_helpers import ThreadManager
+from src.UI.apollo_ui_feedback import show_apollo_message as show_apollo_standard_message
 
 logger = get_logger(__name__, component="ALARM_CENTER_UI")
 
 
 PAGE_STYLE = """
-QWidget#alarmCenterPage { background: #F4F7FB; color: #172033; }
+QWidget#alarmCenterPage {
+    background: #F4F6FA;
+    color: #172033;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 11px;
+}
+QWidget#alarmCenterPage QToolTip {
+    background: #FFFFFF;
+    color: #172033;
+    border: 1px solid #CDB8DC;
+    border-radius: 6px;
+    padding: 6px 9px;
+    font: 600 10px 'Segoe UI';
+}
 QLabel { background: transparent; border: none; }
 QFrame#alarmPanel, QFrame#alarmSummaryCard {
-    background: white;
+    background: #FFFFFF;
     border: 1px solid #DCE3EC;
-    border-radius: 11px;
+    border-radius: 10px;
 }
 QLabel#alarmTitle { font: 800 20px 'Segoe UI'; color: #172033; }
 QLabel#alarmSubtitle { font: 500 10px 'Segoe UI'; color: #667085; }
-QLabel#alarmCardTitle { font: 600 9px 'Segoe UI'; color: #667085; }
-QLabel#alarmCardValue { font: 800 20px 'Segoe UI'; color: #571C86; }
+QLabel#alarmCardTitle { font: 700 9px 'Segoe UI'; color: #667085; }
+QLabel#alarmCardValue { font: 800 20px 'Segoe UI'; color: #5B168B; }
 QLineEdit, QComboBox {
     min-height: 31px;
-    background: white;
+    background: #FFFFFF;
     border: 1px solid #CBD5E1;
     border-radius: 7px;
-    padding: 0 8px;
+    padding: 0 9px;
     color: #172033;
+    selection-background-color: #6D2FA0;
+    selection-color: #FFFFFF;
+}
+QLineEdit:focus, QComboBox:focus { border: 1px solid #7C3AED; }
+QComboBox::drop-down { border: none; width: 24px; }
+QComboBox QAbstractItemView {
+    background: #FFFFFF;
+    color: #172033;
+    border: 1px solid #CDB8DC;
+    selection-background-color: #EEE5F6;
+    selection-color: #5B168B;
+    outline: 0;
+    padding: 3px;
 }
 QPushButton {
     min-height: 31px;
     border-radius: 7px;
     padding: 0 12px;
-    font: 600 10px 'Segoe UI';
+    font: 700 10px 'Segoe UI';
 }
-QPushButton#alarmPrimary { background: #571C86; color: white; border: none; }
-QPushButton#alarmPrimary:hover { background: #6D28A4; }
-QPushButton#alarmDanger { background: #C92A2A; color: white; border: none; }
-QPushButton#alarmDanger:hover { background: #A51111; }
-QPushButton#alarmSecondary { background: white; color: #344054; border: 1px solid #CBD5E1; }
-QPushButton#alarmSecondary:hover { background: #F8FAFC; }
-QPushButton:disabled { color: #98A2B3; background: #EAECF0; }
+QPushButton#alarmPrimary { background: #6D2FA0; color: #FFFFFF; border: 1px solid #6D2FA0; }
+QPushButton#alarmPrimary:hover { background: #5B168B; border-color: #5B168B; }
+QPushButton#alarmDanger { background: #DC2626; color: #FFFFFF; border: 1px solid #DC2626; }
+QPushButton#alarmDanger:hover { background: #B91C1C; border-color: #B91C1C; }
+QPushButton#alarmSecondary { background: #FFFFFF; color: #5B168B; border: 1px solid #B99BE8; }
+QPushButton#alarmSecondary:hover { background: #F5F3FF; border-color: #7C3AED; }
+QPushButton:disabled { color: #98A2B3; background: #EAECF0; border: 1px solid #D0D5DD; }
 QTableWidget {
-    background: white;
+    background: #FFFFFF;
+    alternate-background-color: #FAF9FC;
     border: 1px solid #DCE3EC;
     border-radius: 8px;
     gridline-color: #E5E7EB;
     selection-background-color: #EDE4F5;
     selection-color: #172033;
+    outline: 0;
 }
+QTableWidget::item { padding: 4px 6px; border-bottom: 1px solid #EEF1F5; }
 QHeaderView::section {
-    background: #F8FAFC;
-    color: #344054;
+    background: #F0E7F7;
+    color: #5B168B;
     border: none;
-    border-bottom: 1px solid #DCE3EC;
+    border-right: 1px solid #E1D4EB;
+    border-bottom: 1px solid #E1D4EB;
     padding: 6px;
     font: 700 9px 'Segoe UI';
 }
-QTextBrowser { background: white; border: none; color: #172033; }
+QTextBrowser { background: #FFFFFF; border: none; color: #172033; }
+QSplitter::handle { background: #E8EDF4; height: 5px; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: #C8B4D8; border-radius: 4px; min-height: 28px; }
+QScrollBar::handle:vertical:hover { background: #9A6CBC; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
+
+
+APOLLO_DIALOG_STYLE = """
+QDialog, QMessageBox { background: #FFFFFF; color: #172033; }
+QDialog QLabel, QMessageBox QLabel {
+    background: transparent;
+    color: #172033;
+    font: 600 10px 'Segoe UI';
+}
+QDialog QTextEdit, QMessageBox QTextEdit, QMessageBox QPlainTextEdit {
+    background: #F8FAFC;
+    color: #172033;
+    border: 1px solid #D7DCE3;
+    border-radius: 7px;
+    padding: 8px;
+    selection-background-color: #6D2FA0;
+    selection-color: #FFFFFF;
+    font: 500 10px 'Segoe UI';
+}
+QDialogButtonBox QPushButton, QMessageBox QPushButton {
+    min-width: 94px;
+    min-height: 32px;
+    border-radius: 7px;
+    padding: 0 14px;
+    background: #FFFFFF;
+    color: #5B168B;
+    border: 1px solid #B99BE8;
+    font: 700 10px 'Segoe UI';
+}
+QDialogButtonBox QPushButton:hover, QMessageBox QPushButton:hover {
+    background: #F5F3FF;
+    border-color: #7C3AED;
+}
+QDialogButtonBox QPushButton:default, QMessageBox QPushButton:default {
+    background: #6D2FA0;
+    color: #FFFFFF;
+    border-color: #6D2FA0;
+}
+QDialogButtonBox QPushButton:default:hover, QMessageBox QPushButton:default:hover {
+    background: #5B168B;
+    border-color: #5B168B;
+}
+"""
+
+
+def show_apollo_message(
+    parent,
+    icon,
+    title,
+    text,
+    *,
+    informative_text="",
+    buttons=QMessageBox.Ok,
+    default_button=None,
+):
+    """Show a compact, readable Apollo-themed standard message box."""
+    return show_apollo_standard_message(
+        parent,
+        icon,
+        title,
+        text,
+        informative_text=informative_text,
+        buttons=buttons,
+        default_button=default_button,
+    )
+
+
+class ApolloNoteDialog(QDialog):
+    """Light themed multi-line note dialog used for alarm actions."""
+
+    def __init__(self, parent, title: str, prompt: str, initial_text: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(560, 310)
+        self.setStyleSheet(APOLLO_DIALOG_STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font:800 15px 'Segoe UI'; color:#5B168B;")
+        root.addWidget(title_label)
+
+        prompt_label = QLabel(prompt)
+        prompt_label.setWordWrap(True)
+        prompt_label.setStyleSheet("font:600 10px 'Segoe UI'; color:#344054;")
+        root.addWidget(prompt_label)
+
+        self.note_edit = QTextEdit()
+        self.note_edit.setPlainText(initial_text)
+        self.note_edit.setPlaceholderText("Enter a traceable operator note...")
+        self.note_edit.setToolTip("Enter the operator note that will be stored with this alarm event.")
+        root.addWidget(self.note_edit, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.Cancel)
+        ok_button.setText("Save Note")
+        ok_button.setDefault(True)
+        ok_button.setToolTip("Save this note and continue with the selected alarm action.")
+        cancel_button.setToolTip("Cancel without changing the alarm.")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self.note_edit.selectAll()
+        self.note_edit.setFocus()
+
+    @classmethod
+    def get_note(cls, parent, title: str, prompt: str, initial_text: str = ""):
+        dialog = cls(parent, title, prompt, initial_text)
+        accepted = dialog.exec_() == QDialog.Accepted
+        return dialog.note_edit.toPlainText(), accepted
 
 
 class AlarmCenterPage(QWidget):
@@ -149,6 +302,7 @@ class AlarmCenterPage(QWidget):
 
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setObjectName("alarmSecondary")
+        refresh_btn.setToolTip("Reload alarm records, summary counts and available filters.")
         refresh_btn.clicked.connect(lambda: self.refresh_alarms(reset_page=False))
         header.addWidget(refresh_btn)
         root.addLayout(header)
@@ -185,28 +339,34 @@ class AlarmCenterPage(QWidget):
 
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search code, message, cycle, tyre or SKU")
+        self.search_edit.setToolTip("Search alarm code, title, message, cycle ID, tyre ID or SKU name.")
         self.search_edit.returnPressed.connect(lambda: self.refresh_alarms(reset_page=True))
         filters.addWidget(self.search_edit, 3)
 
         self.state_combo = QComboBox()
         self.state_combo.addItems(["Open", "All", "Active", "Acknowledged", "Recovered"])
+        self.state_combo.setToolTip("Filter alarms by current lifecycle state.")
         filters.addWidget(self.state_combo, 1)
 
         self.severity_combo = QComboBox()
         self.severity_combo.addItems(["All severities", "Critical", "High", "Warning", "Info"])
+        self.severity_combo.setToolTip("Filter alarms by severity level.")
         filters.addWidget(self.severity_combo, 1)
 
         self.component_combo = QComboBox()
         self.component_combo.addItem("All components")
+        self.component_combo.setToolTip("Filter alarms by the originating Apollo component.")
         filters.addWidget(self.component_combo, 1)
 
         apply_btn = QPushButton("Apply")
         apply_btn.setObjectName("alarmPrimary")
+        apply_btn.setToolTip("Apply the current search and filter selections.")
         apply_btn.clicked.connect(lambda: self.refresh_alarms(reset_page=True))
         filters.addWidget(apply_btn)
 
         clear_btn = QPushButton("Clear")
         clear_btn.setObjectName("alarmSecondary")
+        clear_btn.setToolTip("Clear all filters and return to the default Open alarms view.")
         clear_btn.clicked.connect(self.clear_filters)
         filters.addWidget(clear_btn)
         root.addWidget(filter_panel)
@@ -220,6 +380,7 @@ class AlarmCenterPage(QWidget):
         table_layout.setSpacing(6)
 
         self.table = QTableWidget(0, 10)
+        self.table.setToolTip("Select an alarm row to review full traceability and available actions.")
         self.table.setHorizontalHeaderLabels(
             [
                 "Opened",
@@ -249,12 +410,14 @@ class AlarmCenterPage(QWidget):
         page_row.addStretch()
         self.prev_btn = QPushButton("Previous")
         self.prev_btn.setObjectName("alarmSecondary")
+        self.prev_btn.setToolTip("Show the previous page of alarm records.")
         self.prev_btn.clicked.connect(self.previous_page)
         page_row.addWidget(self.prev_btn)
         self.page_label = QLabel("Page 1 / 1")
         page_row.addWidget(self.page_label)
         self.next_btn = QPushButton("Next")
         self.next_btn.setObjectName("alarmSecondary")
+        self.next_btn.setToolTip("Show the next page of alarm records.")
         self.next_btn.clicked.connect(self.next_page)
         page_row.addWidget(self.next_btn)
         table_layout.addLayout(page_row)
@@ -274,6 +437,7 @@ class AlarmCenterPage(QWidget):
 
         self.ack_btn = QPushButton("Acknowledge")
         self.ack_btn.setObjectName("alarmPrimary")
+        self.ack_btn.setToolTip("Record that the selected open alarm was reviewed and add an operator note.")
         self.ack_btn.setEnabled(False)
         self.ack_btn.setVisible(self.can_acknowledge)
         self.ack_btn.clicked.connect(self.acknowledge_selected)
@@ -281,6 +445,7 @@ class AlarmCenterPage(QWidget):
 
         self.clear_alarm_btn = QPushButton("Manual Clear")
         self.clear_alarm_btn.setObjectName("alarmDanger")
+        self.clear_alarm_btn.setToolTip("Manually clear the selected alarm after verifying the physical condition.")
         self.clear_alarm_btn.setEnabled(False)
         self.clear_alarm_btn.setVisible(self.can_clear)
         self.clear_alarm_btn.clicked.connect(self.manual_clear_selected)
@@ -288,29 +453,42 @@ class AlarmCenterPage(QWidget):
 
         csv_btn = QPushButton("CSV")
         csv_btn.setObjectName("alarmSecondary")
+        csv_btn.setToolTip("Export the currently displayed alarm records to a CSV file.")
         csv_btn.setVisible(self.can_export)
         csv_btn.clicked.connect(self.export_csv)
         detail_actions.addWidget(csv_btn)
 
         json_btn = QPushButton("JSON")
         json_btn.setObjectName("alarmSecondary")
+        json_btn.setToolTip("Export the currently displayed alarm records to a JSON file.")
         json_btn.setVisible(self.can_export)
         json_btn.clicked.connect(self.export_json)
         detail_actions.addWidget(json_btn)
 
         pdf_btn = QPushButton("PDF")
         pdf_btn.setObjectName("alarmSecondary")
+        pdf_btn.setToolTip("Export the currently displayed alarm records to a PDF report.")
         pdf_btn.setVisible(self.can_export)
         pdf_btn.clicked.connect(self.export_pdf)
         detail_actions.addWidget(pdf_btn)
 
         detail_layout.addLayout(detail_actions)
         self.details = QTextBrowser()
+        self.details.setToolTip("Full traceability, recommended action, acknowledgement and recovery details.")
         self.details.setHtml("<p style='color:#667085'>Select an alarm row to view full traceability.</p>")
         detail_layout.addWidget(self.details, 1)
         splitter.addWidget(detail_panel)
         splitter.setSizes([430, 240])
         root.addWidget(splitter, 1)
+        self._apply_missing_button_tooltips()
+
+    def _apply_missing_button_tooltips(self):
+        """Ensure every Alarm Center button has an operator-facing tooltip."""
+        for button in self.findChildren(QPushButton):
+            if button.toolTip().strip():
+                continue
+            caption = button.text().replace("&", "").strip() or "Alarm action"
+            button.setToolTip(f"Select '{caption}' to perform this Alarm Center action.")
 
     def _auto_refresh(self):
         # Do not query MongoDB while the combined System Monitor page is hidden.
@@ -380,7 +558,10 @@ class AlarmCenterPage(QWidget):
             f"Alarm Center query failed: {message}",
             extra={"event_code": "ALARM_UI_QUERY_FAILED", "error_code": "ALARM-UI-001"},
         )
-        QMessageBox.critical(self, "Alarm Center", f"Failed to load alarms:\n\n{message}")
+        show_apollo_message(
+            self, QMessageBox.Critical, "Alarm Center",
+            "Failed to load alarm records.", informative_text=str(message),
+        )
 
     def _render_summary(self, summary: Mapping[str, Any]):
         for key, label in self.summary_labels.items():
@@ -513,10 +694,10 @@ class AlarmCenterPage(QWidget):
         document = self.current_document or {}
         if not document.get("_id"):
             return
-        note, ok = QInputDialog.getMultiLineText(
+        note, ok = ApolloNoteDialog.get_note(
             self,
             "Acknowledge Alarm",
-            "Acknowledgement note (optional):",
+            "Add an optional acknowledgement note for traceability.",
             "Alarm reviewed. Corrective action is in progress.",
         )
         if not ok:
@@ -527,23 +708,28 @@ class AlarmCenterPage(QWidget):
         document = self.current_document or {}
         if not document.get("_id"):
             return
-        note, ok = QInputDialog.getMultiLineText(
+        note, ok = ApolloNoteDialog.get_note(
             self,
             "Manual Alarm Clear",
-            "Reason for manual clear (required):",
+            "Enter the required reason after verifying the physical condition.",
             "",
         )
         if not ok:
             return
         if not note.strip():
-            QMessageBox.warning(self, "Manual Clear", "A reason is required for traceability.")
+            show_apollo_message(
+                self, QMessageBox.Warning, "Manual Clear",
+                "A reason is required for traceability.",
+            )
             return
-        reply = QMessageBox.question(
+        reply = show_apollo_message(
             self,
+            QMessageBox.Question,
             "Confirm Manual Clear",
-            "Clear this alarm manually?\n\nUse this only after verifying the physical condition.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            "Clear this alarm manually?",
+            informative_text="Use this only after verifying the physical condition.",
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            default_button=QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -570,8 +756,9 @@ class AlarmCenterPage(QWidget):
 
     def _action_finished(self, action: str, _document: Mapping[str, Any]):
         self._action_running = False
-        QMessageBox.information(
+        show_apollo_message(
             self,
+            QMessageBox.Information,
             "Alarm Center",
             "Alarm acknowledged successfully." if action == "acknowledge" else "Alarm cleared successfully.",
         )
@@ -580,7 +767,10 @@ class AlarmCenterPage(QWidget):
     def _action_failed(self, message: str):
         self._action_running = False
         self._update_action_buttons()
-        QMessageBox.critical(self, "Alarm Center", f"Alarm action failed:\n\n{message}")
+        show_apollo_message(
+            self, QMessageBox.Critical, "Alarm Center",
+            "The alarm action failed.", informative_text=str(message),
+        )
 
     # ------------------------------------------------------------------
     # Navigation / filters
@@ -607,7 +797,10 @@ class AlarmCenterPage(QWidget):
     # ------------------------------------------------------------------
     def export_csv(self):
         if not self.current_rows:
-            QMessageBox.warning(self, "Export", "There are no displayed alarm records to export.")
+            show_apollo_message(
+                self, QMessageBox.Warning, "Export",
+                "There are no displayed alarm records to export.",
+            )
             return
         path, _ = QFileDialog.getSaveFileName(self, "Export alarms to CSV", "alarm_events.csv", "CSV Files (*.csv)")
         if not path:
@@ -622,21 +815,33 @@ class AlarmCenterPage(QWidget):
             writer.writeheader()
             for row in self.current_rows:
                 writer.writerow({field: json_safe(row.get(field, "")) for field in fields})
-        QMessageBox.information(self, "Export", f"CSV exported successfully:\n{path}")
+        show_apollo_message(
+            self, QMessageBox.Information, "Export",
+            "CSV exported successfully.", informative_text=path,
+        )
 
     def export_json(self):
         if not self.current_rows:
-            QMessageBox.warning(self, "Export", "There are no displayed alarm records to export.")
+            show_apollo_message(
+                self, QMessageBox.Warning, "Export",
+                "There are no displayed alarm records to export.",
+            )
             return
         path, _ = QFileDialog.getSaveFileName(self, "Export alarms to JSON", "alarm_events.json", "JSON Files (*.json)")
         if not path:
             return
         Path(path).write_text(json.dumps(json_safe(self.current_rows), indent=2, ensure_ascii=False), encoding="utf-8")
-        QMessageBox.information(self, "Export", f"JSON exported successfully:\n{path}")
+        show_apollo_message(
+            self, QMessageBox.Information, "Export",
+            "JSON exported successfully.", informative_text=path,
+        )
 
     def export_pdf(self):
         if not self.current_rows:
-            QMessageBox.warning(self, "Export", "There are no displayed alarm records to export.")
+            show_apollo_message(
+                self, QMessageBox.Warning, "Export",
+                "There are no displayed alarm records to export.",
+            )
             return
         path, _ = QFileDialog.getSaveFileName(self, "Export alarms to PDF", "alarm_events.pdf", "PDF Files (*.pdf)")
         if not path:
@@ -666,7 +871,10 @@ class AlarmCenterPage(QWidget):
         printer.setOutputFormat(QPrinter.PdfFormat)
         printer.setOutputFileName(path)
         document.print_(printer)
-        QMessageBox.information(self, "Export", f"PDF exported successfully:\n{path}")
+        show_apollo_message(
+            self, QMessageBox.Information, "Export",
+            "PDF exported successfully.", informative_text=path,
+        )
 
     @staticmethod
     def _format_datetime(value: Any) -> str:

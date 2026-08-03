@@ -9,7 +9,7 @@ PLY_PATH = Path(
     r"\Apollo_patch_pos\media\Laser_Capture"
     r"\run_20260801_122527_cycle_0001"
     r"\01_laser_1_ztrak_2k_M0006674"
-    r"\ztrak_M0006674_20260801_122532_pointcloud_fullres_ascii_sapera_um.ply"
+    r"\ztrak_M0006674_20260801_145153_pointcloud_fullres_binary_sapera_um.ply"
 )
 
 if not PLY_PATH.is_file():

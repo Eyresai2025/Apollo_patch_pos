@@ -25,7 +25,7 @@ import numpy as np
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QProcess, QTimer, QProcessEnvironment, QUrl, QPointF
 )
-from PyQt5.QtGui import QDesktopServices, QCursor, QPainter, QPen, QColor
+from PyQt5.QtGui import QDesktopServices, QCursor, QPainter, QPen, QColor, QPalette
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QProgressBar, QComboBox,
@@ -110,20 +110,130 @@ class StrictWheelDoubleSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
+
+# =========================================================
+# APOLLO THEMED MESSAGE BOXES
+# =========================================================
+_APOLLO_MESSAGE_BOX_STYLE = """
+    QMessageBox {
+        background-color: #ffffff;
+        color: #263238;
+        font-family: "Segoe UI", Arial, sans-serif;
+        font-size: 12px;
+        border: 1px solid #d9c9e5;
+    }
+    QMessageBox QLabel {
+        background: transparent;
+        color: #263238;
+        font-size: 12px;
+        min-width: 390px;
+        padding: 2px 4px;
+    }
+    QMessageBox QPushButton {
+        min-width: 96px;
+        min-height: 30px;
+        max-height: 30px;
+        border-radius: 6px;
+        padding: 0 14px;
+        background: #6d2fa0;
+        color: #ffffff;
+        border: 1px solid #6d2fa0;
+        font-size: 11px;
+        font-weight: 600;
+    }
+    QMessageBox QPushButton:hover {
+        background: #7d3bb3;
+        border-color: #7d3bb3;
+    }
+    QMessageBox QPushButton:pressed {
+        background: #5b168b;
+        border-color: #5b168b;
+    }
+    QMessageBox QPushButton:disabled {
+        background: #e6e8ec;
+        color: #9aa1ab;
+        border-color: #d8dce2;
+    }
+    QMessageBox QPushButton#SecondaryDialogButton {
+        background: #ffffff;
+        color: #5b168b;
+        border: 1px solid #b996d0;
+    }
+    QMessageBox QPushButton#SecondaryDialogButton:hover {
+        background: #f4edf8;
+    }
+    QMessageBox QPushButton#CancelDialogButton {
+        background: #ffffff;
+        color: #4b5563;
+        border: 1px solid #cfd5dd;
+    }
+    QMessageBox QPushButton#CancelDialogButton:hover {
+        background: #f3f4f6;
+    }
+"""
+
+def _apply_apollo_message_box_theme(box, minimum_width=470):
+    """Force message dialogs to use the Apollo light theme.
+
+    This avoids Windows/global application dark palettes turning the message
+    area black while leaving the text unreadable.
+    """
+    palette = box.palette()
+    palette.setColor(QPalette.Window, QColor("#ffffff"))
+    palette.setColor(QPalette.WindowText, QColor("#263238"))
+    palette.setColor(QPalette.Base, QColor("#ffffff"))
+    palette.setColor(QPalette.AlternateBase, QColor("#f8f6fb"))
+    palette.setColor(QPalette.Text, QColor("#263238"))
+    palette.setColor(QPalette.Button, QColor("#6d2fa0"))
+    palette.setColor(QPalette.ButtonText, QColor("#ffffff"))
+    palette.setColor(QPalette.Highlight, QColor("#6d2fa0"))
+    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+
+    box.setPalette(palette)
+    box.setAutoFillBackground(True)
+    box.setAttribute(Qt.WA_StyledBackground, True)
+    box.setMinimumWidth(int(minimum_width))
+    box.setStyleSheet(_APOLLO_MESSAGE_BOX_STYLE)
+    box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    return box
+
+
+def _show_apollo_message(parent, title, text, icon):
+    box = QMessageBox(parent)
+    box.setWindowTitle(str(title))
+    box.setIcon(icon)
+    box.setText(str(text))
+    box.setStandardButtons(QMessageBox.Ok)
+    box.setDefaultButton(QMessageBox.Ok)
+    _apply_apollo_message_box_theme(box)
+    return box.exec_()
+
+
+def _apollo_information(parent, title, text):
+    return _show_apollo_message(parent, title, text, QMessageBox.Information)
+
+
+def _apollo_warning(parent, title, text):
+    return _show_apollo_message(parent, title, text, QMessageBox.Warning)
+
+
+def _apollo_critical(parent, title, text):
+    return _show_apollo_message(parent, title, text, QMessageBox.Critical)
+
 def open_output_folder_path(path_text: str, parent=None) -> bool:
     """Create and open the output folder selected in the Capture page."""
     folder = os.path.abspath(os.path.expandvars(os.path.expanduser(str(path_text or "").strip())))
     if not folder:
-        QMessageBox.warning(parent, "Missing Output Folder", "Please enter an output folder path.")
+        _apollo_warning(parent, "Missing Output Folder", "Please enter an output folder path.")
         return False
     try:
         os.makedirs(folder, exist_ok=True)
     except Exception as error:
-        QMessageBox.critical(parent, "Output Folder Error", f"Could not create output folder:\n{folder}\n\n{error}")
+        _apollo_critical(parent, "Output Folder Error", f"Could not create output folder:\n{folder}\n\n{error}")
         return False
     opened = QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
     if not opened:
-        QMessageBox.warning(parent, "Open Folder Failed", f"Could not open output folder:\n{folder}")
+        _apollo_warning(parent, "Open Folder Failed", f"Could not open output folder:\n{folder}")
     return bool(opened)
 
 
@@ -1037,13 +1147,13 @@ class ManualCameraCaptureTab(QWidget):
     # -----------------------------------------------------
     def start_capture(self):
         if self.worker is not None and self.worker.isRunning():
-            QMessageBox.warning(self, "Capture Running", "Capture is already running.")
+            _apollo_warning(self, "Capture Running", "Capture is already running.")
             return
 
         settings = self.get_settings_from_ui()
 
         if not settings.save_dir:
-            QMessageBox.warning(self, "Missing Folder", "Please select save folder.")
+            _apollo_warning(self, "Missing Folder", "Please select save folder.")
             return
 
         self.log_box.clear()
@@ -1089,7 +1199,7 @@ class ManualCameraCaptureTab(QWidget):
         self.stop_btn.setEnabled(False)
         self.append_log("")
         self.append_log(msg)
-        QMessageBox.information(self, "Capture Finished", msg)
+        _apollo_information(self, "Capture Finished", msg)
 
     # -----------------------------------------------------
     def capture_error(self, err):
@@ -1099,7 +1209,7 @@ class ManualCameraCaptureTab(QWidget):
         self.append_log("")
         self.append_log("[ERROR]")
         self.append_log(err)
-        QMessageBox.critical(self, "Capture Error", err)
+        _apollo_critical(self, "Capture Error", err)
 
 
 # =========================================================
@@ -2000,14 +2110,14 @@ class AutoPLCFFCProcessTab(QWidget):
         sku = self.sku_combo.currentText().strip()
         if not sku:
             if show_message:
-                QMessageBox.warning(self, "Missing SKU", "Select or enter an SKU first.")
+                _apollo_warning(self, "Missing SKU", "Select or enter an SKU first.")
             return False
 
         path = self._camera_profile_path(sku)
         if not path.exists():
             self.profile_status_label.setText(f"Camera profile not found: {path}")
             if show_message:
-                QMessageBox.warning(self, "Camera Profile Missing", f"Camera profile not found:\n{path}")
+                _apollo_warning(self, "Camera Profile Missing", f"Camera profile not found:\n{path}")
             return False
 
         try:
@@ -2018,7 +2128,7 @@ class AutoPLCFFCProcessTab(QWidget):
         except Exception as error:
             self.profile_status_label.setText(f"Profile load failed: {error}")
             if show_message:
-                QMessageBox.critical(self, "Camera Profile Error", str(error))
+                _apollo_critical(self, "Camera Profile Error", str(error))
             return False
 
         self.loaded_camera_profile = profile
@@ -2036,7 +2146,7 @@ class AutoPLCFFCProcessTab(QWidget):
             self.save_dir_edit.setText(str(default_capture_root))
 
         if show_message:
-            QMessageBox.information(
+            _apollo_information(
                 self,
                 "SKU Camera Profile Loaded",
                 f"Loaded camera profile for SKU: {sku}\n\n{path}",
@@ -2457,7 +2567,7 @@ class AutoPLCFFCProcessTab(QWidget):
     # -----------------------------------------------------
     def start_process(self):
         if self.process is not None and self.process.state() != QProcess.NotRunning:
-            QMessageBox.warning(self, "Already Running", "Capture is already running.")
+            _apollo_warning(self, "Already Running", "Capture is already running.")
             return
 
         mode = self.mode_combo.currentText().strip().upper()
@@ -2467,7 +2577,7 @@ class AutoPLCFFCProcessTab(QWidget):
         if mode == "PLC_SOFTWARE":
             sku = self.sku_combo.currentText().strip()
             if not sku:
-                QMessageBox.warning(
+                _apollo_warning(
                     self,
                     "SKU Required",
                     "Select an SKU and load its camera profile before PLC software capture.",
@@ -2475,7 +2585,7 @@ class AutoPLCFFCProcessTab(QWidget):
                 return
             if self.loaded_camera_profile is None or self.loaded_sku_name != sku:
                 if not self.load_sku_camera_profile(show_message=False):
-                    QMessageBox.warning(
+                    _apollo_warning(
                         self,
                         "Camera Profile Required",
                         f"Could not load the camera profile for SKU: {sku}",
@@ -2487,11 +2597,11 @@ class AutoPLCFFCProcessTab(QWidget):
             self.script_path_edit.setText(script_path)
 
         if not script_path or not os.path.isfile(script_path):
-            QMessageBox.warning(self, "Missing Script", f"Runner script not found:\n{script_path}")
+            _apollo_warning(self, "Missing Script", f"Runner script not found:\n{script_path}")
             return
 
         if not save_dir:
-            QMessageBox.warning(self, "Missing Save Folder", "Please select save folder.")
+            _apollo_warning(self, "Missing Save Folder", "Please select save folder.")
             return
 
         os.makedirs(save_dir, exist_ok=True)
@@ -2537,7 +2647,7 @@ class AutoPLCFFCProcessTab(QWidget):
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             self.status_label.setText("Failed to start process")
-            QMessageBox.critical(self, "Start Failed", "Could not start auto capture process.")
+            _apollo_critical(self, "Start Failed", "Could not start auto capture process.")
 
     # -----------------------------------------------------
     def stop_process(self, wait_for_exit: bool = False):

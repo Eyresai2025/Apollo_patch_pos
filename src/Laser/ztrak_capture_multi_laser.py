@@ -46,11 +46,11 @@ NUM_BUFFERS = 4
 WAIT_TIMEOUT_MS = 60000
 
 DEFAULT_CONVERTER = {
-    # Production default: save original full-resolution ASCII PLY.
-    # This is intentionally large and matches the full point-cloud requirement.
+    # Production default: save original full-resolution binary PLY.
+    # Binary preserves every full-resolution point while reducing write time and file size.
     "full_resolution_ply": True,
     "debug_ply_step": 1,
-    "ply_format": "ascii",
+    "ply_format": "binary",
     "center_z": False,
     "invalid_c_value": 65535,
     "x_scaler_um": 140.0,
@@ -61,8 +61,8 @@ DEFAULT_CONVERTER = {
     "include_reflectance_property": True,
 }
 
-# If True, both lasers will save full-resolution ASCII PLY.
-# Use only after sequential/binary test works.
+# If True, all selected lasers use full-resolution step=1.
+# The binary/ascii format remains controlled independently.
 GLOBAL_FULL_ASCII_PLY_FOR_ALL = True
 
 # Per-laser configuration by serial number.
@@ -96,7 +96,7 @@ LASER_CONFIGS = {
         "converter": {
             "full_resolution_ply": True,
             "debug_ply_step": 1,
-            "ply_format": "ascii",
+            "ply_format": "binary",
             "center_z": False,
             "invalid_c_value": 65535,
             "x_scaler_um": 140.0,
@@ -136,7 +136,7 @@ LASER_CONFIGS = {
         "converter": {
             "full_resolution_ply": True,
             "debug_ply_step": 1,
-            "ply_format": "ascii",
+            "ply_format": "binary",
             "center_z": False,
             "invalid_c_value": 65535,
             "x_scaler_um": 140.0,
@@ -247,7 +247,7 @@ def _apply_environment_overrides():
             ),
             "ply_format": os.environ.get(
                 "APOLLO_LASER_PLY_FORMAT",
-                DEFAULT_CONVERTER.get("ply_format", "ascii"),
+                DEFAULT_CONVERTER.get("ply_format", "binary"),
             ).strip().lower(),
             "center_z": _env_bool(
                 "APOLLO_LASER_CENTER_Z", DEFAULT_CONVERTER.get("center_z", False)
@@ -1156,7 +1156,7 @@ def capture_one_laser(device, capture_index, run_dir):
             output_dir=laser_dir,
             full_resolution_ply=conv.get("full_resolution_ply", True),
             debug_ply_step=conv.get("debug_ply_step", 1),
-            ply_format=conv.get("ply_format", "ascii"),
+            ply_format=conv.get("ply_format", "binary"),
             center_z=conv.get("center_z", False),
             invalid_c_value=conv.get("invalid_c_value", 65535),
             x_scaler_um=conv.get("x_scaler_um", 140.0),

@@ -23,8 +23,8 @@ Three offset calibration files::
     media/offset_calibration/<SKU>/bead/<SKU>_bead_calibration.json
 
 Sidewall 1 and Sidewall 2 run the AI-team raw-R pipeline. Innerwall,
-tread and bead reuse the configured source-side R anchor and run the latest
-phase-preserving calibrated offset crop before PatchCore scoring.
+tread and bead reuse the configured source-side R anchor and run the calibrated
+offset crop pipeline before PatchCore scoring.
 """
 
 from __future__ import annotations
@@ -59,7 +59,6 @@ from src.models.feature_thresh.patchcore_scorer import PatchCoreScorer
 from src.models.five_side_patchcore import detect_and_crop_utils as dc
 from src.models.five_side_patchcore import detect_and_crop_fast as dcf
 from src.models.five_side_patchcore import r_locator_fast as rlf
-from src.models.five_side_patchcore import tread_offset_utils as tu
 
 logger = get_logger(__name__, component="PATCHCORE")
 
@@ -69,6 +68,40 @@ OFFSET_SIDES = {"innerwall", "tread", "bead"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 
+
+
+def _calculate_offset_crop_window(
+    r_anchor: Mapping[str, Any],
+    image_height: int,
+    offset_ratio: float,
+    one_rev_target_px: int,
+) -> tuple[int, int]:
+    """AI-team offset formula with the same boundary fallback chain."""
+    r1_y = int(r_anchor["R1_top_y"])
+    one_rev_height = int(r_anchor["one_rev_height"])
+    if one_rev_height <= 0:
+        raise RuntimeError(f"Invalid one_rev_height: {one_rev_height}")
+    if one_rev_target_px <= 0:
+        raise RuntimeError(f"Invalid one_rev_target_px: {one_rev_target_px}")
+
+    start_y = int(round(r1_y + float(offset_ratio) * one_rev_height))
+    if start_y < 0:
+        start_y = int(round(r1_y + abs(float(offset_ratio)) * one_rev_height))
+
+    end_y = start_y + int(one_rev_target_px)
+    if end_y > int(image_height):
+        start_y = int(round(r1_y - abs(float(offset_ratio)) * one_rev_height))
+        end_y = start_y + int(one_rev_target_px)
+        if start_y < 0:
+            start_y = int(round(r1_y + abs(float(offset_ratio)) * one_rev_height))
+            end_y = start_y + int(one_rev_target_px)
+
+    if start_y < 0 or end_y > int(image_height):
+        raise RuntimeError(
+            f"Offset crop is outside image after fallbacks: start={start_y}, "
+            f"end={end_y}, image_height={image_height}"
+        )
+    return int(start_y), int(end_y)
 
 
 class PatchCoreConfigurationError(RuntimeError):
@@ -1595,12 +1628,11 @@ class PatchCoreSideRuntime:
         one_rev_target = int(
             calibration.get("one_rev_target_px", calibration.get("one_rev_tread_px"))
         )
-        start_y, end_y = tu.calculate_offset_crop_window(
+        start_y, end_y = _calculate_offset_crop_window(
             r_anchor=anchor,
-            target_img_height=int(raw_image.shape[0]),
+            image_height=int(raw_image.shape[0]),
             offset_ratio=float(calibration["offset_ratio"]),
             one_rev_target_px=one_rev_target,
-            target_name=self.side_name,
         )
 
         stage_timings["offset_window_sec"] = time.perf_counter() - stage_t0

@@ -17,15 +17,6 @@ from src.device.camera_profile_manager import (
 from src.device.arena_camera_manager import ArenaCameraManager
 from src.workers.camera_live_preview_worker import CameraLivePreviewWorker
 from src.workers.camera_capture_worker import CameraCaptureWorker
-from src.device.laser_profile_manager import (
-    LaserProfileManager,
-    LASER_ZONE_NAMES,
-    LASER_ZONE_KEYS,
-    DEFAULT_LASER_SETTINGS
-)
-from src.device.teledyne_laser_manager import TeledyneLaserManager
-from src.workers.laser_live_profile_worker import LaserLiveProfileWorker
-from src.workers.laser_capture_worker import LaserCaptureWorker
 from src.device.sku_device_profile_store import SKUDeviceProfileStore
 
 
@@ -422,8 +413,6 @@ class DevicePage(QWidget):
         self.profile_manager = CameraProfileManager()
         self.camera_manager = ArenaCameraManager()
 
-        self.laser_profile_manager = LaserProfileManager()
-        self.laser_manager = TeledyneLaserManager()
         self.sku_profile_store = SKUDeviceProfileStore("media")
         self.selected_serial = None
         self.selected_camera_row = None
@@ -433,15 +422,9 @@ class DevicePage(QWidget):
         self.camera_settings_by_role = {}
         self.camera_assignment_by_serial = {}
 
-        self.selected_laser_id = None
-        self.laser_settings_by_id = {}
-
         self.live_worker = None
         self.capture_worker = None
         self._last_camera_preview_pixmap = None
-
-        self.laser_live_worker = None
-        self.laser_capture_worker = None
 
         self.init_ui()
 
@@ -459,7 +442,7 @@ class DevicePage(QWidget):
         title = QLabel("Device Configuration")
         title.setObjectName("PageTitle")
         subtitle = QLabel(
-            "Configure SKU-specific camera and laser profiles, verify live quality, and save production settings."
+            "Configure SKU-specific camera profiles, verify live quality, and save production settings."
         )
         subtitle.setObjectName("PageSubtitle")
 
@@ -472,15 +455,10 @@ class DevicePage(QWidget):
         main_layout.addWidget(self.tabs, 1)
 
         self.camera_tab = QWidget()
-        self.laser_tab = QWidget()
         self.camera_tab.setObjectName("DeviceTab")
-        self.laser_tab.setObjectName("DeviceTab")
 
         self.tabs.addTab(self.camera_tab, "Camera")
-        self.tabs.addTab(self.laser_tab, "Laser")
-
         self.build_camera_tab()
-        self.build_laser_tab()
 
     def disable_accidental_wheel_changes(self, parent_widget):
         """Closed combos and numeric fields never change while the page scrolls."""
@@ -591,94 +569,6 @@ class DevicePage(QWidget):
         self.disable_accidental_wheel_changes(self.camera_tab)
         self.refresh_camera_sku_list(select_current=False)
 
-    def build_laser_tab(self):
-        layout = QVBoxLayout(self.laser_tab)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(9)
-
-        profile_card = QFrame()
-        profile_card.setObjectName("DeviceCard")
-        profile_layout = QVBoxLayout(profile_card)
-        profile_layout.setContentsMargins(12, 10, 12, 10)
-        profile_layout.setSpacing(7)
-
-        profile_title = QLabel("Laser Profile & Discovery")
-        profile_title.setObjectName("CardTitle")
-        profile_layout.addWidget(profile_title)
-
-        top_row = QHBoxLayout()
-        top_row.setSpacing(7)
-
-        self.laser_sku_input = ModernComboBox()
-        self.laser_sku_input.setEditable(True)
-        self.laser_sku_input.setInsertPolicy(QComboBox.NoInsert)
-        self.laser_sku_input.lineEdit().setPlaceholderText(
-            "Select or enter SKU, example: SKU_003"
-        )
-        self.laser_sku_input.lineEdit().setClearButtonEnabled(True)
-
-        self.refresh_laser_sku_btn = QPushButton("Refresh SKU List")
-        self.refresh_lasers_btn = QPushButton("Refresh Lasers")
-        self.load_laser_profile_btn = QPushButton("Load Profile")
-        self.save_laser_profile_btn = QPushButton("Save Profile")
-        self.load_laser_profile_btn.setObjectName("PrimaryButton")
-        self.save_laser_profile_btn.setObjectName("PrimaryButton")
-
-        sku_label = QLabel("SKU")
-        sku_label.setMinimumWidth(28)
-        top_row.addWidget(sku_label)
-        top_row.addWidget(self.laser_sku_input, 1)
-        top_row.addWidget(self.refresh_laser_sku_btn)
-        top_row.addWidget(self.refresh_lasers_btn)
-        top_row.addWidget(self.load_laser_profile_btn)
-        top_row.addWidget(self.save_laser_profile_btn)
-        profile_layout.addLayout(top_row)
-
-        table_title = QLabel("Detected Lasers")
-        table_title.setObjectName("SectionTitle")
-        profile_layout.addWidget(table_title)
-
-        self.laser_table = QTableWidget()
-        self.laser_table.setColumnCount(6)
-        self.laser_table.setHorizontalHeaderLabels([
-            "Laser ID", "Laser Name", "Model", "Status", "Assigned Zone", "Enabled"
-        ])
-        self.laser_table.horizontalHeader().setStretchLastSection(True)
-        self.laser_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.laser_table.verticalHeader().setVisible(False)
-        self.laser_table.verticalHeader().setDefaultSectionSize(32)
-        self.laser_table.setAlternatingRowColors(True)
-        self.laser_table.setShowGrid(False)
-        self.laser_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.laser_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.laser_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.laser_table.setMinimumHeight(112)
-        self.laser_table.setMaximumHeight(156)
-        profile_layout.addWidget(self.laser_table)
-        layout.addWidget(profile_card)
-
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(10)
-
-        self.laser_settings_box = self.create_laser_settings_box()
-        self.laser_preview_box = self.create_laser_preview_box()
-
-        laser_settings_scroll = self.make_scrollable_widget(
-            self.laser_settings_box,
-            min_width=470,
-        )
-
-        bottom_row.addWidget(laser_settings_scroll, 5)
-        bottom_row.addWidget(self.laser_preview_box, 8)
-        layout.addLayout(bottom_row, 1)
-
-        self.refresh_laser_sku_btn.clicked.connect(lambda: self.refresh_laser_sku_list(True))
-        self.refresh_lasers_btn.clicked.connect(self.refresh_lasers)
-        self.load_laser_profile_btn.clicked.connect(self.load_laser_profile)
-        self.save_laser_profile_btn.clicked.connect(self.save_laser_profile)
-        self.laser_table.cellClicked.connect(self.on_laser_selected)
-        self.disable_accidental_wheel_changes(self.laser_tab)
-        self.refresh_laser_sku_list(select_current=False)
 
     def create_settings_box(self):
         box = QGroupBox("Camera Settings")
@@ -857,8 +747,6 @@ class DevicePage(QWidget):
     def _camera_sku_text(self):
         return self.sku_input.currentText().strip()
 
-    def _laser_sku_text(self):
-        return self.laser_sku_input.currentText().strip()
 
     def _replace_combo_items(self, combo, values, current_text=""):
         current = current_text or combo.currentText().strip()
@@ -882,14 +770,6 @@ class DevicePage(QWidget):
                 f"Status: {len(skus)} camera SKU profile(s) available"
             )
 
-    def refresh_laser_sku_list(self, select_current=True):
-        current = self._laser_sku_text() if select_current else ""
-        skus = self.sku_profile_store.list_laser_skus()
-        self._replace_combo_items(self.laser_sku_input, skus, current)
-        if hasattr(self, "laser_status_label"):
-            self.laser_status_label.setText(
-                f"Status: {len(skus)} laser SKU profile(s) available"
-            )
 
     def _camera_role_key(self):
         data = self.camera_role_combo.currentData()
@@ -1527,35 +1407,6 @@ class DevicePage(QWidget):
                     self.camera_manager.close_all()
             except Exception as e:
                 print(f"[DEVICE PAGE] camera_manager cleanup warning: {e}")
-        # Stop laser live worker
-        try:
-            if getattr(self, "laser_live_worker", None) is not None:
-                if self.laser_live_worker.isRunning():
-                    self.laser_live_worker.stop()
-                    self.laser_live_worker.wait(3000)
-
-                self.laser_live_worker = None
-        except Exception as e:
-            print(f"[DEVICE PAGE] laser_live_worker cleanup warning: {e}")
-
-        # Wait for laser capture worker
-        try:
-            if getattr(self, "laser_capture_worker", None) is not None:
-                if self.laser_capture_worker.isRunning():
-                    print("[DEVICE PAGE] Waiting for laser capture worker to finish...")
-                    self.laser_capture_worker.wait(5000)
-
-                self.laser_capture_worker = None
-        except Exception as e:
-            print(f"[DEVICE PAGE] laser_capture_worker cleanup warning: {e}")
-
-        # Release laser handles
-        try:
-            if getattr(self, "laser_manager", None) is not None:
-                self.laser_manager.close_all()
-        except Exception as e:
-            print(f"[DEVICE PAGE] laser_manager cleanup warning: {e}")
-
         # Reset buttons safely
         try:
             self.start_preview_btn.setEnabled(True)
@@ -1571,333 +1422,12 @@ class DevicePage(QWidget):
         self.cleanup_device_page(destroy_devices=True)
         event.accept()
     
-    def create_laser_settings_box(self):
-        box = QGroupBox("Laser Settings")
-        root = QVBoxLayout(box)
-        root.setContentsMargins(10, 9, 10, 10)
-        root.setSpacing(8)
-
-        identity_row = QHBoxLayout()
-        identity_row.setSpacing(7)
-        selected_title = QLabel("Selected laser")
-        selected_title.setObjectName("SectionTitle")
-        self.selected_laser_label = QLabel("-")
-        self.selected_laser_label.setObjectName("StatusBadge")
-        identity_row.addWidget(selected_title)
-        identity_row.addStretch(1)
-        identity_row.addWidget(self.selected_laser_label)
-        root.addLayout(identity_row)
-
-        self.laser_use_user_set_checkbox = QCheckBox(
-            "Load UserSet before applying settings"
-        )
-        self.laser_use_user_set_checkbox.setChecked(False)
-        root.addWidget(self.laser_use_user_set_checkbox)
-
-        self.laser_user_set_input = QLineEdit("UserSet1")
-        self.laser_device_output_combo = ModernComboBox()
-        self.laser_device_output_combo.addItems(["Linescan3D"])
-        self.laser_scan3d_data_type_combo = ModernComboBox()
-        self.laser_scan3d_data_type_combo.addItems(["UniformX Z"])
-        self.laser_profiles_per_scan_input = QLineEdit("1")
-        self.laser_scan_rate_input = QLineEdit("4000.0")
-        self.laser_exposure_input = QLineEdit("100.0")
-        self.laser_trigger_mode_combo = ModernComboBox()
-        self.laser_trigger_mode_combo.addItems(["Off", "On"])
-        self.laser_trigger_source_combo = ModernComboBox()
-        self.laser_trigger_source_combo.addItems(["Software", "Line0", "Encoder"])
-        self.laser_packet_size_input = QLineEdit("9000")
-        self.laser_invalid_value_input = QLineEdit("")
-        self.laser_range_mode_combo = ModernComboBox()
-        self.laser_range_mode_combo.addItems(["Near", "Mid", "Far"])
-        self.laser_resolution_combo = ModernComboBox()
-        self.laser_resolution_combo.addItems(["High", "Medium", "Low"])
-        self.laser_roi_x_start_input = QLineEdit("0")
-        self.laser_roi_width_input = QLineEdit("4096")
-        self.laser_roi_z_start_input = QLineEdit("0")
-        self.laser_roi_height_input = QLineEdit("2048")
-        self.laser_profile_avg_input = QLineEdit("1")
-        self.laser_threshold_input = QLineEdit("50.0")
-        self.laser_x_scale_input = QLineEdit("1.0")
-        self.laser_z_scale_input = QLineEdit("1.0")
-        self.laser_aspect_lock_checkbox = QCheckBox("Lock aspect ratio")
-        self.laser_aspect_lock_checkbox.setChecked(True)
-        self.laser_output_format_combo = ModernComboBox()
-        self.laser_output_format_combo.addItems(["Profile", "Point Cloud"])
-
-        acquisition_title = QLabel("Acquisition & Output")
-        acquisition_title.setObjectName("SectionTitle")
-        root.addWidget(acquisition_title)
-        acquisition_form = QFormLayout()
-        acquisition_form.setContentsMargins(0, 0, 0, 0)
-        acquisition_form.setHorizontalSpacing(10)
-        acquisition_form.setVerticalSpacing(6)
-        acquisition_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        acquisition_form.addRow("User set", self.laser_user_set_input)
-        acquisition_form.addRow("Device output", self.laser_device_output_combo)
-        acquisition_form.addRow("3D data type", self.laser_scan3d_data_type_combo)
-        acquisition_form.addRow("Profiles per scan", self.laser_profiles_per_scan_input)
-        acquisition_form.addRow("Scan rate", self.laser_scan_rate_input)
-        acquisition_form.addRow("Exposure", self.laser_exposure_input)
-        acquisition_form.addRow("Range mode", self.laser_range_mode_combo)
-        acquisition_form.addRow("Resolution", self.laser_resolution_combo)
-        root.addLayout(acquisition_form)
-
-        trigger_title = QLabel("Trigger & Network")
-        trigger_title.setObjectName("SectionTitle")
-        root.addWidget(trigger_title)
-        trigger_form = QFormLayout()
-        trigger_form.setContentsMargins(0, 0, 0, 0)
-        trigger_form.setHorizontalSpacing(10)
-        trigger_form.setVerticalSpacing(6)
-        trigger_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        trigger_form.addRow("Trigger mode", self.laser_trigger_mode_combo)
-        trigger_form.addRow("Trigger source", self.laser_trigger_source_combo)
-        trigger_form.addRow("Packet size", self.laser_packet_size_input)
-        trigger_form.addRow("Invalid raw value", self.laser_invalid_value_input)
-        root.addLayout(trigger_form)
-
-        roi_title = QLabel("ROI & Quality Filtering")
-        roi_title.setObjectName("SectionTitle")
-        root.addWidget(roi_title)
-        roi_form = QFormLayout()
-        roi_form.setContentsMargins(0, 0, 0, 0)
-        roi_form.setHorizontalSpacing(10)
-        roi_form.setVerticalSpacing(6)
-        roi_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        roi_form.addRow("ROI X start", self.laser_roi_x_start_input)
-        roi_form.addRow("ROI width", self.laser_roi_width_input)
-        roi_form.addRow("ROI Z start", self.laser_roi_z_start_input)
-        roi_form.addRow("ROI height", self.laser_roi_height_input)
-        roi_form.addRow("Profile averaging", self.laser_profile_avg_input)
-        roi_form.addRow("Threshold", self.laser_threshold_input)
-        root.addLayout(roi_form)
-
-        display_title = QLabel("Display & Save")
-        display_title.setObjectName("SectionTitle")
-        root.addWidget(display_title)
-        display_form = QFormLayout()
-        display_form.setContentsMargins(0, 0, 0, 0)
-        display_form.setHorizontalSpacing(10)
-        display_form.setVerticalSpacing(6)
-        display_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        display_form.addRow("X scale", self.laser_x_scale_input)
-        display_form.addRow("Z scale", self.laser_z_scale_input)
-        display_form.addRow(self.laser_aspect_lock_checkbox)
-        display_form.addRow("Output format", self.laser_output_format_combo)
-        root.addLayout(display_form)
-
-        self.apply_laser_settings_btn = QPushButton("Apply Laser Settings")
-        self.start_laser_preview_btn = QPushButton("Start Live Profile")
-        self.stop_laser_preview_btn = QPushButton("Stop Profile")
-        self.capture_laser_profile_btn = QPushButton("Capture One Profile")
-        self.apply_laser_settings_btn.setObjectName("PrimaryButton")
-        self.start_laser_preview_btn.setObjectName("SuccessButton")
-        self.stop_laser_preview_btn.setObjectName("DangerButton")
-        self.capture_laser_profile_btn.setObjectName("InfoButton")
-        self.stop_laser_preview_btn.setEnabled(False)
-
-        action_row_1 = QHBoxLayout()
-        action_row_1.setSpacing(7)
-        action_row_1.addWidget(self.apply_laser_settings_btn, 1)
-        action_row_1.addWidget(self.capture_laser_profile_btn, 1)
-        root.addLayout(action_row_1)
-
-        action_row_2 = QHBoxLayout()
-        action_row_2.setSpacing(7)
-        action_row_2.addWidget(self.start_laser_preview_btn, 1)
-        action_row_2.addWidget(self.stop_laser_preview_btn, 1)
-        root.addLayout(action_row_2)
-
-        self.apply_laser_settings_btn.clicked.connect(self.apply_laser_settings_to_selected)
-        self.start_laser_preview_btn.clicked.connect(self.start_laser_live_profile)
-        self.stop_laser_preview_btn.clicked.connect(self.stop_laser_live_profile)
-        self.capture_laser_profile_btn.clicked.connect(self.capture_one_laser_profile)
-
-        box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        return box
-
-    def create_laser_preview_box(self):
-        box = QGroupBox("Live 2D Laser Profile & Quality Metrics")
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-
-        preview_header = QHBoxLayout()
-        preview_title = QLabel("Live profile")
-        preview_title.setObjectName("SectionTitle")
-        self.laser_status_label = QLabel("Status: Waiting")
-        self.laser_status_label.setObjectName("StatusBadge")
-        preview_header.addWidget(preview_title)
-        preview_header.addStretch(1)
-        preview_header.addWidget(self.laser_status_label)
-        layout.addLayout(preview_header)
-
-        self.laser_preview_label = QLabel("No Laser Profile")
-        self.laser_preview_label.setAlignment(Qt.AlignCenter)
-        self.laser_preview_label.setMinimumHeight(330)
-        self.laser_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.laser_preview_label.setStyleSheet("""
-            QLabel {
-                background-color: #0E1117;
-                color: #E2E8F0;
-                border: 1px solid #2C3440;
-                border-radius: 9px;
-                font-size: 15px;
-                font-weight: 600;
-            }
-        """)
-
-        metrics_title = QLabel("Quality metrics")
-        metrics_title.setObjectName("SectionTitle")
-
-        self.laser_metrics_label = QLabel(
-            "Valid Points: -\n"
-            "Missing Points: -\n"
-            "Outliers: -\n"
-            "Z Range: -\n"
-            "SNR: -\n"
-            "Decision: -"
-        )
-        self.laser_metrics_label.setStyleSheet("""
-            QLabel {
-                background: #F8FAFC;
-                color: #334155;
-                border: 1px solid #E2E8F0;
-                border-radius: 8px;
-                padding: 9px;
-                font: 10px 'Segoe UI';
-            }
-        """)
-
-        help_label = QLabel(
-            "Use Live Profile to verify shape. Capture One Profile saves NPY, CSV, PNG, and metrics JSON."
-        )
-        help_label.setObjectName("HelpText")
-        help_label.setWordWrap(True)
-
-        layout.addWidget(self.laser_preview_label, 1)
-        layout.addWidget(metrics_title)
-        layout.addWidget(self.laser_metrics_label)
-        layout.addWidget(help_label)
-        return box
-
-    def refresh_lasers(self):
-        if self.laser_live_worker:
-            self.stop_laser_live_profile()
-
-        lasers = self.laser_manager.refresh_lasers()
-
-        self.laser_table.setRowCount(0)
-
-        for laser in lasers:
-            row = self.laser_table.rowCount()
-            self.laser_table.insertRow(row)
-
-            self.laser_table.setItem(row, 0, QTableWidgetItem(laser.laser_id))
-            self.laser_table.setItem(row, 1, QTableWidgetItem(laser.laser_name))
-            self.laser_table.setItem(row, 2, QTableWidgetItem(laser.model))
-            self.laser_table.setItem(row, 3, QTableWidgetItem(laser.status))
-
-            zone_combo = ModernComboBox()
-            zone_combo.addItems(["Unassigned"] + LASER_ZONE_NAMES)
-            zone_combo.setObjectName("TableCombo")
-            self.laser_table.setCellWidget(row, 4, zone_combo)
-
-            enabled_checkbox = QCheckBox()
-            enabled_checkbox.setChecked(True)
-            enabled_checkbox.setStyleSheet("margin-left: 20px;")
-            self.laser_table.setCellWidget(row, 5, enabled_checkbox)
-
-            if laser.laser_id not in self.laser_settings_by_id:
-                self.laser_settings_by_id[laser.laser_id] = DEFAULT_LASER_SETTINGS.copy()
-                self.laser_settings_by_id[laser.laser_id]["laser_id"] = laser.laser_id
-                self.laser_settings_by_id[laser.laser_id]["laser_name"] = laser.laser_name
-
-        self.laser_status_label.setText(f"Status: Found {len(lasers)} laser(s)")
 
 
-    def on_laser_selected(self, row, col):
-        laser_item = self.laser_table.item(row, 0)
-
-        if not laser_item:
-            return
-
-        if self.selected_laser_id:
-            self.save_laser_form_to_memory(self.selected_laser_id)
-
-        laser_id = laser_item.text()
-        self.selected_laser_id = laser_id
-
-        if laser_id not in self.laser_settings_by_id:
-            self.laser_settings_by_id[laser_id] = DEFAULT_LASER_SETTINGS.copy()
-            self.laser_settings_by_id[laser_id]["laser_id"] = laser_id
-
-        self.load_laser_memory_to_form(laser_id)
 
 
-    def save_laser_form_to_memory(self, laser_id):
-        try:
-            laser_name = laser_id
 
-            for row in range(self.laser_table.rowCount()):
-                laser_item = self.laser_table.item(row, 0)
-                name_item = self.laser_table.item(row, 1)
 
-                if laser_item and laser_item.text() == laser_id and name_item:
-                    laser_name = name_item.text()
-                    break
-
-            settings = {
-                "laser_id": laser_id,
-                "laser_name": laser_name,
-                "enabled": True,
-
-                # Direct GUI configuration / optional UserSet
-                "use_user_set": self.laser_use_user_set_checkbox.isChecked(),
-                "user_set": self.laser_user_set_input.text().strip() or "UserSet1",
-
-                # Z-Trak output settings
-                "device_output_type": self.laser_device_output_combo.currentText(),
-                "scan3d_data_type": self.laser_scan3d_data_type_combo.currentText(),
-                "profiles_per_scan": int(self.laser_profiles_per_scan_input.text()),
-
-                # Acquisition
-                "scan_rate": float(self.laser_scan_rate_input.text()),
-                "exposure": float(self.laser_exposure_input.text()),
-                "range_mode": self.laser_range_mode_combo.currentText(),
-                "resolution": self.laser_resolution_combo.currentText(),
-
-                # ROI
-                "roi_x_start": int(self.laser_roi_x_start_input.text()),
-                "roi_width": int(self.laser_roi_width_input.text()),
-                "roi_z_start": int(self.laser_roi_z_start_input.text()),
-                "roi_height": int(self.laser_roi_height_input.text()),
-
-                # Filtering
-                "profile_averaging": int(self.laser_profile_avg_input.text()),
-                "threshold": float(self.laser_threshold_input.text()),
-
-                # Trigger / network
-                "trigger_mode": self.laser_trigger_mode_combo.currentText(),
-                "trigger_source": self.laser_trigger_source_combo.currentText(),
-                "trigger_activation": "RisingEdge",
-                "packet_size": int(self.laser_packet_size_input.text()),
-                "invalid_value": self.laser_invalid_value_input.text().strip(),
-
-                # Display
-                "x_scale": float(self.laser_x_scale_input.text()),
-                "z_scale": float(self.laser_z_scale_input.text()),
-                "aspect_lock": self.laser_aspect_lock_checkbox.isChecked(),
-
-                # Output
-                "output_format": self.laser_output_format_combo.currentText(),
-            }
-
-            self.laser_settings_by_id[laser_id] = settings
-
-        except Exception as e:
-            QMessageBox.warning(self, "Invalid Laser Settings", str(e))
             
     def make_scrollable_widget(self, widget, min_width=420):
         scroll = QScrollArea()
@@ -1934,379 +1464,28 @@ class DevicePage(QWidget):
         """)
         return scroll
 
-    def load_laser_memory_to_form(self, laser_id):
-        settings = self.laser_settings_by_id.get(
-            laser_id,
-            DEFAULT_LASER_SETTINGS.copy()
-        )
 
-        self.selected_laser_label.setText(laser_id)
 
-        self.laser_use_user_set_checkbox.setChecked(
-            bool(settings.get("use_user_set", False))
-        )
 
-        self.laser_user_set_input.setText(
-            str(settings.get("user_set", "UserSet1"))
-        )
 
-        self.laser_device_output_combo.setCurrentText(
-            settings.get("device_output_type", "Linescan3D")
-        )
 
-        self.laser_scan3d_data_type_combo.setCurrentText(
-            settings.get("scan3d_data_type", "UniformX Z")
-        )
 
-        self.laser_profiles_per_scan_input.setText(
-            str(settings.get("profiles_per_scan", 1))
-        )
 
-        self.laser_scan_rate_input.setText(str(settings.get("scan_rate", 4000.0)))
-        self.laser_exposure_input.setText(str(settings.get("exposure", 100.0)))
 
-        self.laser_range_mode_combo.setCurrentText(settings.get("range_mode", "Mid"))
-        self.laser_resolution_combo.setCurrentText(settings.get("resolution", "High"))
 
-        self.laser_roi_x_start_input.setText(str(settings.get("roi_x_start", 0)))
-        self.laser_roi_width_input.setText(str(settings.get("roi_width", 4096)))
-        self.laser_roi_z_start_input.setText(str(settings.get("roi_z_start", 0)))
-        self.laser_roi_height_input.setText(str(settings.get("roi_height", 2048)))
 
-        self.laser_profile_avg_input.setText(str(settings.get("profile_averaging", 1)))
-        self.laser_threshold_input.setText(str(settings.get("threshold", 50.0)))
 
-        self.laser_trigger_mode_combo.setCurrentText(
-            settings.get("trigger_mode", "Off")
-        )
 
-        self.laser_trigger_source_combo.setCurrentText(
-            settings.get("trigger_source", "Software")
-        )
 
-        self.laser_packet_size_input.setText(
-            str(settings.get("packet_size", 9000))
-        )
 
-        self.laser_invalid_value_input.setText(
-            str(settings.get("invalid_value", ""))
-        )
 
-        self.laser_x_scale_input.setText(str(settings.get("x_scale", 1.0)))
-        self.laser_z_scale_input.setText(str(settings.get("z_scale", 1.0)))
-        self.laser_aspect_lock_checkbox.setChecked(bool(settings.get("aspect_lock", True)))
 
-        self.laser_output_format_combo.setCurrentText(settings.get("output_format", "Profile"))
 
 
-    def get_selected_laser_settings(self):
-        if not self.selected_laser_id:
-            raise RuntimeError("No laser selected")
 
-        self.save_laser_form_to_memory(self.selected_laser_id)
-        return self.laser_settings_by_id[self.selected_laser_id]
 
 
-    def apply_laser_settings_to_selected(self):
-        if not self.selected_laser_id:
-            QMessageBox.warning(self, "No Laser", "Please select a laser first.")
-            return
 
-        settings = self.get_selected_laser_settings()
-
-        ok, msg = self.laser_manager.apply_settings(
-            self.selected_laser_id,
-            settings
-        )
-
-        if ok:
-            self.laser_status_label.setText(f"Status: {msg}")
-        else:
-            QMessageBox.warning(self, "Laser Apply Failed", msg)
-
-
-    def start_laser_live_profile(self):
-        if not self.selected_laser_id:
-            QMessageBox.warning(self, "No Laser", "Please select a laser first.")
-            return
-
-        if self.laser_live_worker:
-            QMessageBox.warning(self, "Laser Preview Running", "Laser live profile is already running.")
-            return
-
-        settings = self.get_selected_laser_settings()
-
-        self.start_laser_preview_btn.setEnabled(False)
-        self.stop_laser_preview_btn.setEnabled(True)
-        self.capture_laser_profile_btn.setEnabled(False)
-
-        self.laser_status_label.setText("Status: Starting laser live profile...")
-
-        self.laser_live_worker = LaserLiveProfileWorker(
-            self.laser_manager,
-            self.selected_laser_id,
-            settings
-        )
-
-        self.laser_live_worker.frame_ready.connect(self.on_laser_frame_ready)
-        self.laser_live_worker.status_signal.connect(self.on_laser_status)
-        self.laser_live_worker.error_signal.connect(self.on_laser_error)
-
-        self.laser_live_worker.start()
-
-
-    def stop_laser_live_profile(self):
-        if self.laser_live_worker:
-            self.laser_live_worker.stop()
-            self.laser_live_worker.wait(3000)
-            self.laser_live_worker = None
-
-        self.start_laser_preview_btn.setEnabled(True)
-        self.stop_laser_preview_btn.setEnabled(False)
-        self.capture_laser_profile_btn.setEnabled(True)
-
-        self.laser_status_label.setText("Status: Laser live profile stopped")
-
-
-    def on_laser_frame_ready(self, qimg, metrics):
-        pixmap = QPixmap.fromImage(qimg)
-
-        scaled = pixmap.scaled(
-            self.laser_preview_label.width(),
-            self.laser_preview_label.height(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
-
-        self.laser_preview_label.setPixmap(scaled)
-        self.update_laser_metrics_label(metrics)
-
-
-    def on_laser_status(self, msg):
-        self.laser_status_label.setText(f"Status: {msg}")
-
-
-    def on_laser_error(self, error_msg):
-        self.start_laser_preview_btn.setEnabled(True)
-        self.stop_laser_preview_btn.setEnabled(False)
-        self.capture_laser_profile_btn.setEnabled(True)
-        self.laser_live_worker = None
-
-        self.laser_status_label.setText("Status: Laser live profile error")
-        QMessageBox.critical(self, "Laser Live Profile Error", error_msg)
-
-
-    def update_laser_metrics_label(self, metrics):
-        decision = metrics.get("decision", "-")
-
-        self.laser_metrics_label.setText(
-            f"Valid Points: {metrics.get('valid_points_percent', '-')} %\n"
-            f"Missing Points: {metrics.get('missing_points_percent', '-')} %\n"
-            f"Outliers: {metrics.get('outlier_points_percent', '-')} %\n"
-            f"Z Range: {metrics.get('z_range', '-')}\n"
-            f"SNR: {metrics.get('snr_score', '-')}\n"
-            f"Decision: {decision}\n"
-            f"Reason: {metrics.get('reason', '-')}"
-        )
-
-        if decision == "ACCEPT":
-            self.laser_metrics_label.setStyleSheet("""
-                QLabel {
-                    background: #e8fff0;
-                    color: #0b6b2b;
-                    border-radius: 8px;
-                    padding: 8px;
-                    font: 12px 'Segoe UI';
-                }
-            """)
-        elif decision == "REJECT":
-            self.laser_metrics_label.setStyleSheet("""
-                QLabel {
-                    background: #ffecec;
-                    color: #a00000;
-                    border-radius: 8px;
-                    padding: 8px;
-                    font: 12px 'Segoe UI';
-                }
-            """)
-        else:
-            self.laser_metrics_label.setStyleSheet("""
-                QLabel {
-                    background: #f7f7f7;
-                    color: #222;
-                    border-radius: 8px;
-                    padding: 8px;
-                    font: 12px 'Segoe UI';
-                }
-            """)
-
-
-    def capture_one_laser_profile(self):
-        if not self.selected_laser_id:
-            QMessageBox.warning(self, "No Laser", "Please select a laser first.")
-            return
-
-        if self.laser_live_worker:
-            QMessageBox.warning(
-                self,
-                "Laser Preview Running",
-                "Stop live profile before Capture One Profile."
-            )
-            return
-
-        settings = self.get_selected_laser_settings()
-
-        self.capture_laser_profile_btn.setEnabled(False)
-        self.start_laser_preview_btn.setEnabled(False)
-        self.laser_status_label.setText("Status: Capturing one laser profile...")
-
-        self.laser_capture_worker = LaserCaptureWorker(
-            self.laser_manager,
-            self.selected_laser_id,
-            settings
-        )
-
-        self.laser_capture_worker.capture_done.connect(self.on_laser_capture_done)
-        self.laser_capture_worker.capture_failed.connect(self.on_laser_capture_failed)
-        self.laser_capture_worker.start()
-
-
-    def on_laser_capture_done(self, result):
-        self.capture_laser_profile_btn.setEnabled(True)
-        self.start_laser_preview_btn.setEnabled(True)
-
-        png_path = result.get("png_path", "")
-        metrics = result.get("metrics", {})
-
-        self.laser_status_label.setText(f"Status: Laser profile saved: {png_path}")
-        self.update_laser_metrics_label(metrics)
-
-        pixmap = QPixmap(png_path)
-
-        if not pixmap.isNull():
-            scaled = pixmap.scaled(
-                self.laser_preview_label.width(),
-                self.laser_preview_label.height(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            self.laser_preview_label.setPixmap(scaled)
-        else:
-            self.laser_preview_label.setText("Profile saved but preview failed")
-
-
-    def on_laser_capture_failed(self, error_msg):
-        self.capture_laser_profile_btn.setEnabled(True)
-        self.start_laser_preview_btn.setEnabled(True)
-
-        self.laser_status_label.setText("Status: Laser capture failed")
-        QMessageBox.critical(self, "Laser Capture Failed", error_msg)
     
-    def save_laser_profile(self):
-        sku = self._laser_sku_text()
-
-        if not sku:
-            QMessageBox.warning(self, "Missing SKU", "Please enter SKU name.")
-            return
-
-        if self.selected_laser_id:
-            self.save_laser_form_to_memory(self.selected_laser_id)
-
-        profile = self.laser_profile_manager.default_profile(sku)
-
-        saved_count = 0
-        unassigned_lasers = []
-
-        for row in range(self.laser_table.rowCount()):
-            laser_item = self.laser_table.item(row, 0)
-            name_item = self.laser_table.item(row, 1)
-
-            if not laser_item:
-                continue
-
-            laser_id = laser_item.text()
-            laser_name = name_item.text() if name_item else laser_id
-
-            zone_combo = self.laser_table.cellWidget(row, 4)
-            enabled_checkbox = self.laser_table.cellWidget(row, 5)
-
-            zone_name = zone_combo.currentText()
-            enabled = enabled_checkbox.isChecked()
-
-            if zone_name == "Unassigned":
-                unassigned_lasers.append(laser_id)
-                continue
-
-            zone_key = LASER_ZONE_KEYS[zone_name]
-
-            settings = self.laser_settings_by_id.get(
-                laser_id,
-                DEFAULT_LASER_SETTINGS.copy()
-            )
-
-            settings["laser_id"] = laser_id
-            settings["laser_name"] = laser_name
-            settings["enabled"] = enabled
-
-            profile["lasers"][zone_key] = settings
-            saved_count += 1
-
-        try:
-            path = self.sku_profile_store.save_laser_profile(sku, profile)
-        except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "Laser Profile Database Error",
-                f"Laser profile JSON was created, but PostgreSQL save failed:\n{exc}",
-            )
-            return
-
-        msg = f"Saved {saved_count} laser profile(s):\n{path}"
-
-        if unassigned_lasers:
-            msg += "\n\nNot saved because zone is Unassigned:\n"
-            msg += "\n".join(unassigned_lasers)
-
-        self.refresh_laser_sku_list(select_current=True)
-        QMessageBox.information(self, "Laser Profile Saved", msg)
 
 
-    def load_laser_profile(self):
-        sku = self._laser_sku_text()
-
-        if not sku:
-            QMessageBox.warning(self, "Missing SKU", "Please enter SKU name.")
-            return
-
-        profile = self.sku_profile_store.load_laser_profile(sku)
-        lasers_config = profile.get("lasers", {})
-
-        for zone_name, zone_key in LASER_ZONE_KEYS.items():
-            laser_cfg = lasers_config.get(zone_key, {})
-            laser_id = laser_cfg.get("laser_id", "")
-
-            if laser_id:
-                self.laser_settings_by_id[laser_id] = laser_cfg
-
-        for row in range(self.laser_table.rowCount()):
-            laser_item = self.laser_table.item(row, 0)
-
-            if not laser_item:
-                continue
-
-            table_laser_id = laser_item.text()
-            zone_combo = self.laser_table.cellWidget(row, 4)
-            enabled_checkbox = self.laser_table.cellWidget(row, 5)
-
-            zone_combo.setCurrentText("Unassigned")
-
-            for zone_name, zone_key in LASER_ZONE_KEYS.items():
-                laser_cfg = lasers_config.get(zone_key, {})
-
-                if laser_cfg.get("laser_id", "") == table_laser_id:
-                    zone_combo.setCurrentText(zone_name)
-                    enabled_checkbox.setChecked(bool(laser_cfg.get("enabled", True)))
-                    break
-
-        self.laser_status_label.setText("Status: Laser profile loaded")
-        QMessageBox.information(self, "Laser Profile Loaded", f"Loaded laser profile for SKU: {sku}")

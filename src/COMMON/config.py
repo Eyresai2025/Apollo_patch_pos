@@ -453,10 +453,14 @@ class CameraConfig:
 
 @dataclass(frozen=True)
 class DeviceConfig:
-    sapera_camexpert_path: Optional[Path] = None
-    laser_config_file: Optional[Path] = None
-    teledyne_laser_mock: bool = False
-    teledyne_cti_path: Optional[Path] = None
+    """Reserved for non-camera device settings.
+
+    Legacy Harvester/CTI laser fields were removed. Production laser capture
+    now reads LIVE_LASER_* values from the raw environment and the per-SKU
+    Sapera profile.
+    """
+
+    pass
 
 
 @dataclass(frozen=True)
@@ -930,12 +934,7 @@ class ConfigManager:
             packet_delay=self.get_int("CAM_PACKET_DELAY", 1000),
             parallel_capture=self.get_bool("CAM_PARALLEL_CAPTURE", True),
         )
-        devices = DeviceConfig(
-            sapera_camexpert_path=self.get_path("SAPERA_CAMEXPERT_PATH", "", allow_empty=True),
-            laser_config_file=self.get_path("LASER_CONFIG_FILE", "", allow_empty=True),
-            teledyne_laser_mock=self.get_bool("TELEDYNE_LASER_MOCK", False),
-            teledyne_cti_path=self.get_path("TELEDYNE_CTI_PATH", "", allow_empty=True),
-        )
+        devices = DeviceConfig()
         targets = self._recipe_targets()
         recipe = RecipeConfig(
             backup_dir=recipe_backup_dir,

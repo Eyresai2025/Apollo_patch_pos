@@ -94,7 +94,6 @@ from src.UI.live_result_ui import (
     create_tyre_result_summary_widget,
     apply_tyre_result_to_gui,
 )
-from src.UI.apollo_ui_feedback import install_apollo_ui_feedback
 from src.UI.gui_helpers import (
     get_available_sku_names,
     ThreadManager,
@@ -2410,69 +2409,26 @@ class MainWindow(QMainWindow):
 
         parent_layout.addWidget(header_frame)
 
-    def _shutdown_capture_settings_page(self, reason: str = "") -> None:
-        """Stop Capture-page subprocesses before another page or Apollo owns hardware.
-
-        CameraCaptureSettingsTab.shutdown() already performs the page-specific
-        cleanup: it stops the camera runner, stops the Sapera laser runner,
-        closes the PLY viewer and waits for the child processes to exit.  Keep
-        that ownership logic inside the page and only invoke it from the main
-        window at lifecycle boundaries.
-        """
-        page = getattr(self, "capture_settings_page", None)
-        if page is None:
-            return
-
-        shutdown = getattr(page, "shutdown", None)
-        if not callable(shutdown):
-            return
-
-        try:
-            logger.info(
-                "Releasing Capture page processes",
-                extra={
-                    "event_code": "CAPTURE_PAGE_RELEASE_REQUESTED",
-                    "details": {"reason": str(reason or "unspecified")},
-                },
-            )
-            shutdown()
-            logger.info(
-                "Capture page processes released",
-                extra={
-                    "event_code": "CAPTURE_PAGE_RELEASED",
-                    "details": {"reason": str(reason or "unspecified")},
-                },
-            )
-        except Exception as exc:
-            # Page cleanup must never prevent navigation or application exit.
-            logger.warning(
-                f"[CAPTURE PAGE] cleanup warning ({reason or 'unspecified'}): {exc}"
-            )
-
     def _on_content_stack_changed(self, index):
-        """Release page-owned hardware/processes when navigating away.
-
-        This does not touch Live inspection resources.  It only closes tools
-        owned by the page being left, preventing a hidden Capture-page Sapera
-        runner from retaining exclusive ownership of a Z-Trak laser.
         """
+        If user leaves Device page by clicking Back, Live, Dashboard, Axis Status, etc.,
+        stop Device page camera streams and release camera handles.
+        """
+
         try:
             new_widget = self.content_stack.widget(index)
+
             old_widget = getattr(self, "_last_stack_widget", None)
 
-            if old_widget is not None and old_widget is not new_widget:
+            if old_widget is not None:
                 if old_widget is getattr(self, "device_page", None):
-                    cleanup = getattr(old_widget, "cleanup_device_page", None)
-                    if callable(cleanup):
-                        cleanup(destroy_devices=True)
-
-                if old_widget is getattr(self, "capture_settings_page", None):
-                    self._shutdown_capture_settings_page("page_navigation")
+                    if hasattr(old_widget, "cleanup_device_page"):
+                        old_widget.cleanup_device_page(destroy_devices=True)
 
             self._last_stack_widget = new_widget
 
-        except Exception as exc:
-            logger.warning(f"[PAGE CLEANUP] stack cleanup failed: {exc}")
+        except Exception as e:
+            logger.warning(f"[DEVICE PAGE] stack cleanup failed: {e}")
     
     def handle_back_to_dashboard(self):
         try:
@@ -3709,11 +3665,6 @@ class MainWindow(QMainWindow):
 
             self.stop_continuous_inspection()
 
-            # Capture page owns external camera/laser subprocesses.  Release
-            # them before the hardware check, another application session or
-            # Windows can attempt to open the same devices.
-            self._shutdown_capture_settings_page("application_close")
-
             try:
                 if getattr(self, "device_page", None) is not None:
                     if hasattr(self.device_page, "cleanup_device_page"):
@@ -3980,11 +3931,10 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-
-    # Install the global Apollo feedback manager before any application window
-    # is created. It replaces native Windows tooltips with a compact white
-    # tooltip and styles all QMessageBox/QInputDialog instances consistently.
-    install_apollo_ui_feedback(app)
+    # Global readable light styling for every standard Qt popup and tooltip.
+    # Page-specific styles remain in control because local widget QSS has higher
+    # specificity than these standard-dialog selectors.
+    app.setStyleSheet(APOLLO_GLOBAL_DIALOG_STYLE)
 
     # Required for Sign Out: closing MainWindow must not terminate the process
     # before the login dialog can be displayed again.

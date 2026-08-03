@@ -362,6 +362,24 @@ class FullHardwareChecker:
         self.laser_sapera_dll = str(
             self.env.get("SAPERA_DOTNET_DLL", "") or ""
         ).strip()
+        # Allow Sapera a short grace period to release a resource after the
+        # Capture-page runner exits. Defaults add only a few seconds on failure
+        # and do not change the success path.
+        self.laser_availability_retries = _env_int(
+            self.env,
+            "LASER_CONNECTION_AVAILABILITY_RETRIES",
+            4,
+        )
+        self.laser_retry_delay_sec = _env_float(
+            self.env,
+            "LASER_CONNECTION_RETRY_DELAY_SEC",
+            0.75,
+        )
+        self.laser_open_retries = _env_int(
+            self.env,
+            "LASER_CONNECTION_OPEN_RETRIES",
+            2,
+        )
 
         self._active_plc_client = None
         self._multi_cam = None
@@ -847,6 +865,8 @@ class FullHardwareChecker:
             "message": "",
             "devices": [],
             "detected": [],
+            "available": [],
+            "busy": [],
             "missing": [],
         }
 
@@ -880,8 +900,30 @@ class FullHardwareChecker:
                 self.laser_connection_target_serials,
                 sapera_dll=self.laser_sapera_dll,
                 open_device=True,
+                availability_retries=self.laser_availability_retries,
+                availability_retry_delay_sec=self.laser_retry_delay_sec,
+                open_retries=self.laser_open_retries,
             )
             detail.update(result)
+
+            print(
+                "[LASER CHECK] "
+                f"detected={result.get('detected', [])} "
+                f"available={result.get('available', [])} "
+                f"busy={result.get('busy', [])} "
+                f"missing={result.get('missing', [])} "
+                f"ok={bool(result.get('ok', False))}"
+            )
+            for device in result.get("devices", []) or []:
+                print(
+                    "[LASER CHECK][DEVICE] "
+                    f"serial={device.get('serial', '-')} "
+                    f"available={device.get('resource_available', False)} "
+                    f"opened={device.get('opened', False)} "
+                    f"availability_checks={device.get('availability_checks', 0)} "
+                    f"open_attempts={device.get('open_attempts', 0)} "
+                    f"message={device.get('message', '-')}"
+                )
             detail["check_enabled"] = True
             detail["required"] = bool(self.require_laser)
             detail["connected"] = bool(result.get("ok", False))
@@ -1214,13 +1256,22 @@ def _apply_result_to_test_page(test_page, result):
     laser_required = bool(laser.get("required", False))
     targets = laser.get("targets", []) or []
     detected = laser.get("detected", []) or []
+    available = laser.get("available", []) or []
+    busy = laser.get("busy", []) or []
+    missing = laser.get("missing", []) or []
     device_lines = []
     for item in laser.get("devices", []) or []:
         serial = item.get("serial", "-")
         opened = bool(item.get("opened", False))
+        resource_available = bool(item.get("resource_available", False))
+        if opened:
+            state_text = "✅ CONNECTED"
+        elif not resource_available:
+            state_text = "⚠ DETECTED / BUSY"
+        else:
+            state_text = "❌ OPEN FAILED"
         device_lines.append(
-            f"{serial}: {'✅ CONNECTED' if opened else '❌ NOT CONNECTED'} "
-            f"| {item.get('message', '-')}"
+            f"{serial}: {state_text} | {item.get('message', '-')}"
         )
 
     if laser_skipped:
@@ -1236,6 +1287,9 @@ def _apply_result_to_test_page(test_page, result):
             f"Laser Status: {_tick(laser_ok)} ({requirement_text})\n"
             f"Targets: {', '.join(map(str, targets)) if targets else 'Any accessible Z-Trak'}\n"
             f"Detected: {', '.join(map(str, detected)) if detected else '-'}\n"
+            f"Available: {', '.join(map(str, available)) if available else '-'}\n"
+            f"Busy: {', '.join(map(str, busy)) if busy else '-'}\n"
+            f"Missing: {', '.join(map(str, missing)) if missing else '-'}\n"
             f"Message: {laser.get('message', '-')}"
         )
         if device_lines:

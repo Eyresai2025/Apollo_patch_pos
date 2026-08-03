@@ -45,11 +45,8 @@ from src.camera.HARDWARE_TRIGGER import (
     get_camera_to_side_map,
     get_side_to_camera_map,
 )
-from src.device.sku_profile_runtime import (
-    load_sku_camera_profile,
-    apply_sku_laser_profile_to_manager,
-)
-from src.COMMON.config import get_config
+from src.device.sku_profile_runtime import load_sku_camera_profile
+from src.Laser.live_laser_cycle_service import LiveLaserCycleService
 try:
     from src.COMMON.live_inspection_state import set_live_progress
 except Exception:
@@ -57,14 +54,6 @@ except Exception:
         pass
 
 
-def _live_env_bool(key: str, default: bool = False) -> bool:
-    try:
-        raw = get_config().raw
-        value = str(raw.get(key, str(default))).strip().lower()
-    except Exception:
-        value = str(default).lower()
-    return value in {"1", "true", "yes", "y", "on", "enabled"}
- 
 # =========================================================
 # CONTINUOUS CYCLE WORKER (Runs in background thread)
 # =========================================================
@@ -99,7 +88,6 @@ class ContinuousCycleWorker(QObject):
         seg_model_b_path: str,
         r_detector_path: str,
         multi_camera_manager,
-        laser_manager=None,
         min_capture_interval: float = 2.0,
         sides_to_run: Optional[List[str]] = None,
         capture_sides: Optional[List[str]] = None,
@@ -115,8 +103,6 @@ class ContinuousCycleWorker(QObject):
         self.seg_model_b_path = seg_model_b_path
         self.r_detector_path = r_detector_path
         self.multi_camera_manager = multi_camera_manager
-        self.laser_manager = laser_manager
-        self._owned_laser_manager = None
         self.min_capture_interval = min_capture_interval
         self.sides_to_run = _resolve_sides(sides_to_run)
         self.capture_sides = capture_sides or [
@@ -139,6 +125,7 @@ class ContinuousCycleWorker(QObject):
         self._cycle_active = False
         self._graceful_stop_requested = False
         self._streams_started = False
+        self.live_laser_service = None
         self._runtimes_preloaded = False
         self._runtimes = None
         self.is_hardware = (TRIGGER_MODE == "hardware")
@@ -204,22 +191,31 @@ class ContinuousCycleWorker(QObject):
 
         self.multi_camera_manager.apply_camera_profile(camera_profile)
 
-        # Optional Live laser profile apply. Safe when disabled; useful when the
-        # machine has laser settings saved per SKU under media/Laser_Profiles/<SKU>/.
+        # Validate the cycle-owned Sapera laser integration. The actual Sapera
+        # device is opened, UserSet-verified and armed at the beginning of each
+        # cycle before the camera manager starts waiting for the BEAD trigger.
+        self.live_laser_service = LiveLaserCycleService(
+            media_root=self.media_root,
+            sku_name=self.sku_name,
+            status_callback=self.status_update.emit,
+        )
         try:
-            self._apply_optional_laser_profile()
-        except Exception as error:
-            if _live_env_bool("REQUIRE_LASER", False):
+            self.live_laser_service.validate_configuration()
+        except Exception:
+            if self.live_laser_service.required:
                 raise
-            self.status_update.emit(f" Laser profile apply skipped/warn: {error}")
-            logger.warning(
-                "Live laser profile apply skipped",
+            self.status_update.emit(
+                " Optional live laser configuration is unavailable; "
+                "camera inspection will continue without laser capture."
+            )
+            logger.exception(
+                "Optional live laser configuration validation failed",
                 extra={
-                    "event_code": "LIVE_LASER_PROFILE_SKIPPED",
+                    "event_code": "LIVE_LASER_CONFIGURATION_OPTIONAL_FAILED",
                     "sku_name": self.sku_name,
-                    "details": {"error": str(error)},
                 },
             )
+            self.live_laser_service.enabled = False
 
         self.status_update.emit(" Configuring cameras for Live...")
         self.multi_camera_manager.start_all_streams()
@@ -240,7 +236,8 @@ class ContinuousCycleWorker(QObject):
             f"Camera configuration completed and PatchCore runtime loaded.\n\n"
             f"SKU: {self.sku_name}\n"
             f"Tyre: {self.tyre_name}\n"
-            f"Active views: {', '.join(self.sides_to_run)}\n\n"
+            f"Active views: {', '.join(self.sides_to_run)}\n"
+            f"Laser capture: {'Enabled' if (self.live_laser_service and self.live_laser_service.enabled) else 'Disabled'}\n\n"
             f"Click OK to start waiting for trigger."
         )
  
@@ -430,49 +427,6 @@ class ContinuousCycleWorker(QObject):
         self._preload_runtimes()
         return self._runtimes
 
-    def _get_or_create_live_laser_manager(self):
-        """Return a laser manager only when Live laser profile application is enabled."""
-        if self.laser_manager is not None:
-            return self.laser_manager
-
-        try:
-            from src.device.teledyne_laser_manager import TeledyneLaserManager
-
-            manager = TeledyneLaserManager()
-            if hasattr(manager, "refresh_lasers"):
-                manager.refresh_lasers()
-            self._owned_laser_manager = manager
-            self.laser_manager = manager
-            return manager
-        except Exception as error:
-            raise RuntimeError(f"Unable to create/live-refresh Teledyne laser manager: {error}") from error
-
-    def _apply_optional_laser_profile(self) -> None:
-        """Apply selected-SKU laser profile for Live production when enabled.
-
-        Camera profiles are always applied before camera streams. Laser profiles are
-        optional because some machines/run modes do not use a Teledyne laser in the
-        inference path. Enable with LIVE_APPLY_LASER_PROFILE=True or REQUIRE_LASER=True.
-        """
-        apply_enabled = _live_env_bool("LIVE_APPLY_LASER_PROFILE", False)
-        require_laser = _live_env_bool("REQUIRE_LASER", False)
-
-        if not apply_enabled and not require_laser:
-            self.status_update.emit(" Laser profile apply skipped: LIVE_APPLY_LASER_PROFILE=False")
-            return
-
-        self.status_update.emit(f" Loading laser profile for SKU: {self.sku_name}")
-        manager = self._get_or_create_live_laser_manager()
-        profile = apply_sku_laser_profile_to_manager(
-            media_root=self.media_root,
-            sku_name=self.sku_name,
-            laser_manager=manager,
-        )
-        lasers = profile.get("lasers", {}) if isinstance(profile, dict) else {}
-        self.status_update.emit(
-            f" Laser profile applied for SKU={self.sku_name} | zones={','.join(lasers.keys())}"
-        )
-    
     def _timing_log(self, msg: str):
         """
         Timing log goes to:
@@ -621,8 +575,28 @@ class ContinuousCycleWorker(QObject):
         # successful arrays long enough to save them, but never allow AI to run
         # for an incomplete inspection cycle.
         capture_failure_message: Optional[str] = None
+        laser_cycle_handle = None
+        laser_cycle_result: Optional[Dict[str, Any]] = None
+        cycle_capture_dir: Optional[str] = None
+        cycle_id: Optional[str] = None
 
         try:
+            # Reserve one shared cycle identifier before either hardware path
+            # begins waiting. Camera files and laser files therefore use the same
+            # SKU/date/Cycle_N identity even though they are saved under separate
+            # roots.
+            cycle_capture_dir, cycle_id = build_cycle_capture_dir(
+                self.media_root,
+                sku_name=self.sku_name,
+            )
+            self.status_update.emit(f" Reserved cycle directory: {cycle_id}")
+
+            if self.live_laser_service is not None and self.live_laser_service.enabled:
+                self.status_update.emit(
+                    f" Preparing and arming laser for {cycle_id} before BEAD wait..."
+                )
+                laser_cycle_handle = self.live_laser_service.start_cycle(cycle_id)
+
             set_live_progress(
                 phase="CAPTURING",
                 active_zone="All Zones",
@@ -765,10 +739,8 @@ class ContinuousCycleWorker(QObject):
             self.capture_completed.emit(capture_signal_payload)
             del capture_signal_payload
 
-            cycle_capture_dir, cycle_id = build_cycle_capture_dir(
-                self.media_root,
-                sku_name=self.sku_name,
-            )
+            if not cycle_capture_dir or not cycle_id:
+                raise RuntimeError("Cycle directory was not reserved before capture")
             self.status_update.emit(f" Cycle directory: {cycle_id}")
             logger.info(
                 "Inspection cycle created",
@@ -889,6 +861,28 @@ class ContinuousCycleWorker(QObject):
                 f"status={'OK' if prep_state.get('ok', True) else 'ERROR'}"
             )
 
+            laser_wait_t0 = time.perf_counter()
+            if self.live_laser_service is not None:
+                laser_cycle_result = self.live_laser_service.wait_cycle(
+                    laser_cycle_handle
+                )
+                laser_cycle_handle = None
+                result["laser_capture"] = laser_cycle_result
+                if (
+                    self.live_laser_service.required
+                    and not bool(laser_cycle_result.get("success"))
+                ):
+                    raise RuntimeError(
+                        "Required laser capture failed: "
+                        + str(laser_cycle_result.get("error") or "unknown error")
+                    )
+            laser_wait_sec = time.perf_counter() - laser_wait_t0
+            self._timing_log(
+                f"LASER_CYCLE_READY | cycle_id={cycle_id} | "
+                f"boundary_wait={laser_wait_sec:.3f}s | "
+                f"status={'OK' if (not laser_cycle_result or laser_cycle_result.get('success')) else 'ERROR'}"
+            )
+
             total_cycle_sec = time.perf_counter() - cycle_t0
             result["timing_capture_call_sec"] = round(capture_after_trigger_sec, 3)
             result["timing_capture_after_trigger_sec"] = round(
@@ -902,6 +896,7 @@ class ContinuousCycleWorker(QObject):
             result["timing_image_save_sec"] = round(save_sec, 3)
             result["timing_inspection_pipeline_sec"] = round(pipeline_sec, 3)
             result["timing_next_cycle_ready_wait_sec"] = round(prep_wait_sec, 3)
+            result["timing_laser_boundary_wait_sec"] = round(laser_wait_sec, 3)
             result["timing_total_from_trigger_sec"] = round(total_cycle_sec, 3)
             # Preserve legacy key used by the GUI, but its value is now correctly
             # measured from the actual BEAD trigger rather than before capture_all.
@@ -919,6 +914,7 @@ class ContinuousCycleWorker(QObject):
                     "image_save_sec": save_sec,
                     "inspection_pipeline_sec": pipeline_sec,
                     "next_cycle_ready_boundary_wait_sec": prep_wait_sec,
+                    "laser_boundary_wait_sec": laser_wait_sec,
                     "next_cycle_background_prep_sec": float(
                         prep_state.get("elapsed_sec", 0.0) or 0.0
                     ),
@@ -947,6 +943,7 @@ class ContinuousCycleWorker(QObject):
                 f"capture={capture_after_trigger_sec:.3f}s | "
                 f"save={save_sec:.3f}s | pipeline={pipeline_sec:.3f}s | "
                 f"camera_ready_wait={prep_wait_sec:.3f}s | "
+                f"laser_wait={laser_wait_sec:.3f}s | "
                 f"total={total_cycle_sec:.3f}s"
             )
 
@@ -1054,6 +1051,26 @@ class ContinuousCycleWorker(QObject):
             return False
         finally:
             self._set_cycle_active(False)
+            try:
+                if laser_cycle_handle is not None and self.live_laser_service is not None:
+                    self.live_laser_service.stop_cycle(laser_cycle_handle, force=True)
+            except Exception as laser_stop_error:
+                self.status_update.emit(
+                    f" Laser cycle cleanup warning: {laser_stop_error}"
+                )
+            try:
+                # Operator stop before an actual BEAD trigger leaves only the
+                # reserved empty camera folder. Remove it; never remove folders
+                # that already contain successfully saved camera images.
+                if (
+                    cycle_t0 is None
+                    and cycle_capture_dir
+                    and os.path.isdir(cycle_capture_dir)
+                    and not os.listdir(cycle_capture_dir)
+                ):
+                    os.rmdir(cycle_capture_dir)
+            except Exception:
+                pass
             try:
                 self._release_cycle_images(locals().get("images"))
             except Exception:
@@ -1356,8 +1373,8 @@ class ContinuousCycleWorker(QObject):
             self.status_update.emit(f" Camera cleanup warning: {e}")
 
         try:
-            if self._owned_laser_manager is not None and hasattr(self._owned_laser_manager, "close_all"):
-                self._owned_laser_manager.close_all()
+            if self.live_laser_service is not None:
+                self.live_laser_service.stop_all()
         except Exception as e:
             self.status_update.emit(f" Laser cleanup warning: {e}")
 
@@ -1425,7 +1442,6 @@ def start_continuous_cycle(
     sku_name: str,
     tyre_name: str,
     multi_camera_manager,
-    laser_manager=None,
     min_capture_interval: float = 2.0,
     seg_model_a_path: Optional[str] = None,
     seg_model_b_path: Optional[str] = None,
@@ -1459,7 +1475,6 @@ def start_continuous_cycle(
         seg_model_b_path=seg_model_b_path,
         r_detector_path=r_detector_path,
         multi_camera_manager=multi_camera_manager,
-        laser_manager=laser_manager,
         min_capture_interval=min_capture_interval,
         sides_to_run=sides_to_run,
         capture_sides=capture_sides,

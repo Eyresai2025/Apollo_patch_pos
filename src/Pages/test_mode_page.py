@@ -3,7 +3,7 @@
 import os
 from datetime import datetime
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QLabel,
     QPushButton, QProgressBar, QMessageBox, QScrollArea, QSizePolicy,
@@ -17,57 +17,7 @@ from src.COMMON.db import save_test_mode_result, get_alarm_service
 from src.COMMON.security import Permission, SessionContext
 from src.Pages.alarm_center_page import AlarmCenterPage
 from src.Pages.lab_camera_mode_page import LabCameraModeTab
-
-
-MODERN_MESSAGE_BOX_STYLE = """
-    QMessageBox {
-        background-color: #FFFFFF;
-        color: #172033;
-    }
-    QMessageBox QWidget {
-        background-color: #FFFFFF;
-        color: #172033;
-    }
-    QMessageBox QLabel {
-        background: transparent;
-        color: #172033;
-        font: 600 10px 'Segoe UI';
-        min-width: 440px;
-    }
-    QMessageBox QPushButton {
-        min-width: 92px;
-        min-height: 32px;
-        padding: 0 14px;
-        border-radius: 7px;
-        border: 1px solid #CFC5E3;
-        background: #FFFFFF;
-        color: #4C1D72;
-        font: 700 10px 'Segoe UI';
-    }
-    QMessageBox QPushButton:hover {
-        background: #F5F3FF;
-        border-color: #7C3AED;
-        color: #5B21B6;
-    }
-    QMessageBox QPushButton:default {
-        background: #6D28D9;
-        border-color: #6D28D9;
-        color: #FFFFFF;
-    }
-    QMessageBox QPushButton:default:hover {
-        background: #5B21B6;
-        border-color: #5B21B6;
-    }
-    QMessageBox QPlainTextEdit,
-    QMessageBox QTextEdit {
-        background: #F8FAFC;
-        color: #172033;
-        border: 1px solid #DCE3EC;
-        border-radius: 7px;
-        padding: 7px;
-        font: 500 9px 'Consolas';
-    }
-"""
+from src.UI.apollo_ui_feedback import show_apollo_message as show_apollo_standard_message
 
 
 def show_modern_message_box(
@@ -80,26 +30,17 @@ def show_modern_message_box(
     buttons=QMessageBox.Ok,
     default_button=None,
 ):
-    """Show a readable white Apollo-themed message box."""
-    box = QMessageBox(parent)
-    box.setWindowTitle(str(title or "Apollo"))
-    box.setIcon(icon)
-    box.setTextFormat(Qt.PlainText)
-    box.setText(str(text or ""))
-    if informative_text:
-        box.setInformativeText(str(informative_text))
-    if detailed_text:
-        box.setDetailedText(str(detailed_text))
-    box.setStandardButtons(buttons)
-    if default_button is not None:
-        box.setDefaultButton(default_button)
-    box.setStyleSheet(MODERN_MESSAGE_BOX_STYLE)
-    box.setModal(True)
-    box.setMinimumWidth(560)
-    for label in box.findChildren(QLabel):
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-    return box.exec_()
+    """Show a compact, readable Apollo-themed message box."""
+    return show_apollo_standard_message(
+        parent,
+        icon,
+        title,
+        text,
+        informative_text=informative_text,
+        detailed_text=detailed_text,
+        buttons=buttons,
+        default_button=default_button,
+    )
 
 
 def _card(object_name="ModernCard"):
@@ -472,6 +413,9 @@ class HardwareTestTab(QWidget):
 
         def status_card(name, icon_file, fallback, with_light_checkboxes=False):
             frame = _card("StatusCard")
+            frame.setToolTip(
+                f"{name} readiness status. Run Full Hardware Check to refresh this result."
+            )
             frame.setMinimumHeight(220)
             frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -544,6 +488,9 @@ class HardwareTestTab(QWidget):
                     key = f"light{i}"
                     checkbox = QCheckBox(f"Light {i} working")
                     checkbox.setCursor(Qt.PointingHandCursor)
+                    checkbox.setToolTip(
+                        f"Confirm that inspection Light {i} is switched on and illuminating correctly."
+                    )
                     self.light_checks[key] = checkbox
                     checks_grid.addWidget(checkbox, (i - 1) // 3, (i - 1) % 3)
                 body_layout.addLayout(checks_grid)
@@ -1019,6 +966,14 @@ class TestModePage(QWidget):
             QWidget#TestModePage {
                 background: #F4F6FA;
             }
+            QWidget#TestModePage QToolTip {
+                background: #FFFFFF;
+                color: #172033;
+                border: 1px solid #CDB8DC;
+                border-radius: 6px;
+                padding: 6px 9px;
+                font: 600 10px 'Segoe UI';
+            }
             QWidget#TestModePage QTabWidget::pane {
                 border: 1px solid #DCE3EC;
                 background: #F4F6FA;
@@ -1073,7 +1028,11 @@ class TestModePage(QWidget):
                 media_path=media_path,
                 parent=self,
             )
-            self.tabs.addTab(self.hardware_tab, "Hardware Test")
+            hardware_index = self.tabs.addTab(self.hardware_tab, "Hardware Test")
+            self.tabs.setTabToolTip(
+                hardware_index,
+                "Run lighting, laser, camera and PLC readiness checks before Live inspection.",
+            )
 
             # Lab-only camera software-trigger cycle. This is separate from
             # production Auto Start and does not use PLC trigger/result sending.
@@ -1081,7 +1040,11 @@ class TestModePage(QWidget):
                 media_path=media_path,
                 parent=self,
             )
-            self.tabs.addTab(self.lab_camera_tab, "Lab Camera AI")
+            lab_index = self.tabs.addTab(self.lab_camera_tab, "Lab Camera AI")
+            self.tabs.setTabToolTip(
+                lab_index,
+                "Run the lab-only camera software-trigger and AI validation workflow.",
+            )
 
         if has_alarm:
             service = alarm_service or get_alarm_service()
@@ -1090,7 +1053,11 @@ class TestModePage(QWidget):
                 service=service,
                 parent=self,
             )
-            self.tabs.addTab(self.alarm_center_page, "Alarm Center")
+            alarm_index = self.tabs.addTab(self.alarm_center_page, "Alarm Center")
+            self.tabs.setTabToolTip(
+                alarm_index,
+                "Review, acknowledge, clear and export Apollo alarm/event records.",
+            )
 
         if self.tabs.count() == 0:
             denied = QLabel("Your role does not have access to System Monitor functions.")
@@ -1099,6 +1066,23 @@ class TestModePage(QWidget):
             root.addWidget(denied, 1)
         else:
             root.addWidget(self.tabs, 1)
+
+        self._apply_missing_tooltips()
+        QTimer.singleShot(0, self._apply_missing_tooltips)
+
+    def _apply_missing_tooltips(self):
+        """Ensure every button in all System Monitor tabs has a tooltip."""
+        for button in self.findChildren(QPushButton):
+            if button.toolTip().strip():
+                continue
+            caption = button.text().replace("&", "").strip() or "System Monitor action"
+            button.setToolTip(f"Select '{caption}' to perform this System Monitor action.")
+
+        for checkbox in self.findChildren(QCheckBox):
+            if checkbox.toolTip().strip():
+                continue
+            caption = checkbox.text().replace("&", "").strip() or "this option"
+            checkbox.setToolTip(f"Enable or disable {caption.lower()}.")
 
     def select_alarm_tab(self):
         if self.alarm_center_page is None:
