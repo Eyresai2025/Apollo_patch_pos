@@ -330,32 +330,63 @@ class ContinuousCycleWorker(QObject):
             return bool(self._cycle_active)
 
     def request_graceful_stop(self) -> None:
-        """Stop safely from the Live-page operator button.
+        """
+        Stop safely from the Live-page operator button.
 
-        If the worker is only waiting for READY/PLC trigger, release the wait and
-        stop immediately. If a tyre cycle has already received its trigger, let
-        that cycle finish and publish its result, then stop before entering the
-        next trigger wait.
+        Production behavior:
+        - If waiting for READY/PLC trigger, stop immediately.
+        - If a tyre cycle is already active, finish current camera capture/save,
+        skip AI inference, stop laser/camera cleanup, and do not accept next trigger.
         """
         if self._stopping:
+            try:
+                self.status_update.emit("Stop request already in progress...")
+            except RuntimeError:
+                pass
             return
 
         self._graceful_stop_requested = True
         self._stopping = True
 
+        try:
+            print("[LIVE_STOP] Stop requested by operator", flush=True)
+            logger.warning(
+                "Live inspection stop requested by operator",
+                extra={
+                    "event_code": "LIVE_STOP_REQUESTED",
+                    "error_code": "LIVE-STOP-001",
+                    "sku_name": self.sku_name,
+                    "tyre_id": self.tyre_name,
+                },
+            )
+        except Exception:
+            pass
+
         if self.is_cycle_active():
             try:
                 self.status_update.emit(
-                    "Stop requested. Current inspection cycle will complete; "
-                    "the next trigger will not be accepted."
+                    "Stop requested during active cycle. "
+                    "Current camera capture/save will finish, AI will be skipped, "
+                    "and next trigger will not be accepted."
+                )
+                print(
+                    "[LIVE_STOP] Active cycle detected. Capture/save will finish; AI will be skipped.",
+                    flush=True,
                 )
             except RuntimeError:
                 pass
+
+            # Do not set camera manager stop_event here.
+            # Otherwise current camera capture can be interrupted and image may be lost.
             return
 
         try:
             self.status_update.emit(
-                "Stop requested. Releasing PLC/camera trigger wait..."
+                "Stop requested. Releasing READY/PLC/camera trigger wait..."
+            )
+            print(
+                "[LIVE_STOP] Releasing READY/PLC/camera trigger wait",
+                flush=True,
             )
         except RuntimeError:
             pass
@@ -371,11 +402,8 @@ class ContinuousCycleWorker(QObject):
         except Exception:
             pass
 
-        # Stop streams now only when they have actually started. If model/profile
-        # loading is still in progress, run() will observe _stop_event before or
-        # immediately after start_all_streams() and perform cleanup there.
-        if self._streams_started:
-            self._cleanup()
+        # Always cleanup. Laser subprocess may already be prepared/armed.
+        self._cleanup()
  
    
     def _preload_runtimes(self):
@@ -787,6 +815,44 @@ class ContinuousCycleWorker(QObject):
             self.status_update.emit(
                 f"   Saved {len(image_map)} sides: {', '.join(image_map.keys())}"
             )
+
+            # Operator clicked Stop Inspection after trigger/capture started.
+            # Preserve captured images, but do not waste time running AI inference.
+            if (
+                self._stop_event.is_set()
+                or self._graceful_stop_requested
+                or self._stopping
+            ):
+                self.status_update.emit(
+                    f"Stop requested after image save. AI inspection skipped for {cycle_id}."
+                )
+
+                print(
+                    f"[LIVE_STOP] {cycle_id}: images saved, AI skipped, stopping live inspection.",
+                    flush=True,
+                )
+
+                self._timing_log(
+                    f"STOP_AFTER_IMAGE_SAVE | cycle_id={cycle_id} | "
+                    f"saved_sides={','.join(image_map.keys())} | ai_skipped=True"
+                )
+
+                set_live_progress(
+                    phase="STOPPING",
+                    active_zone="-",
+                    images_captured=len(image_map),
+                    total_images=len(self.sides_to_run),
+                    message=(
+                        f"Stop requested. Saved {len(image_map)} images. "
+                        "AI inspection skipped."
+                    ),
+                )
+
+                # Important: now capture/save is completed, so allow main loop to exit.
+                self._stop_event.set()
+                self._ready_confirm_event.set()
+
+                return False
 
             # Preserve all successfully captured files, then fail the cycle at
             # this boundary so no incomplete set can enter PatchCore/AI.

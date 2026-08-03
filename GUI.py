@@ -1388,9 +1388,16 @@ class MainWindow(QMainWindow):
         self.continuous_worker.ready_for_inspection.connect(
             on_ready_for_inspection
         )
-        self.continuous_worker.status_update.connect(
-            lambda msg: self.statusBar().showMessage(msg)
-        )
+        def on_continuous_status(msg):
+            text = str(msg or "")
+
+            if text.strip():
+                print(f"[LIVE] {text}", flush=True)
+                logger.info(f"[LIVE] {text}")
+
+            self.statusBar().showMessage(text)
+
+        self.continuous_worker.status_update.connect(on_continuous_status)
         self.continuous_worker.processing_completed.connect(
             self._on_continuous_completed
         )
@@ -1452,7 +1459,14 @@ class MainWindow(QMainWindow):
         self._continuous_stop_requested = True
         self._set_stop_inspection_button_state(running=True, stopping=True)
         self.statusBar().showMessage("Stopping Live inspection safely...")
-
+        print("[LIVE_STOP] Operator clicked Stop Inspection", flush=True)
+        logger.warning(
+            "Operator clicked Stop Inspection",
+            extra={
+                "event_code": "LIVE_STOP_BUTTON_CLICKED",
+                "error_code": "LIVE-STOP-000",
+            },
+        )
         set_live_progress(
             phase="STOPPING",
             active_zone="-",
