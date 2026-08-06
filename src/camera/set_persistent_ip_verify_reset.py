@@ -3,8 +3,8 @@ import socket
 import struct
 import time
 
-SERIAL = "250500042"
-NEW_IP = "192.168.1.22"
+SERIAL = "254901431"
+NEW_IP = "192.168.3.20"
 NEW_SUBNET = "255.255.255.0"
 NEW_GATEWAY = "0.0.0.0"
 

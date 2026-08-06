@@ -120,7 +120,7 @@ def _load_runtime_profile() -> Dict[str, Any]:
         profile.get("shared_inner_bead_serial")
         or cameras["innerwall"].get("serial")
         or cameras["bead"].get("serial")
-        or "254901431"
+        or "254901428"
     ).strip()
     cameras["innerwall"]["serial"] = shared_serial
     cameras["bead"]["serial"] = shared_serial

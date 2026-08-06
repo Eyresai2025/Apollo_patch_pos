@@ -14,12 +14,13 @@ from PyQt5.QtWidgets import (  # type: ignore
     QGridLayout, QScrollArea, QDialog, QStackedWidget,
     QFormLayout, QLineEdit, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QProgressBar, QInputDialog,
-    QPlainTextEdit
+    QPlainTextEdit, QAbstractItemView, QCheckBox
 )
 
 from src.COMMON.common import load_env
 from src.COMMON.db import save_new_sku_image
 from src.COMMON.recipe_service import RecipeService
+from src.COMMON.axis_status_service import AxisStatusService
 from src.COMMON.new_sku_workflow_service import NewSKUWorkflowService
 from src.COMMON.new_sku_capture_paths import (
     find_latest_image as find_latest_cycle_image,
@@ -36,6 +37,7 @@ from src.models.patch_creation.patch_creation_page import PatchCreationPage
 from src.models.augmentation.augmentation_page import AugmentationPage
 from src.models.feature_thresh.threshold_page import FeatureThresholdPage
 from src.models.new_sku_validation.production_validation_page import ProductionValidationPage
+from src.device.sku_device_profile_store import SKUDeviceProfileStore
 
 try:
     from src.camera.new_sku_software_capture import capture_new_sku_images # type: ignore
@@ -884,7 +886,13 @@ class NewSKUPage(QWidget):
             media_path=self.media_path,
             plc_client=self.plc_client,
         )
+        self.axis_status_service = AxisStatusService(
+            media_path=self.media_path,
+            env_path=str(ENV_PATH),
+            plc_client=self.plc_client,
+        )
         self.workflow_service = NewSKUWorkflowService(self.media_path)
+        self.sku_profile_store = SKUDeviceProfileStore(self.media_path)
         self.recipe_doc: Dict[str, Any] = {}
         self.saved_recipe_doc: Optional[Dict[str, Any]] = None
         self.saved_recipe_result: Optional[Dict[str, Any]] = None
@@ -927,6 +935,29 @@ class NewSKUPage(QWidget):
         self.axis_entry_mode = "capture"
         self.axis_entry_mode_combo = None
         self.apply_manual_axis_btn = None
+        self.axis_copy_controls: Optional[QWidget] = None
+        self.axis_copy_source_combo: Optional[StrictWheelComboBox] = None
+        self.axis_copy_refresh_btn: Optional[QPushButton] = None
+        self.axis_copy_apply_btn: Optional[QPushButton] = None
+        self.axis_copy_source_info_lbl: Optional[QLabel] = None
+        self.axis_active_controls: Optional[QWidget] = None
+        self.axis_active_recipe_info_lbl: Optional[QLabel] = None
+        self.axis_active_refresh_btn: Optional[QPushButton] = None
+        self.axis_active_copy_btn: Optional[QPushButton] = None
+        self.axis_active_recipe_snapshot: Dict[str, Any] = {}
+        self.axis_active_recipe_rows: Dict[str, Dict[str, Any]] = {}
+        self.axis_database_source_targets: Dict[str, Dict[str, Any]] = {}
+        self.axis_select_all_btn: Optional[QPushButton] = None
+        self.axis_clear_selection_btn: Optional[QPushButton] = None
+        self.axis_capture_selected_btn: Optional[QPushButton] = None
+        self.axis_selection_lbl: Optional[QLabel] = None
+        self.axis_profile_copy_controls: Optional[QWidget] = None
+        self.axis_profile_source_lbl: Optional[QLabel] = None
+        self.axis_copy_camera_profile_cb: Optional[QCheckBox] = None
+        self.axis_copy_laser_profile_cb: Optional[QCheckBox] = None
+        self.axis_copy_device_profiles_btn: Optional[QPushButton] = None
+        self.axis_profile_copy_status_lbl: Optional[QLabel] = None
+        self.axis_profile_source_resolution = ""
         self.axis_table: Optional[QTableWidget] = None
         self.recipe_summary_lbl: Optional[QLabel] = None
 
@@ -1115,6 +1146,10 @@ class NewSKUPage(QWidget):
         if hasattr(self, "recipe_service") and self.recipe_service is not None:
             if hasattr(self.recipe_service, "set_plc_client"):
                 self.recipe_service.set_plc_client(plc_client)
+
+        if hasattr(self, "axis_status_service") and self.axis_status_service is not None:
+            if hasattr(self.axis_status_service, "set_plc_client"):
+                self.axis_status_service.set_plc_client(plc_client)
 
     def set_multi_camera_manager(self, multi_camera_manager):
         self.multi_camera_manager = multi_camera_manager
@@ -2128,6 +2163,12 @@ class NewSKUPage(QWidget):
             self.feature_threshold_page.refresh_context()
         elif idx == TAB_PRODUCTION_VALIDATION and self.production_validation_page is not None:
             self.production_validation_page.refresh_context()
+        elif idx == TAB_AXIS_TEACHING:
+            self._refresh_axis_table()
+            if self.axis_entry_mode == "database":
+                self._refresh_axis_copy_source_recipes(show_errors=False)
+            elif self.axis_entry_mode == "active_plc":
+                self._refresh_active_recipe_from_plc(show_errors=False)
 
     def _build_ui(self):
         self.setStyleSheet(self._page_stylesheet())
@@ -2947,30 +2988,34 @@ class NewSKUPage(QWidget):
 
         lay.addLayout(self._section_header(
             "Teaching Mode — Recipe Target Capture",
-            "Create recipe target values from live servo positions or manual software entry. "
-            "One physical servo axis can be used by camera and laser targets separately.",
+            "Teach from current DB74 positions, copy the active PLC recipe values from DB75, "
+            "load saved PostgreSQL recipe values, or enter targets manually.",
         ))
 
         hint = QLabel(
-            "Production mode uses src/COMMON/recipe_tag_map.py as the master recipe tag map. "
-            "DB74 live servo positions are read only. Recipe targets are saved to PostgreSQL JSONB and written to DB53."
+            "DB74 = current physical axis position. DB75 = values of the recipe currently active in the PLC. "
+            "The copied values become working targets for the present SKU and are permanently stored only "
+            "when the final Save Recipe step is completed."
         )
         hint.setObjectName("HintText")
+        hint.setWordWrap(True)
         lay.addWidget(hint)
 
         mode_row = QHBoxLayout()
 
-        mode_lbl = QLabel("Axis Entry Mode:")
+        mode_lbl = QLabel("Axis Value Source:")
         mode_lbl.setObjectName("SectionTitle")
         mode_row.addWidget(mode_lbl)
 
         self.axis_entry_mode_combo = QComboBox()
         self.axis_entry_mode_combo.addItems([
-            "Capture From Live PLC",
+            "Capture Current Axis Position From PLC (DB74)",
+            "Copy Active Recipe Values From PLC (DB75)",
+            "Load Saved Recipe Values From PostgreSQL",
             "Manual Entry From Software",
         ])
         self.axis_entry_mode_combo.setFixedHeight(34)
-        self.axis_entry_mode_combo.setMinimumWidth(240)
+        self.axis_entry_mode_combo.setMinimumWidth(360)
         self.axis_entry_mode_combo.currentIndexChanged.connect(self._on_axis_entry_mode_changed)
         mode_row.addWidget(self.axis_entry_mode_combo)
 
@@ -2982,67 +3027,246 @@ class NewSKUPage(QWidget):
         mode_row.addStretch(1)
         lay.addLayout(mode_row)
 
+        # --------------------------------------------------------------
+        # Active PLC recipe controls: DB74.DBW78 recipe number + DB75 values
+        # --------------------------------------------------------------
+        self.axis_active_controls = QWidget()
+        active_row = QHBoxLayout(self.axis_active_controls)
+        active_row.setContentsMargins(0, 0, 0, 0)
+        active_row.setSpacing(8)
+
+        self.axis_active_recipe_info_lbl = QLabel(
+            "Active PLC Recipe: not refreshed"
+        )
+        self.axis_active_recipe_info_lbl.setObjectName("HintText")
+        self.axis_active_recipe_info_lbl.setWordWrap(True)
+        active_row.addWidget(self.axis_active_recipe_info_lbl, 1)
+
+        self.axis_active_refresh_btn = self._make_button("Refresh Active PLC Recipe", "secondary")
+        self.axis_active_refresh_btn.clicked.connect(
+            lambda: self._refresh_active_recipe_from_plc(show_errors=True)
+        )
+        active_row.addWidget(self.axis_active_refresh_btn)
+
+        self.axis_active_copy_btn = self._make_button("Copy All DB75 Values", "primary")
+        self.axis_active_copy_btn.clicked.connect(self._copy_active_recipe_values_to_present_sku)
+        self.axis_active_copy_btn.setEnabled(False)
+        active_row.addWidget(self.axis_active_copy_btn)
+
+        self.axis_active_controls.setVisible(False)
+        lay.addWidget(self.axis_active_controls)
+
+        # --------------------------------------------------------------
+        # PostgreSQL recipe controls
+        # --------------------------------------------------------------
+        self.axis_copy_controls = QWidget()
+        copy_row = QHBoxLayout(self.axis_copy_controls)
+        copy_row.setContentsMargins(0, 0, 0, 0)
+        copy_row.setSpacing(8)
+
+        copy_lbl = QLabel("Saved Recipe:")
+        copy_lbl.setObjectName("SectionTitle")
+        copy_row.addWidget(copy_lbl)
+
+        self.axis_copy_source_combo = StrictWheelComboBox()
+        self.axis_copy_source_combo.setMinimumWidth(410)
+        self.axis_copy_source_combo.setFixedHeight(34)
+        self.axis_copy_source_combo.currentIndexChanged.connect(
+            self._update_axis_copy_source_info
+        )
+        copy_row.addWidget(self.axis_copy_source_combo, 1)
+
+        self.axis_copy_refresh_btn = self._make_button("Refresh Database List", "secondary")
+        self.axis_copy_refresh_btn.clicked.connect(
+            lambda: self._refresh_axis_copy_source_recipes(show_errors=True)
+        )
+        copy_row.addWidget(self.axis_copy_refresh_btn)
+
+        self.axis_copy_apply_btn = self._make_button("Load All Database Values", "primary")
+        self.axis_copy_apply_btn.clicked.connect(self._copy_axis_targets_from_selected_sku)
+        self.axis_copy_apply_btn.setEnabled(False)
+        copy_row.addWidget(self.axis_copy_apply_btn)
+
+        self.axis_copy_controls.setVisible(False)
+        lay.addWidget(self.axis_copy_controls)
+
+        self.axis_copy_source_info_lbl = QLabel(
+            "Select a saved PostgreSQL recipe. Its values are previewed in the table before loading."
+        )
+        self.axis_copy_source_info_lbl.setObjectName("HintText")
+        self.axis_copy_source_info_lbl.setWordWrap(True)
+        self.axis_copy_source_info_lbl.setVisible(False)
+        lay.addWidget(self.axis_copy_source_info_lbl)
+
+        # --------------------------------------------------------------
+        # Optional device-profile duplication from the same source SKU.
+        # This copies the actual per-SKU JSON files into the present SKU.
+        # --------------------------------------------------------------
+        self.axis_profile_copy_controls = QFrame()
+        self.axis_profile_copy_controls.setObjectName("InfoBox")
+        profile_box = QVBoxLayout(self.axis_profile_copy_controls)
+        profile_box.setContentsMargins(12, 8, 12, 8)
+        profile_box.setSpacing(5)
+
+        profile_row = QHBoxLayout()
+        profile_row.setContentsMargins(0, 0, 0, 0)
+        profile_row.setSpacing(10)
+
+        profile_title = QLabel("Copy Device Profiles:")
+        profile_title.setObjectName("SectionTitle")
+        profile_row.addWidget(profile_title)
+
+        self.axis_profile_source_lbl = QLabel("Source SKU: not available")
+        self.axis_profile_source_lbl.setObjectName("HintText")
+        profile_row.addWidget(self.axis_profile_source_lbl, 1)
+
+        self.axis_copy_camera_profile_cb = QCheckBox("Camera profile JSON")
+        self.axis_copy_camera_profile_cb.setChecked(True)
+        self.axis_copy_camera_profile_cb.stateChanged.connect(
+            self._update_axis_profile_copy_controls
+        )
+        profile_row.addWidget(self.axis_copy_camera_profile_cb)
+
+        self.axis_copy_laser_profile_cb = QCheckBox("Laser profile JSON")
+        self.axis_copy_laser_profile_cb.setChecked(True)
+        self.axis_copy_laser_profile_cb.stateChanged.connect(
+            self._update_axis_profile_copy_controls
+        )
+        profile_row.addWidget(self.axis_copy_laser_profile_cb)
+
+        self.axis_copy_device_profiles_btn = self._make_button(
+            "Copy Selected Profiles", "secondary"
+        )
+        self.axis_copy_device_profiles_btn.clicked.connect(
+            self._copy_selected_device_profiles
+        )
+        self.axis_copy_device_profiles_btn.setEnabled(False)
+        profile_row.addWidget(self.axis_copy_device_profiles_btn)
+        profile_box.addLayout(profile_row)
+
+        self.axis_profile_copy_status_lbl = QLabel(
+            "Choose an active PLC or PostgreSQL source SKU to check its profile files."
+        )
+        self.axis_profile_copy_status_lbl.setObjectName("HintText")
+        self.axis_profile_copy_status_lbl.setWordWrap(True)
+        profile_box.addWidget(self.axis_profile_copy_status_lbl)
+
+        self.axis_profile_copy_controls.setVisible(False)
+        lay.addWidget(self.axis_profile_copy_controls)
+
         self.axis_table = QTableWidget()
-        self.axis_table.setColumnCount(11)
-        self.axis_table.setHorizontalHeaderLabels([
-            "Group",
-            "Axis",
-            "Position",
-            "Target Key",
-            "DB53 Address",
-            "Physical Axis",
-            "Axis Name",
-            "Servo IP",
-            "Current Axis Position",
-            "Target Value",
-            "Delta",
-        ])
-        self.axis_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.axis_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.axis_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.axis_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.axis_table.setAlternatingRowColors(True)
+        self.axis_table.setWordWrap(False)
+        self.axis_table.verticalHeader().setVisible(False)
+        self.axis_table.verticalHeader().setDefaultSectionSize(30)
+        self.axis_table.itemSelectionChanged.connect(self._update_axis_selection_status)
+        self._configure_axis_teaching_table_columns()
         lay.addWidget(self.axis_table, 1)
 
         btn_row = QHBoxLayout()
 
-        refresh_btn = self._make_button("Refresh Live Axis", "secondary")
+        refresh_btn = self._make_button("Refresh PLC Values", "secondary")
         refresh_btn.clicked.connect(self._refresh_axis_table)
 
-        # capture_all_btn = self._make_button("Capture All Live Targets", "primary")
-        # capture_all_btn.clicked.connect(lambda: self._capture_axis_group("all"))
-        capture_selected_btn = self._make_button("Capture Selected Target", "primary")
-        capture_selected_btn.clicked.connect(self._capture_selected_axis_target)
+        self.axis_select_all_btn = self._make_button("Select All Targets", "secondary")
+        self.axis_select_all_btn.clicked.connect(self._select_all_axis_targets)
 
-        # capture_camera_btn = self._make_button("Capture Machine/Camera Targets", "primary")
-        # capture_camera_btn.clicked.connect(lambda: self._capture_axis_group("camera"))
+        self.axis_clear_selection_btn = self._make_button("Clear Selection", "secondary")
+        self.axis_clear_selection_btn.clicked.connect(self._clear_axis_target_selection)
 
-        # capture_laser_btn = self._make_button("Capture Laser Targets", "primary")
-        # capture_laser_btn.clicked.connect(lambda: self._capture_axis_group("laser"))
+        self.axis_capture_selected_btn = self._make_button("Capture Selected Target(s)", "primary")
+        self.axis_capture_selected_btn.clicked.connect(self._capture_selected_axis_target)
+
+        self.axis_selection_lbl = QLabel("0 targets selected")
+        self.axis_selection_lbl.setObjectName("HintText")
 
         next_btn = self._make_button("Next: Capture Images", "secondary")
         next_btn.clicked.connect(lambda: self._switch_tab(TAB_CAPTURE))
 
         btn_row.addWidget(refresh_btn)
-        btn_row.addWidget(capture_selected_btn)
-        # btn_row.addWidget(capture_all_btn)
-        # btn_row.addWidget(capture_camera_btn)
-        # btn_row.addWidget(capture_laser_btn)
+        btn_row.addWidget(self.axis_select_all_btn)
+        btn_row.addWidget(self.axis_clear_selection_btn)
+        btn_row.addWidget(self.axis_capture_selected_btn)
+        btn_row.addWidget(self.axis_selection_lbl)
         btn_row.addStretch(1)
         btn_row.addWidget(next_btn)
         lay.addLayout(btn_row)
 
         root.addWidget(card)
 
-        # QTimer.singleShot(200, self._refresh_axis_table)
+    def _configure_axis_teaching_table_columns(self) -> None:
+        """Keep internal target metadata available while showing a compact operator table.
 
+        Hidden columns are still populated because capture/manual logic uses their
+        target keys internally. They are intentionally not shown to the operator.
+        """
+        table = self.axis_table
+        if table is None:
+            return
+
+        table.setColumnCount(14)
+        table.setHorizontalHeaderLabels([
+            "Group",
+            "Axis",
+            "Position",
+            "Target Key",
+            "DB53 Address",
+            "DB75 Address",
+            "Physical Axis",
+            "Axis Name",
+            "Servo IP",
+            "Current Position (DB74)",
+            "Active Recipe Value (DB75)",
+            "Saved DB Recipe Value",
+            "Present SKU Target",
+            "Difference",
+        ])
+
+        # Operator requested these engineering/debug columns to be removed from view.
+        # They remain hidden instead of deleted so existing capture mappings stay safe.
+        for column in (1, 3, 4, 5, 6, 8):
+            table.setColumnHidden(column, True)
+
+        for column in (0, 2, 7, 9, 10, 11, 12, 13):
+            table.setColumnHidden(column, False)
+
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(82)
+        header.setDefaultAlignment(Qt.AlignCenter)
+
+        # Mixed sizing keeps value columns fully readable and gives Axis Name
+        # the remaining space instead of squeezing every column equally.
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        for column in (9, 10, 11, 12, 13):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+
+        table.setColumnWidth(0, 95)
+        table.setColumnWidth(2, 125)
+        table.setColumnWidth(7, 250)
+        table.setColumnWidth(9, 155)
+        table.setColumnWidth(10, 170)
+        table.setColumnWidth(11, 165)
+        table.setColumnWidth(12, 155)
+        table.setColumnWidth(13, 115)
 
     def _on_axis_entry_mode_changed(self):
         if self.axis_entry_mode_combo is None:
             return
 
         text = self.axis_entry_mode_combo.currentText().strip().lower()
+        is_manual = "manual" in text
+        is_active_plc = "active recipe" in text and "db75" in text
+        is_database = "postgresql" in text or "database" in text
+        is_capture = not is_manual and not is_active_plc and not is_database
 
-        if "manual" in text:
+        if is_manual:
             self.axis_entry_mode = "manual"
             if self.apply_manual_axis_btn is not None:
                 self.apply_manual_axis_btn.setEnabled(True)
@@ -3056,23 +3280,949 @@ class NewSKUPage(QWidget):
 
             if self.status_lbl is not None:
                 self.status_lbl.setText(
-                    "Manual Entry Mode: edit Camera Target / Laser Target columns, then click Apply Manual Targets."
+                    "Manual mode: edit Present SKU Target, then click Apply Manual Targets."
                 )
+
+        elif is_active_plc:
+            self.axis_entry_mode = "active_plc"
+            if self.apply_manual_axis_btn is not None:
+                self.apply_manual_axis_btn.setEnabled(False)
+            if self.axis_table is not None:
+                self.axis_table.setEditTriggers(QTableWidget.NoEditTriggers)
+            if self.status_lbl is not None:
+                self.status_lbl.setText(
+                    "Active PLC Recipe mode: refresh DB75 values, verify them, then copy all into the present SKU."
+                )
+            self._refresh_active_recipe_from_plc(show_errors=False)
+
+        elif is_database:
+            self.axis_entry_mode = "database"
+            if self.apply_manual_axis_btn is not None:
+                self.apply_manual_axis_btn.setEnabled(False)
+            if self.axis_table is not None:
+                self.axis_table.setEditTriggers(QTableWidget.NoEditTriggers)
+            if self.status_lbl is not None:
+                self.status_lbl.setText(
+                    "PostgreSQL mode: select a saved recipe, preview its values, then load all into the present SKU."
+                )
+            self._refresh_axis_copy_source_recipes(show_errors=False)
 
         else:
             self.axis_entry_mode = "capture"
             if self.apply_manual_axis_btn is not None:
                 self.apply_manual_axis_btn.setEnabled(False)
-
             if self.axis_table is not None:
                 self.axis_table.setEditTriggers(QTableWidget.NoEditTriggers)
-
             if self.status_lbl is not None:
                 self.status_lbl.setText(
-                    "Capture Mode: move axis using PLC/HMI, refresh live axis, then capture targets."
+                    "DB74 capture mode: move axes using PLC/HMI, refresh, then capture one or multiple selected targets."
                 )
 
+        if self.axis_active_controls is not None:
+            self.axis_active_controls.setVisible(is_active_plc)
+        if self.axis_copy_controls is not None:
+            self.axis_copy_controls.setVisible(is_database)
+        if self.axis_copy_source_info_lbl is not None:
+            self.axis_copy_source_info_lbl.setVisible(is_database)
+        if self.axis_profile_copy_controls is not None:
+            self.axis_profile_copy_controls.setVisible(is_active_plc or is_database)
+
+        for button in (
+            self.axis_select_all_btn,
+            self.axis_clear_selection_btn,
+            self.axis_capture_selected_btn,
+        ):
+            if button is not None:
+                button.setEnabled(is_capture)
+
+        self._refresh_axis_table(refresh_plc=not is_database)
+        self._update_axis_profile_copy_controls()
+
+    def _current_axis_destination_sku_name(self) -> str:
+        """Return the SKU currently being edited without changing workflow state."""
+        sku_name = str(
+            self.sku_meta.get("sku_name")
+            or self.recipe_doc.get("sku_name")
+            or (self.recipe_doc.get("sku_meta") or {}).get("sku_name")
+            or ""
+        ).strip()
+
+        if not sku_name:
+            widget = self.wizard_widgets.get("sku_name")
+            if isinstance(widget, QLineEdit):
+                sku_name = widget.text().strip()
+
+        return sku_name
+
+    @staticmethod
+    def _valid_profile_sku_name(value: Any) -> str:
+        sku = str(value or "").strip()
+        if not sku or sku.upper() in {"UNKNOWN", "NONE", "-"}:
+            return ""
+        return sku
+
+    def _local_device_profile_skus(self) -> List[str]:
+        """Return the union of SKU folders that contain camera and/or laser JSON."""
+        names: Dict[str, str] = {}
+        try:
+            camera_skus = self.sku_profile_store.list_camera_skus()
+        except Exception:
+            camera_skus = []
+        try:
+            laser_skus = self.sku_profile_store.list_laser_skus()
+        except Exception:
+            laser_skus = []
+
+        for name in list(camera_skus) + list(laser_skus):
+            clean_name = self._valid_profile_sku_name(name)
+            if clean_name:
+                names.setdefault(clean_name.lower(), clean_name)
+        return sorted(names.values(), key=str.lower)
+
+    def _actual_local_profile_sku(self, sku_name: Any) -> str:
+        """Resolve a requested SKU to the exact local folder spelling, if present."""
+        requested = self._valid_profile_sku_name(sku_name)
+        if not requested:
+            return ""
+        requested_lower = requested.lower()
+        for local_name in self._local_device_profile_skus():
+            if local_name.lower() == requested_lower:
+                return local_name
+        return requested
+
+    @staticmethod
+    def _recipe_number_as_int(value: Any) -> Optional[int]:
+        """Convert a PLC recipe value to an integer only when it is integral."""
+        try:
+            numeric = float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        if not numeric.is_integer() or numeric < 0:
+            return None
+        return int(numeric)
+
+    def _local_profile_sku_from_recipe_number(self, recipe_number: Any) -> str:
+        """Match PLC recipe N to a local SKU_NNN profile folder.
+
+        Example: active recipe 3 resolves to SKU_003 when that folder exists in
+        media/Camera_Profiles or media/Laser_Profiles. This keeps local profile
+        copying available even when PostgreSQL reports the active SKU as UNKNOWN.
+        """
+        number = self._recipe_number_as_int(recipe_number)
+        if number is None:
+            return ""
+
+        local_skus = self._local_device_profile_skus()
+        if not local_skus:
+            return ""
+
+        # Prefer the production naming convention first.
+        preferred_names = (
+            f"SKU_{number:03d}",
+            f"SKU_{number}",
+            f"SKU-{number:03d}",
+            f"SKU-{number}",
+        )
+        by_lower = {name.lower(): name for name in local_skus}
+        for candidate in preferred_names:
+            match = by_lower.get(candidate.lower())
+            if match:
+                return match
+
+        # Then accept any unambiguous SKU folder whose numeric suffix equals
+        # the PLC recipe number, for example sku 003 or SKU_0003.
+        numeric_matches: List[str] = []
+        for local_name in local_skus:
+            match = re.fullmatch(r"SKU[\s_-]*0*(\d+)", local_name, flags=re.IGNORECASE)
+            if match and int(match.group(1)) == number:
+                numeric_matches.append(local_name)
+
+        unique_matches = sorted(set(numeric_matches), key=str.lower)
+        return unique_matches[0] if len(unique_matches) == 1 else ""
+
+    def _axis_profile_source_sku(self) -> str:
+        """Resolve the source SKU for local camera/laser profile JSON files."""
+        self.axis_profile_source_resolution = ""
+
+        if self.axis_entry_mode == "database":
+            recipe = (
+                self.axis_copy_source_combo.currentData()
+                if self.axis_copy_source_combo is not None
+                else None
+            )
+            if isinstance(recipe, dict):
+                source_sku = self._valid_profile_sku_name(
+                    recipe.get("sku_name")
+                    or (recipe.get("sku_meta") or {}).get("sku_name")
+                )
+                if source_sku:
+                    self.axis_profile_source_resolution = "PostgreSQL selected recipe"
+                    return self._actual_local_profile_sku(source_sku)
+            return ""
+
+        if self.axis_entry_mode == "active_plc":
+            snapshot = self.axis_active_recipe_snapshot or {}
+
+            # 1. Use the SKU already resolved by Axis Status, when available.
+            source_sku = self._valid_profile_sku_name(snapshot.get("active_sku"))
+            if source_sku:
+                self.axis_profile_source_resolution = "active PLC recipe SKU"
+                return self._actual_local_profile_sku(source_sku)
+
+            recipe_number = snapshot.get("plc_active_recipe_number")
+
+            # 2. Try the PostgreSQL recipe-number mapping.
+            if recipe_number not in (None, "", "UNKNOWN"):
+                try:
+                    recipe = self.recipe_service.find_recipe_by_number(recipe_number)
+                except Exception:
+                    recipe = None
+                if isinstance(recipe, dict):
+                    source_sku = self._valid_profile_sku_name(
+                        recipe.get("sku_name")
+                        or (recipe.get("sku_meta") or {}).get("sku_name")
+                    )
+                    if source_sku:
+                        self.axis_profile_source_resolution = "PostgreSQL recipe-number mapping"
+                        return self._actual_local_profile_sku(source_sku)
+
+            # 3. Local-media fallback: recipe 3 -> SKU_003.
+            local_sku = self._local_profile_sku_from_recipe_number(recipe_number)
+            if local_sku:
+                self.axis_profile_source_resolution = (
+                    f"local media match for active recipe {recipe_number}"
+                )
+                return local_sku
+
+        return ""
+
+    def _update_axis_profile_copy_controls(
+        self,
+        *_args,
+        auto_select_available: bool = False,
+    ) -> None:
+        source_sku = self._axis_profile_source_sku()
+        destination_sku = self._current_axis_destination_sku_name()
+
+        camera_exists = False
+        laser_exists = False
+
+        if source_sku:
+            try:
+                camera_exists = self.sku_profile_store.camera_profile_path(source_sku).is_file()
+            except Exception:
+                camera_exists = False
+            try:
+                laser_exists = self.sku_profile_store.laser_profile_path(source_sku).is_file()
+            except Exception:
+                laser_exists = False
+
+        for checkbox, available in (
+            (self.axis_copy_camera_profile_cb, camera_exists),
+            (self.axis_copy_laser_profile_cb, laser_exists),
+        ):
+            if checkbox is None:
+                continue
+            was_enabled = checkbox.isEnabled()
+            checkbox.blockSignals(True)
+            checkbox.setEnabled(available)
+            if not available:
+                checkbox.setChecked(False)
+            elif auto_select_available or not was_enabled:
+                # A newly refreshed source should immediately select every
+                # profile JSON that is actually present for that source SKU.
+                checkbox.setChecked(True)
+            checkbox.blockSignals(False)
+
+        camera_selected = bool(
+            self.axis_copy_camera_profile_cb is not None
+            and self.axis_copy_camera_profile_cb.isEnabled()
+            and self.axis_copy_camera_profile_cb.isChecked()
+        )
+        laser_selected = bool(
+            self.axis_copy_laser_profile_cb is not None
+            and self.axis_copy_laser_profile_cb.isEnabled()
+            and self.axis_copy_laser_profile_cb.isChecked()
+        )
+
+        same_sku = bool(
+            source_sku
+            and destination_sku
+            and _safe_name(source_sku).lower() == _safe_name(destination_sku).lower()
+        )
+        can_copy = bool(
+            source_sku
+            and destination_sku
+            and not same_sku
+            and (camera_selected or laser_selected)
+        )
+
+        if self.axis_copy_device_profiles_btn is not None:
+            self.axis_copy_device_profiles_btn.setEnabled(can_copy)
+
+        if self.axis_profile_source_lbl is not None:
+            if source_sku:
+                resolution = str(
+                    getattr(self, "axis_profile_source_resolution", "") or "local media"
+                )
+                self.axis_profile_source_lbl.setText(
+                    f"Source SKU: {source_sku} ({resolution})  →  "
+                    f"Present SKU: {destination_sku or 'not saved'}"
+                )
+            else:
+                self.axis_profile_source_lbl.setText("Source SKU: not available")
+
+        if self.axis_profile_copy_status_lbl is not None:
+            if not source_sku:
+                if self.axis_entry_mode == "active_plc":
+                    recipe_number = (self.axis_active_recipe_snapshot or {}).get(
+                        "plc_active_recipe_number"
+                    )
+                    expected_sku = ""
+                    recipe_number_int = self._recipe_number_as_int(recipe_number)
+                    if recipe_number_int is not None:
+                        expected_sku = f"SKU_{recipe_number_int:03d}"
+                    expected_text = (
+                        f" Expected local folder: {expected_sku}." if expected_sku else ""
+                    )
+                    self.axis_profile_copy_status_lbl.setText(
+                        "No local camera/laser profile folder could be matched to the active PLC recipe."
+                        + expected_text
+                        + " The page checks media/Camera_Profiles and media/Laser_Profiles directly, "
+                          "and also uses PostgreSQL mapping when available."
+                    )
+                else:
+                    self.axis_profile_copy_status_lbl.setText(
+                        "Select a saved PostgreSQL source recipe to check camera and laser profile JSON files."
+                    )
+            elif same_sku:
+                self.axis_profile_copy_status_lbl.setText(
+                    "Source and present SKU are the same; no profile duplication is required."
+                )
+            else:
+                camera_state = "available" if camera_exists else "not found"
+                laser_state = "available" if laser_exists else "not found"
+                camera_path = self.sku_profile_store.camera_profile_path(source_sku)
+                laser_path = self.sku_profile_store.laser_profile_path(source_sku)
+                self.axis_profile_copy_status_lbl.setText(
+                    f"Camera JSON: {camera_state} | Laser JSON: {laser_state}. "
+                    f"Checked local media folders for {source_sku}. "
+                    "Available profiles are selected automatically; copying preserves all device settings "
+                    "and rewrites only the destination SKU identity."
+                )
+                self.axis_copy_camera_profile_cb.setToolTip(str(camera_path))
+                self.axis_copy_laser_profile_cb.setToolTip(str(laser_path))
+
+    def _copy_selected_device_profiles(self) -> None:
+        source_sku = self._axis_profile_source_sku()
+        destination_sku = self._current_axis_destination_sku_name()
+
+        if not source_sku:
+            QMessageBox.warning(
+                self,
+                "Copy Device Profiles",
+                "A valid source SKU could not be resolved from the selected active/database recipe.",
+            )
+            return
+        if not destination_sku:
+            QMessageBox.warning(
+                self,
+                "Copy Device Profiles",
+                "Save the present SKU setup before copying device profiles.",
+            )
+            return
+        if _safe_name(source_sku).lower() == _safe_name(destination_sku).lower():
+            QMessageBox.information(
+                self,
+                "Copy Device Profiles",
+                "Source and present SKU are the same. No profile copy is required.",
+            )
+            return
+
+        copy_camera = bool(
+            self.axis_copy_camera_profile_cb is not None
+            and self.axis_copy_camera_profile_cb.isEnabled()
+            and self.axis_copy_camera_profile_cb.isChecked()
+        )
+        copy_laser = bool(
+            self.axis_copy_laser_profile_cb is not None
+            and self.axis_copy_laser_profile_cb.isEnabled()
+            and self.axis_copy_laser_profile_cb.isChecked()
+        )
+        if not copy_camera and not copy_laser:
+            QMessageBox.warning(
+                self,
+                "Copy Device Profiles",
+                "Select at least one available camera or laser profile.",
+            )
+            return
+
+        existing_destinations = []
+        if copy_camera:
+            if self.sku_profile_store.camera_profile_path(destination_sku).is_file():
+                existing_destinations.append("camera_profile.json")
+        if copy_laser:
+            if self.sku_profile_store.laser_profile_path(destination_sku).is_file():
+                existing_destinations.append("laser_profile.json")
+
+        if existing_destinations:
+            answer = QMessageBox.question(
+                self,
+                "Replace Existing Device Profiles",
+                f"The present SKU {destination_sku} already contains:\n"
+                + "\n".join(f"• {name}" for name in existing_destinations)
+                + f"\n\nReplace the selected profile JSON files with copies from {source_sku}?\n\n"
+                  "This copies exact camera/laser settings, including device serial mappings, line/scan rates, exposure, ROI, UserSet and trigger parameters.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        copied_paths: Dict[str, str] = {}
+        errors: List[str] = []
+        if copy_camera:
+            try:
+                copied_paths["camera"] = str(
+                    self.sku_profile_store.copy_camera_profile(source_sku, destination_sku)
+                )
+            except Exception as exc:
+                errors.append(f"Camera profile: {exc}")
+
+        if copy_laser:
+            try:
+                copied_paths["laser"] = str(
+                    self.sku_profile_store.copy_laser_profile(source_sku, destination_sku)
+                )
+            except Exception as exc:
+                errors.append(f"Laser profile: {exc}")
+
+        copied_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if copied_paths:
+            self.recipe_doc["device_profiles_copied_from"] = {
+                "source_sku": source_sku,
+                "destination_sku": destination_sku,
+                "copied_at": copied_at,
+                "profile_paths": dict(copied_paths),
+            }
+
+            # Make the new destination camera profile immediately selectable on
+            # the Capture tab instead of continuing to use the source SKU name.
+            if "camera" in copied_paths:
+                self.refresh_capture_camera_profiles()
+                self._sync_capture_profile_selection(destination_sku)
+
+        self._update_axis_profile_copy_controls()
+
+        if copied_paths and self.status_lbl is not None:
+            copied_label = " + ".join(name.title() for name in copied_paths)
+            self.status_lbl.setText(
+                f"{copied_label} profile copied from {source_sku} to {destination_sku}."
+            )
+
+        if copied_paths:
+            message = (
+                f"Copied device profiles from {source_sku} to {destination_sku}:\n\n"
+                + "\n".join(
+                    f"• {name.title()}: {profile_path}"
+                    for name, profile_path in copied_paths.items()
+                )
+            )
+            if errors:
+                message += "\n\nSome profiles failed:\n" + "\n".join(errors)
+            QMessageBox.information(self, "Device Profiles Copied", message)
+        else:
+            QMessageBox.critical(
+                self,
+                "Copy Device Profiles",
+                "No profile could be copied.\n\n" + "\n".join(errors),
+            )
+
+    @staticmethod
+    def _recipe_axis_source_targets(recipe: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """Return all usable source target dictionaries across recipe revisions."""
+        recipe = dict(recipe or {})
+        combined: Dict[str, Dict[str, Any]] = {}
+
+        for field_name in (
+            "recipe_axis_targets",
+            "camera_axis_targets",
+            "laser_axis_targets",
+        ):
+            source_map = recipe.get(field_name) or {}
+            if not isinstance(source_map, dict):
+                continue
+
+            for source_key, raw_target in source_map.items():
+                if not isinstance(raw_target, dict):
+                    continue
+                target = dict(raw_target)
+                target_key = str(
+                    target.get("target_key")
+                    or source_key
+                    or ""
+                ).strip()
+                if not target_key:
+                    continue
+                combined.setdefault(target_key, target)
+
+        return combined
+
+    def _refresh_axis_copy_source_recipes(self, show_errors: bool = True) -> None:
+        combo = self.axis_copy_source_combo
+        if combo is None:
+            return
+
+        previous_sku = ""
+        current_data = combo.currentData()
+        if isinstance(current_data, dict):
+            previous_sku = str(current_data.get("sku_name") or "").strip()
+
+        combo.blockSignals(True)
+        combo.clear()
+
+        try:
+            recipes = self.recipe_service.list_latest_recipes_by_sku()
+        except Exception as exc:
+            combo.addItem("Unable to load saved SKU recipes", None)
+            combo.blockSignals(False)
+            if self.axis_copy_apply_btn is not None:
+                self.axis_copy_apply_btn.setEnabled(False)
+            if show_errors:
+                QMessageBox.critical(
+                    self,
+                    "Load Database Axis Targets",
+                    f"Unable to read saved SKU recipes from PostgreSQL:\n{exc}",
+                )
+            self._update_axis_copy_source_info()
+            return
+
+        candidates: List[Dict[str, Any]] = []
+
+        for raw_recipe in recipes or []:
+            recipe = dict(raw_recipe or {})
+            source_sku = str(
+                recipe.get("sku_name")
+                or (recipe.get("sku_meta") or {}).get("sku_name")
+                or ""
+            ).strip()
+            if not source_sku:
+                continue
+            targets = self._recipe_axis_source_targets(recipe)
+            valid_count = sum(
+                1
+                for target in targets.values()
+                if target.get("value") not in (None, "")
+            )
+            if valid_count <= 0:
+                continue
+
+            recipe["_axis_copy_target_count"] = valid_count
+            candidates.append(recipe)
+
+        candidates.sort(
+            key=lambda item: str(
+                item.get("sku_name")
+                or (item.get("sku_meta") or {}).get("sku_name")
+                or ""
+            ).lower()
+        )
+
+        selected_index = -1
+        for recipe in candidates:
+            source_sku = str(
+                recipe.get("sku_name")
+                or (recipe.get("sku_meta") or {}).get("sku_name")
+                or "UNKNOWN"
+            ).strip()
+            recipe_number = (
+                recipe.get("recipe_number")
+                or recipe.get("plc_recipe_number")
+                or (recipe.get("sku_meta") or {}).get("recipe_number")
+                or "-"
+            )
+            version = recipe.get("version", "-")
+            target_count = int(recipe.get("_axis_copy_target_count", 0) or 0)
+            combo.addItem(
+                f"{source_sku}  |  Recipe {recipe_number}  |  Version {version}  |  {target_count} targets",
+                recipe,
+            )
+            if previous_sku and _safe_name(source_sku).lower() == _safe_name(previous_sku).lower():
+                selected_index = combo.count() - 1
+
+        if combo.count() == 0:
+            combo.addItem("No saved PostgreSQL recipe has axis target values", None)
+        elif selected_index >= 0:
+            combo.setCurrentIndex(selected_index)
+
+        combo.blockSignals(False)
+        self._update_axis_copy_source_info()
+
+    def _update_axis_copy_source_info(self) -> None:
+        combo = self.axis_copy_source_combo
+        source_info = self.axis_copy_source_info_lbl
+        recipe = combo.currentData() if combo is not None else None
+        is_valid = isinstance(recipe, dict)
+
+        self.axis_database_source_targets = (
+            self._recipe_axis_source_targets(recipe) if is_valid else {}
+        )
+
+        if self.axis_copy_apply_btn is not None:
+            self.axis_copy_apply_btn.setEnabled(is_valid)
+
+        if source_info is not None:
+            if not is_valid:
+                source_info.setText(
+                    "No compatible PostgreSQL recipe is available. Save a recipe with completed axis targets first."
+                )
+            else:
+                source_sku = str(
+                    recipe.get("sku_name")
+                    or (recipe.get("sku_meta") or {}).get("sku_name")
+                    or "UNKNOWN"
+                ).strip()
+                recipe_number = (
+                    recipe.get("recipe_number")
+                    or recipe.get("plc_recipe_number")
+                    or (recipe.get("sku_meta") or {}).get("recipe_number")
+                    or "-"
+                )
+                version = recipe.get("version", "-")
+                target_count = int(recipe.get("_axis_copy_target_count", 0) or 0)
+                source_info.setText(
+                    f"Selected PostgreSQL source: {source_sku} | Recipe {recipe_number} | "
+                    f"Version {version} | {target_count} available targets. "
+                    "The Selected DB Recipe column is a preview; values change only after Load All Database Values."
+                )
+
+        self._refresh_axis_table(refresh_plc=False)
+        self._update_axis_profile_copy_controls(auto_select_available=True)
+
+    def _copy_axis_targets_from_selected_sku(self) -> None:
+        combo = self.axis_copy_source_combo
+        source_recipe = combo.currentData() if combo is not None else None
+        if not isinstance(source_recipe, dict):
+            QMessageBox.warning(
+                self,
+                "Load Database Axis Targets",
+                "Please select a saved source SKU that contains axis target values.",
+            )
+            return
+
+        destination_sku = self._current_axis_destination_sku_name()
+        if not destination_sku:
+            QMessageBox.warning(
+                self,
+                "Load Database Axis Targets",
+                "Save the present SKU setup before copying axis target values.",
+            )
+            return
+
+        source_sku = str(
+            source_recipe.get("sku_name")
+            or (source_recipe.get("sku_meta") or {}).get("sku_name")
+            or "UNKNOWN"
+        ).strip()
+
+        source_targets = self._recipe_axis_source_targets(source_recipe)
+        if not source_targets:
+            QMessageBox.warning(
+                self,
+                "Load Database Axis Targets",
+                f"{source_sku} does not contain saved axis target values.",
+            )
+            return
+
+        source_by_legacy_key: Dict[str, Dict[str, Any]] = {}
+        for key, target in source_targets.items():
+            legacy_key = str(target.get("legacy_key") or "").strip()
+            if legacy_key:
+                source_by_legacy_key.setdefault(legacy_key, target)
+            source_by_legacy_key.setdefault(str(key), target)
+
+        current_targets = dict(self.recipe_doc.get("recipe_axis_targets") or {})
+        if current_targets:
+            answer = QMessageBox.question(
+                self,
+                "Replace Present Axis Targets",
+                f"The present SKU {destination_sku} already has {len(current_targets)} axis target values.\n\n"
+                f"Replace them with compatible values copied from {source_sku}?\n\n"
+                "Only axis target values will be replaced.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        try:
+            target_configs = self.recipe_service.get_recipe_target_configs()
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Database Axis Targets", str(exc))
+            return
+
+        copied_targets: Dict[str, Dict[str, Any]] = {}
+        skipped_keys: List[str] = []
+        copied_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        source_recipe_number = (
+            source_recipe.get("recipe_number")
+            or source_recipe.get("plc_recipe_number")
+            or (source_recipe.get("sku_meta") or {}).get("recipe_number")
+        )
+        source_version = source_recipe.get("version")
+
+        for cfg in target_configs:
+            target_key = str(cfg.get("target_key") or "").strip()
+            if not target_key:
+                continue
+
+            source_target = source_targets.get(target_key)
+            if source_target is None:
+                legacy_key = str(cfg.get("legacy_key") or "").strip()
+                if legacy_key:
+                    source_target = source_targets.get(legacy_key) or source_by_legacy_key.get(legacy_key)
+
+            if source_target is None:
+                skipped_keys.append(target_key)
+                continue
+
+            value = source_target.get("value")
+            if value in (None, ""):
+                skipped_keys.append(target_key)
+                continue
+
+            try:
+                copied_doc = self._make_recipe_target_doc(
+                    cfg=cfg,
+                    value=float(value),
+                    source="POSTGRESQL_SAVED_RECIPE",
+                )
+            except Exception:
+                skipped_keys.append(target_key)
+                continue
+
+            copied_doc.update({
+                "copied_from_sku": source_sku,
+                "copied_from_recipe_number": source_recipe_number,
+                "copied_from_version": source_version,
+                "copied_from_target_key": str(
+                    source_target.get("target_key")
+                    or target_key
+                ),
+                "copied_at": copied_at,
+            })
+            copied_targets[target_key] = copied_doc
+
+        if not copied_targets:
+            QMessageBox.warning(
+                self,
+                "Load Database Axis Targets",
+                f"No compatible axis target values could be copied from {source_sku}.",
+            )
+            return
+
+        self.recipe_doc["recipe_axis_targets"] = copied_targets
+        self.recipe_doc["axis_targets_loaded_from_database"] = {
+            "sku_name": source_sku,
+            "recipe_number": source_recipe_number,
+            "version": source_version,
+            "copied_at": copied_at,
+            "copied_count": len(copied_targets),
+            "skipped_target_keys": list(skipped_keys),
+        }
+        self._sync_legacy_axis_targets_from_recipe_targets()
         self._refresh_axis_table()
+        self._refresh_workflow_header()
+
+        if self.status_lbl is not None:
+            self.status_lbl.setText(
+                f"Loaded {len(copied_targets)} axis target values from {source_sku} into {destination_sku}."
+            )
+
+        message = (
+            f"Loaded {len(copied_targets)} axis target values successfully.\n\n"
+            f"Source SKU: {source_sku}\n"
+            f"Present SKU: {destination_sku}"
+        )
+        if skipped_keys:
+            message += f"\nSkipped incompatible/blank targets: {len(skipped_keys)}"
+
+        QMessageBox.information(self, "Database Axis Targets Loaded", message)
+
+    def _refresh_active_recipe_from_plc(self, show_errors: bool = True) -> bool:
+        """Read the same DB74/DB75 snapshot used by the Axis Status page."""
+        try:
+            snapshot = self.axis_status_service.get_axis_status()
+        except Exception as exc:
+            if self.axis_active_recipe_info_lbl is not None:
+                self.axis_active_recipe_info_lbl.setText(
+                    f"Active PLC Recipe refresh failed: {exc}"
+                )
+            if self.axis_active_copy_btn is not None:
+                self.axis_active_copy_btn.setEnabled(False)
+            if show_errors:
+                QMessageBox.critical(
+                    self,
+                    "Active PLC Recipe",
+                    f"Unable to read active recipe values from PLC DB75:\n{exc}",
+                )
+            return False
+
+        self.axis_active_recipe_snapshot = dict(snapshot or {})
+        self.axis_active_recipe_rows = {
+            str(row.get("target_key") or ""): dict(row)
+            for row in (snapshot.get("targets") or [])
+            if str(row.get("target_key") or "").strip()
+        }
+
+        active_recipe_number = snapshot.get("plc_active_recipe_number")
+        active_sku = snapshot.get("active_sku", "UNKNOWN")
+        version = snapshot.get("recipe_version", "-")
+        valid_count = sum(
+            1 for row in self.axis_active_recipe_rows.values()
+            if row.get("running_db75") is not None
+        )
+        total_count = len(self.axis_active_recipe_rows)
+
+        if self.axis_active_recipe_info_lbl is not None:
+            self.axis_active_recipe_info_lbl.setText(
+                f"Active PLC Recipe Number: {active_recipe_number if active_recipe_number is not None else 'UNKNOWN'} "
+                f"(DB74.DBW78) | SKU: {active_sku} | Version: {version} | "
+                f"DB75 values available: {valid_count}/{total_count}"
+            )
+
+        if self.axis_active_copy_btn is not None:
+            self.axis_active_copy_btn.setEnabled(valid_count > 0)
+
+        self._refresh_axis_table(refresh_plc=False)
+        self._update_axis_profile_copy_controls(auto_select_available=True)
+        return valid_count > 0
+
+    def _copy_active_recipe_values_to_present_sku(self) -> None:
+        """Copy all currently active PLC recipe target values from DB75."""
+        destination_sku = self._current_axis_destination_sku_name()
+        if not destination_sku:
+            QMessageBox.warning(
+                self,
+                "Active PLC Recipe",
+                "Save the present SKU setup before copying active PLC recipe values.",
+            )
+            return
+
+        if not self.axis_active_recipe_rows:
+            if not self._refresh_active_recipe_from_plc(show_errors=True):
+                return
+
+        snapshot = self.axis_active_recipe_snapshot or {}
+        active_recipe_number = snapshot.get("plc_active_recipe_number")
+        active_sku = snapshot.get("active_sku", "UNKNOWN")
+        active_version = snapshot.get("recipe_version", "-")
+
+        current_targets = dict(self.recipe_doc.get("recipe_axis_targets") or {})
+        if current_targets:
+            answer = QMessageBox.question(
+                self,
+                "Replace Present Axis Targets",
+                f"The present SKU {destination_sku} already has {len(current_targets)} axis target values.\n\n"
+                f"Replace them with the values of active PLC recipe {active_recipe_number}?\n\n"
+                "Source: PLC DB75 running recipe values. The physical DB74 positions are not copied.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        try:
+            target_configs = self.recipe_service.get_recipe_target_configs()
+        except Exception as exc:
+            QMessageBox.critical(self, "Active PLC Recipe", str(exc))
+            return
+
+        copied_targets: Dict[str, Dict[str, Any]] = {}
+        skipped_keys: List[str] = []
+        copied_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        for cfg in target_configs:
+            target_key = str(cfg.get("target_key") or "").strip()
+            row = self.axis_active_recipe_rows.get(target_key, {})
+            value = row.get("running_db75")
+            if value is None:
+                skipped_keys.append(target_key)
+                continue
+
+            target_doc = self._make_recipe_target_doc(
+                cfg=cfg,
+                value=value,
+                source="PLC_ACTIVE_RECIPE_DB75",
+            )
+            target_doc.update({
+                "copied_from_active_recipe_number": active_recipe_number,
+                "copied_from_active_sku": active_sku,
+                "copied_from_active_version": active_version,
+                "copied_from_db75_address": row.get("db75_address"),
+                "copied_at": copied_at,
+            })
+            copied_targets[target_key] = target_doc
+
+        if not copied_targets:
+            QMessageBox.warning(
+                self,
+                "Active PLC Recipe",
+                "No valid active recipe values were read from PLC DB75.",
+            )
+            return
+
+        self.recipe_doc["recipe_axis_targets"] = copied_targets
+        self.recipe_doc["axis_targets_loaded_from_active_plc_recipe"] = {
+            "recipe_number": active_recipe_number,
+            "sku_name": active_sku,
+            "version": active_version,
+            "source": "PLC_DB75",
+            "copied_at": copied_at,
+            "copied_count": len(copied_targets),
+            "skipped_target_keys": skipped_keys,
+        }
+        self._sync_legacy_axis_targets_from_recipe_targets()
+        self._refresh_axis_table(refresh_plc=False)
+        self._refresh_workflow_header()
+
+        if self.status_lbl is not None:
+            self.status_lbl.setText(
+                f"Loaded {len(copied_targets)} DB75 active-recipe values into present SKU {destination_sku}."
+            )
+
+        message = (
+            f"Loaded {len(copied_targets)} active PLC recipe values successfully.\n\n"
+            f"PLC active recipe number: {active_recipe_number}\n"
+            f"PLC active SKU: {active_sku}\n"
+            f"Present SKU: {destination_sku}\n\n"
+            "These are now working values in the New SKU page. Complete Save Recipe to store them in PostgreSQL."
+        )
+        if skipped_keys:
+            message += f"\nMissing DB75 values skipped: {len(skipped_keys)}"
+
+        QMessageBox.information(self, "Active PLC Recipe Values Loaded", message)
+
+    def _select_all_axis_targets(self) -> None:
+        if self.axis_table is None or self.axis_table.rowCount() <= 0:
+            return
+        self.axis_table.selectAll()
+        self._update_axis_selection_status()
+
+    def _clear_axis_target_selection(self) -> None:
+        if self.axis_table is None:
+            return
+        self.axis_table.clearSelection()
+        self._update_axis_selection_status()
+
+    def _update_axis_selection_status(self) -> None:
+        if self.axis_selection_lbl is None:
+            return
+        selected_count = 0
+        if self.axis_table is not None and self.axis_table.selectionModel() is not None:
+            selected_count = len(self.axis_table.selectionModel().selectedRows())
+        suffix = "target" if selected_count == 1 else "targets"
+        self.axis_selection_lbl.setText(f"{selected_count} {suffix} selected")
 
     def _make_recipe_target_doc(self, cfg: Dict[str, Any], value, source: str) -> Dict[str, Any]:
         axis_id = int(cfg.get("axis_id", 0) or 0)
@@ -3150,57 +4300,112 @@ class NewSKUPage(QWidget):
         self.recipe_doc["camera_axis_targets"] = camera_targets
         self.recipe_doc["laser_axis_targets"] = laser_targets
 
-    def _refresh_axis_table(self):
+    def _refresh_axis_table(self, refresh_plc: bool = True):
         if self.axis_table is None:
             return
 
         try:
-            positions = self.recipe_service.read_current_axis_positions()
             target_configs = self.recipe_service.get_recipe_target_configs()
-        except Exception as e:
+        except Exception as exc:
             self.axis_table.setRowCount(1)
             self.axis_table.setColumnCount(2)
             self.axis_table.setHorizontalHeaderLabels(["ERROR", "Message"])
             self.axis_table.setItem(0, 0, QTableWidgetItem("ERROR"))
-            self.axis_table.setItem(0, 1, QTableWidgetItem(str(e)))
+            self.axis_table.setItem(0, 1, QTableWidgetItem(str(exc)))
             return
 
-        self.axis_table.setColumnCount(11)
-        self.axis_table.setHorizontalHeaderLabels([
-            "Group",
-            "Axis",
-            "Position",
-            "Target Key",
-            "DB53 Address",
-            "Physical Axis",
-            "Axis Name",
-            "Servo IP",
-            "Current Axis Position",
-            "Target Value",
-            "Delta",
-        ])
+        if refresh_plc:
+            try:
+                snapshot = self.axis_status_service.get_axis_status()
+                self.axis_active_recipe_snapshot = dict(snapshot or {})
+                self.axis_active_recipe_rows = {
+                    str(row.get("target_key") or ""): dict(row)
+                    for row in (snapshot.get("targets") or [])
+                    if str(row.get("target_key") or "").strip()
+                }
+            except Exception:
+                # Preserve the old DB74-only behavior if Axis Status refresh fails.
+                try:
+                    positions = self.recipe_service.read_current_axis_positions()
+                except Exception as exc:
+                    positions = {}
+                    if self.status_lbl is not None:
+                        self.status_lbl.setText(f"Axis refresh failed: {exc}")
+
+                fallback_rows: Dict[str, Dict[str, Any]] = {}
+                for cfg in target_configs:
+                    axis_id = int(cfg.get("axis_id", 0) or 0)
+                    axis_key = cfg.get("axis_key") or f"axis_{axis_id:02d}"
+                    info = positions.get(axis_key, {}) or {}
+                    fallback_rows[str(cfg.get("target_key") or "")] = {
+                        "target_key": cfg.get("target_key"),
+                        "axis_key": axis_key,
+                        "live_db74": info.get("value"),
+                        "running_db75": None,
+                        "db75_address": (
+                            f"DB{cfg.get('db75_db')}.DBD{cfg.get('db75_byte')}"
+                            if cfg.get("db75_byte", -1) not in (None, -1)
+                            else ""
+                        ),
+                    }
+                self.axis_active_recipe_rows = fallback_rows
+
+        active_recipe_number = self.axis_active_recipe_snapshot.get("plc_active_recipe_number")
+        active_sku = self.axis_active_recipe_snapshot.get("active_sku", "UNKNOWN")
+        active_version = self.axis_active_recipe_snapshot.get("recipe_version", "-")
+        valid_db75 = sum(
+            1 for row in self.axis_active_recipe_rows.values()
+            if row.get("running_db75") is not None
+        )
+
+        if self.axis_active_recipe_info_lbl is not None:
+            self.axis_active_recipe_info_lbl.setText(
+                f"Active PLC Recipe Number: {active_recipe_number if active_recipe_number is not None else 'UNKNOWN'} "
+                f"(DB74.DBW78) | SKU: {active_sku} | Version: {active_version} | "
+                f"DB75 values available: {valid_db75}/{len(target_configs)}"
+            )
+        if self.axis_active_copy_btn is not None:
+            self.axis_active_copy_btn.setEnabled(valid_db75 > 0)
+
+        self._configure_axis_teaching_table_columns()
 
         recipe_targets = self.recipe_doc.get("recipe_axis_targets", {}) or {}
+        database_targets = self.axis_database_source_targets or {}
 
         self.axis_table.setRowCount(len(target_configs))
 
-        for row, cfg in enumerate(target_configs):
-            target_key = cfg.get("target_key", "")
+        for row_index, cfg in enumerate(target_configs):
+            target_key = str(cfg.get("target_key", "") or "")
             group = str(cfg.get("group", "")).upper()
-
-            axis_id = int(cfg.get("axis_id", row + 1) or row + 1)
+            axis_id = int(cfg.get("axis_id", row_index + 1) or row_index + 1)
             axis_key = cfg.get("axis_key") or f"axis_{axis_id:02d}"
 
-            info = positions.get(axis_key, {}) or {}
-            live_value = info.get("value")
+            plc_row = self.axis_active_recipe_rows.get(target_key, {}) or {}
+            live_value = plc_row.get("live_db74")
+            active_value = plc_row.get("running_db75")
+
+            db_source = database_targets.get(target_key, {}) or {}
+            if not db_source:
+                legacy_key = str(cfg.get("legacy_key") or "").strip()
+                if legacy_key:
+                    db_source = database_targets.get(legacy_key, {}) or {}
+            database_value = db_source.get("value") if isinstance(db_source, dict) else None
 
             saved_target = recipe_targets.get(target_key, {}) or {}
             target_value = saved_target.get("value", "")
 
+            source_value = None
+            if self.axis_entry_mode == "active_plc":
+                source_value = active_value
+            elif self.axis_entry_mode == "database":
+                source_value = database_value
+            elif self.axis_entry_mode == "capture":
+                source_value = live_value
+
             delta = ""
             try:
-                if live_value is not None and target_value != "":
-                    delta = f"{float(live_value) - float(target_value):.3f}"
+                if source_value is not None and target_value not in ("", None):
+                    delta = f"{float(source_value) - float(target_value):.3f}"
             except Exception:
                 delta = ""
 
@@ -3210,17 +4415,27 @@ class NewSKUPage(QWidget):
             if db_no not in ("", None) and write_byte not in ("", None, -1):
                 db53_address = f"DB{db_no}.DBD{write_byte}"
 
+            db75_address = plc_row.get("db75_address") or ""
+            if not db75_address:
+                db75_db = cfg.get("db75_db", "")
+                db75_byte = cfg.get("db75_byte", "")
+                if db75_db not in ("", None) and db75_byte not in ("", None, -1):
+                    db75_address = f"DB{db75_db}.DBD{db75_byte}"
+
             values = [
                 group,
                 str(cfg.get("target_name", "")),
                 str(cfg.get("position", "")),
                 target_key,
                 db53_address,
+                db75_address,
                 axis_key,
                 str(cfg.get("axis_name", "")),
                 str(cfg.get("axis_ip", "")),
                 "" if live_value is None else f"{float(live_value):.3f}",
-                "" if target_value == "" or target_value is None else f"{float(target_value):.3f}",
+                "" if active_value is None else f"{float(active_value):.3f}",
+                "" if database_value in (None, "") else f"{float(database_value):.3f}",
+                "" if target_value in (None, "") else f"{float(target_value):.3f}",
                 delta,
             ]
 
@@ -3228,17 +4443,13 @@ class NewSKUPage(QWidget):
                 item = QTableWidgetItem(str(value))
                 item.setTextAlignment(Qt.AlignCenter)
 
-                # In manual mode, allow editing only Target Value column.
-                editable = False
-                if self.axis_entry_mode == "manual" and col == 9:
-                    editable = True
-
+                editable = self.axis_entry_mode == "manual" and col == 12
                 if editable:
                     item.setFlags(item.flags() | Qt.ItemIsEditable)
                 else:
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
 
-                self.axis_table.setItem(row, col, item)
+                self.axis_table.setItem(row_index, col, item)
 
     def _capture_axis_group(self, group: str):
         """
@@ -3315,43 +4526,21 @@ class NewSKUPage(QWidget):
         )
     
     def _capture_selected_axis_target(self):
-        """
-        Capture only the selected recipe target row from current live PLC position.
-
-        This is the correct method for HOME / WORK1 / WORK2 / WORK3 teaching,
-        because one physical axis has only one live position at a time.
-        """
+        """Capture one or more selected recipe target rows from one PLC snapshot."""
         if self.axis_table is None:
             return
 
-        selected_rows = self.axis_table.selectionModel().selectedRows()
+        selection_model = self.axis_table.selectionModel()
+        selected_rows = selection_model.selectedRows() if selection_model is not None else []
         if not selected_rows:
             QMessageBox.warning(
                 self,
-                "Capture Selected Target",
-                "Please select one recipe target row first."
+                "Capture Selected Targets",
+                "Please select one or more recipe target rows first.",
             )
             return
 
-        row = selected_rows[0].row()
-
-        target_key_item = self.axis_table.item(row, 3)
-        if target_key_item is None:
-            QMessageBox.warning(
-                self,
-                "Capture Selected Target",
-                "Selected row does not have a target key."
-            )
-            return
-
-        target_key = target_key_item.text().strip()
-        if not target_key:
-            QMessageBox.warning(
-                self,
-                "Capture Selected Target",
-                "Selected row target key is empty."
-            )
-            return
+        row_numbers = sorted({index.row() for index in selected_rows})
 
         try:
             positions = self.recipe_service.read_current_axis_positions()
@@ -3360,57 +4549,123 @@ class NewSKUPage(QWidget):
             QMessageBox.critical(self, "Axis Capture Error", str(e))
             return
 
-        cfg = target_cfg_map.get(target_key)
-        if not cfg:
+        selected_configs: List[Dict[str, Any]] = []
+        missing_target_keys: List[str] = []
+        for row in row_numbers:
+            target_key_item = self.axis_table.item(row, 3)
+            target_key = target_key_item.text().strip() if target_key_item is not None else ""
+            if not target_key:
+                missing_target_keys.append(f"row {row + 1}")
+                continue
+            cfg = target_cfg_map.get(target_key)
+            if not cfg:
+                missing_target_keys.append(target_key)
+                continue
+            selected_configs.append(cfg)
+
+        if not selected_configs:
             QMessageBox.warning(
                 self,
-                "Capture Selected Target",
-                f"Target config not found for: {target_key}"
+                "Capture Selected Targets",
+                "None of the selected rows has a valid target configuration.",
             )
             return
 
-        axis_id = int(cfg.get("axis_id", 0) or 0)
-        axis_key = cfg.get("axis_key") or f"axis_{axis_id:02d}"
+        axis_key_counts: Dict[str, int] = {}
+        for cfg in selected_configs:
+            axis_id = int(cfg.get("axis_id", 0) or 0)
+            axis_key = str(cfg.get("axis_key") or f"axis_{axis_id:02d}")
+            axis_key_counts[axis_key] = axis_key_counts.get(axis_key, 0) + 1
 
-        info = positions.get(axis_key)
-        if not info:
-            QMessageBox.warning(
-                self,
-                "Capture Selected Target",
-                f"Live position not found for {axis_key}."
+        repeated_axes = sorted(key for key, count in axis_key_counts.items() if count > 1)
+        if len(selected_configs) > 1:
+            warning = (
+                f"Capture {len(selected_configs)} selected target rows from the current PLC snapshot?\n\n"
+                "Each row will receive the current live position of its mapped physical axis."
             )
-            return
+            if repeated_axes:
+                warning += (
+                    "\n\nImportant: multiple selected rows use the same physical axis "
+                    f"({', '.join(repeated_axes)}). Those HOME/WORK rows will receive the same "
+                    "current live value in this capture."
+                )
 
-        live_value = info.get("value")
-        if live_value is None:
-            QMessageBox.warning(
+            answer = QMessageBox.question(
                 self,
-                "Capture Selected Target",
-                f"Live value is empty for {axis_key}."
+                "Capture Multiple Axis Targets",
+                warning,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
-            return
+            if answer != QMessageBox.Yes:
+                return
 
         existing = dict(self.recipe_doc.get("recipe_axis_targets", {}) or {})
-        existing[target_key] = self._make_recipe_target_doc(
-            cfg=cfg,
-            value=live_value,
-            source="PLC_SELECTED_ROW_CAPTURE",
-        )
+        captured_keys: List[str] = []
+        skipped_keys: List[str] = list(missing_target_keys)
+        captured_axis_keys = set()
+
+        for cfg in selected_configs:
+            target_key = str(cfg.get("target_key") or "").strip()
+            axis_id = int(cfg.get("axis_id", 0) or 0)
+            axis_key = str(cfg.get("axis_key") or f"axis_{axis_id:02d}")
+
+            info = positions.get(axis_key)
+            live_value = info.get("value") if isinstance(info, dict) else None
+            if live_value is None:
+                skipped_keys.append(target_key)
+                continue
+
+            existing[target_key] = self._make_recipe_target_doc(
+                cfg=cfg,
+                value=live_value,
+                source=(
+                    "PLC_SELECTED_ROW_CAPTURE"
+                    if len(selected_configs) == 1
+                    else "PLC_SELECTED_ROWS_CAPTURE"
+                ),
+            )
+            captured_keys.append(target_key)
+            captured_axis_keys.add(axis_key)
+
+        if not captured_keys:
+            QMessageBox.warning(
+                self,
+                "Capture Selected Targets",
+                "No selected target could be captured because the mapped live PLC values were unavailable.",
+            )
+            return
 
         self.recipe_doc["recipe_axis_targets"] = existing
         self._sync_legacy_axis_targets_from_recipe_targets()
         self._refresh_axis_table()
+        self._refresh_workflow_header()
 
-        QMessageBox.information(
-            self,
-            "Capture Selected Target",
-            f"Captured {target_key} = {float(live_value):.3f}"
+        if self.status_lbl is not None:
+            self.status_lbl.setText(
+                f"Captured {len(captured_keys)} selected axis targets from "
+                f"{len(captured_axis_keys)} live physical axes."
+            )
+
+        message = (
+            f"Captured targets: {len(captured_keys)}\n"
+            f"Live physical axes used: {len(captured_axis_keys)}"
         )
+        if skipped_keys:
+            message += f"\nSkipped rows/targets: {len(skipped_keys)}"
+
+        if len(captured_keys) == 1:
+            target_key = captured_keys[0]
+            value = existing[target_key].get("value")
+            message += f"\n\n{target_key} = {float(value):.3f}"
+
+        QMessageBox.information(self, "Axis Targets Captured", message)
+
     def _apply_manual_axis_targets_from_table(self, silent=False):
         """
         Apply manually typed target values from the Axis Teaching table.
 
-        Only column 7 = Target Value is editable in manual mode.
+        Only the Present SKU Target column is editable in manual mode.
         """
         if self.axis_table is None:
             return False
@@ -3420,9 +4675,8 @@ class NewSKUPage(QWidget):
         recipe_targets = dict(self.recipe_doc.get("recipe_axis_targets", {}) or {})
 
         for row in range(self.axis_table.rowCount()):
-            group_item = self.axis_table.item(row, 0)
             target_key_item = self.axis_table.item(row, 3)
-            target_value_item = self.axis_table.item(row, 9)
+            target_value_item = self.axis_table.item(row, 12)
 
             if target_key_item is None:
                 continue
@@ -4164,12 +5418,24 @@ class NewSKUPage(QWidget):
         root.addWidget(card)
 
     def _collect_camera_config_links(self) -> dict:
-        root = os.path.join(self.media_path, "camera_profiles")
-        return {"profile_root": root, "exists": os.path.isdir(root)}
+        sku_name = str(self._get_sku_name() or "").strip()
+        profile_path = self.sku_profile_store.camera_profile_path(sku_name)
+        return {
+            "sku_name": sku_name,
+            "profile_root": str(profile_path.parent),
+            "profile_path": str(profile_path),
+            "exists": profile_path.is_file(),
+        }
 
     def _collect_laser_config_links(self) -> dict:
-        root = os.path.join(self.media_path, "laser_profiles")
-        return {"profile_root": root, "exists": os.path.isdir(root)}
+        sku_name = str(self._get_sku_name() or "").strip()
+        profile_path = self.sku_profile_store.laser_profile_path(sku_name)
+        return {
+            "sku_name": sku_name,
+            "profile_root": str(profile_path.parent),
+            "profile_path": str(profile_path),
+            "exists": profile_path.is_file(),
+        }
 
     def _collect_cropping_assets(self) -> dict:
         sku = self._get_sku_name()
@@ -4207,8 +5473,10 @@ class NewSKUPage(QWidget):
             raise ValueError(
                 "Recipe target values are not captured.\n\n"
                 "Go to Axis Teaching and either:\n"
-                "1. Click Capture All Live Targets, or\n"
-                "2. Enter Target Values manually and click Apply Manual Targets."
+                "1. Capture current DB74 axis positions,\n"
+                "2. Copy the active PLC recipe values from DB75,\n"
+                "3. Load a saved PostgreSQL recipe, or\n"
+                "4. Enter target values manually and click Apply Manual Targets."
             )
 
         required_keys = [
@@ -4259,6 +5527,18 @@ class NewSKUPage(QWidget):
         recipe_doc["training_assets"] = self._collect_training_assets()
         recipe_doc["template_assets"] = self._collect_template_assets()
         recipe_doc["threshold_assets"] = self._collect_threshold_assets()
+        if self.recipe_doc.get("axis_targets_loaded_from_database"):
+            recipe_doc["axis_targets_loaded_from_database"] = dict(
+                self.recipe_doc.get("axis_targets_loaded_from_database") or {}
+            )
+        if self.recipe_doc.get("axis_targets_loaded_from_active_plc_recipe"):
+            recipe_doc["axis_targets_loaded_from_active_plc_recipe"] = dict(
+                self.recipe_doc.get("axis_targets_loaded_from_active_plc_recipe") or {}
+            )
+        if self.recipe_doc.get("device_profiles_copied_from"):
+            recipe_doc["device_profiles_copied_from"] = dict(
+                self.recipe_doc.get("device_profiles_copied_from") or {}
+            )
 
         validation_report = dict(self.latest_validation_report or {})
         if not validation_report.get("valid"):
@@ -4306,6 +5586,8 @@ class NewSKUPage(QWidget):
                 )
                 return
             recipe_axis_targets = recipe_doc.get("recipe_axis_targets", {}) or {}
+            camera_config_links = recipe_doc.get("camera_config_links", {}) or {}
+            laser_config_links = recipe_doc.get("laser_config_links", {}) or {}
             template_assets = recipe_doc.get("template_assets", {}) or {}
             sidewall1_template = (template_assets.get("sidewall1", {}) or {}).get("template_image", "Not saved")
             sidewall2_template = (template_assets.get("sidewall2", {}) or {}).get("template_image", "Not saved")
@@ -4405,6 +5687,11 @@ class NewSKUPage(QWidget):
 
                 f"Legacy Camera Axis Targets: {len(recipe_doc.get('camera_axis_targets', {}))}\n"
                 f"Legacy Laser Axis Targets: {len(recipe_doc.get('laser_axis_targets', {}))}\n\n"
+
+                f"Camera Profile JSON:\n{camera_config_links.get('profile_path', 'Not found')}\n"
+                f"Camera Profile Exists: {camera_config_links.get('exists', False)}\n\n"
+                f"Laser Profile JSON:\n{laser_config_links.get('profile_path', 'Not found')}\n"
+                f"Laser Profile Exists: {laser_config_links.get('exists', False)}\n\n"
 
                 f"Sidewall 1 R Template:\n{sidewall1_template}\n\n"
                 f"Sidewall 2 R Template:\n{sidewall2_template}\n\n"

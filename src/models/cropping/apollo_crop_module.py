@@ -593,7 +593,16 @@ def crop_between_r_bands(raw_image: np.ndarray, r_bands: list[Any]) -> tuple[np.
 # =============================================================================
 
 
-def _try_import_existing_r_helpers():
+def _normalize_side_name(side: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(side).strip().lower())
+
+
+def _try_import_existing_r_helpers(side: str):
+    """Load the correct fast R detector for the requested sidewall.
+
+    Sidewall1 uses the existing left-side recipe implementation.
+    Sidewall2 uses the AI-team dedicated right-side implementation.
+    """
     try:
         from . import detect_and_crop_utils as dc  # type: ignore
     except Exception:
@@ -602,23 +611,41 @@ def _try_import_existing_r_helpers():
         except Exception:
             dc = None
 
+    side_clean = _normalize_side_name(side)
+    is_sidewall2 = side_clean in {"sidewall2", "sidewall02", "sw2", "sw02"}
+
     try:
-        from . import detect_and_crop_fast as dcf  # type: ignore
-        from . import r_locator_fast as rlf  # type: ignore
+        if is_sidewall2:
+            try:
+                from . import detect_and_crop_fast_sidewall2 as dcf  # type: ignore
+                from . import r_locator_fast_sidewall2 as rlf  # type: ignore
+            except Exception:
+                import detect_and_crop_fast_sidewall2 as dcf  # type: ignore
+                import r_locator_fast_sidewall2 as rlf  # type: ignore
+            detector_family = "sidewall2_right_recipe"
+        else:
+            try:
+                from . import detect_and_crop_fast as dcf  # type: ignore
+                from . import r_locator_fast as rlf  # type: ignore
+            except Exception:
+                import detect_and_crop_fast as dcf  # type: ignore
+                import r_locator_fast as rlf  # type: ignore
+            detector_family = "sidewall1_left_recipe"
     except Exception:
-        try:
-            import detect_and_crop_fast as dcf  # type: ignore
-            import r_locator_fast as rlf  # type: ignore
-        except Exception:
-            dcf = None
-            rlf = None
+        dcf = None
+        rlf = None
+        detector_family = (
+            "sidewall2_right_recipe"
+            if is_sidewall2
+            else "sidewall1_left_recipe"
+        )
 
-    return dc, dcf, rlf
-
+    return dc, dcf, rlf, detector_family
 
 def _detect_r_bands_with_existing_helpers(
     raw_image: np.ndarray,
     *,
+    side: str,
     r_template_path: Path,
     r_detection_method: str,
     r_recipe_path: Path | None,
@@ -629,17 +656,25 @@ def _detect_r_bands_with_existing_helpers(
     r_min_band_height: int,
     r_row_gap: int,
     r_blur_kernel: tuple[int, int],
+    r_search_x_start_ratio: float,
+    r_search_x_end_ratio: float,
 ) -> tuple[list[Any], list[Any], dict[str, Any]]:
-    dc, dcf, rlf = _try_import_existing_r_helpers()
+    dc, dcf, rlf, detector_family = _try_import_existing_r_helpers(side)
 
     method = str(r_detection_method).strip().lower()
 
     if method == "fast":
         if dcf is None or rlf is None:
             if not r_fast_fallback_to_tiled:
+                required_modules = (
+                    "detect_and_crop_fast_sidewall2.py and "
+                    "r_locator_fast_sidewall2.py"
+                    if detector_family == "sidewall2_right_recipe"
+                    else "detect_and_crop_fast.py and r_locator_fast.py"
+                )
                 raise ImportError(
-                    "Fast R detection requested, but detect_and_crop_fast.py or "
-                    "r_locator_fast.py could not be imported."
+                    "Fast R detection requested, but the required detector "
+                    f"modules could not be imported: {required_modules}."
                 )
         else:
             if r_recipe_path is None:
@@ -649,6 +684,8 @@ def _detect_r_bands_with_existing_helpers(
             match_boxes, r_bands, metadata = dcf.detect_r_bands_fast(raw_image, recipe)
             metadata = dict(metadata or {})
             metadata["r_detection_method_used"] = "fast"
+            metadata["r_detector_family"] = detector_family
+            metadata["r_recipe_path"] = str(r_recipe_path)
             return match_boxes, r_bands, metadata
 
     if dc is not None:
@@ -666,10 +703,13 @@ def _detect_r_bands_with_existing_helpers(
             minimum_band_height=r_min_band_height,
             row_gap=r_row_gap,
             blur_kernel=r_blur_kernel,
+            search_x_start_ratio=float(r_search_x_start_ratio),
+            search_x_end_ratio=float(r_search_x_end_ratio),
         )
 
         metadata = dict(metadata or {})
         metadata["r_detection_method_used"] = "tiled_existing_helper"
+        metadata["r_detector_family"] = detector_family
         return match_boxes, r_bands, metadata
 
     return _detect_r_bands_builtin_template(
@@ -809,6 +849,8 @@ def crop_resize_sidewall_image(
     r_min_band_height: int = 20,
     r_row_gap: int = 5,
     r_blur_kernel: tuple[int, int] = (5, 5),
+    r_search_x_start_ratio: float = 0.0,
+    r_search_x_end_ratio: float = 1.0,
     clear_output: bool = True,
 ) -> CropResult:
     raw_image_path = Path(raw_image_path)
@@ -824,6 +866,7 @@ def crop_resize_sidewall_image(
 
     match_boxes, r_bands, detection_metadata = _detect_r_bands_with_existing_helpers(
         raw_image,
+        side=side,
         r_template_path=Path(r_template_path),
         r_detection_method=r_detection_method,
         r_recipe_path=Path(r_recipe_path) if r_recipe_path else None,
@@ -834,6 +877,8 @@ def crop_resize_sidewall_image(
         r_min_band_height=int(r_min_band_height),
         r_row_gap=int(r_row_gap),
         r_blur_kernel=tuple(r_blur_kernel),
+        r_search_x_start_ratio=float(r_search_x_start_ratio),
+        r_search_x_end_ratio=float(r_search_x_end_ratio),
     )
 
     crop, crop_start_y, crop_end_y, r_anchor = crop_between_r_bands(
@@ -1253,6 +1298,8 @@ def crop_sidewall_batch(
                 r_min_band_height=job.get("r_min_band_height", 20),
                 r_row_gap=job.get("r_row_gap", 5),
                 r_blur_kernel=tuple(job.get("r_blur_kernel", [5, 5])),
+                r_search_x_start_ratio=job.get("r_search_x_start_ratio", 0.0),
+                r_search_x_end_ratio=job.get("r_search_x_end_ratio", 1.0),
                 clear_output=job.get("clear_output", True),
             )
             result.metadata["resize"] = resize_meta

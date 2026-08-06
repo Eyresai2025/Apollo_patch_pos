@@ -24,10 +24,11 @@ class AxisStatusService:
     - This service does NOT write anything to PLC.
     """
 
-    def __init__(self, media_path: str, env_path: Optional[str] = None):
+    def __init__(self, media_path: str, env_path: Optional[str] = None, plc_client=None):
         self.media_path = Path(media_path)
         self.env_path = Path(env_path) if env_path else self.media_path.parent / ".env"
         self.env = self._load_env_file(self.env_path)
+        self.plc_client = plc_client
 
         self.deployment = self.env.get("DEPLOYMENT", "False")
         self.refresh_ms = self._env_int("AXIS_STATUS_REFRESH_MS", 1000)
@@ -118,12 +119,17 @@ class AxisStatusService:
             }
 
     def _get_plc_client(self):
+        """Return an explicitly injected PLC client first, then shared hardware state."""
+        if self.plc_client is not None:
+            return self.plc_client
+
         state = self._get_hardware_state()
         return state.get("plc_client")
 
-    # ------------------------------------------------------------
-    # PLC READ HELPERS
-    # ------------------------------------------------------------
+    def set_plc_client(self, plc_client):
+        """Update the shared PLC client used for DB74/DB75 read-only status calls."""
+        self.plc_client = plc_client
+
     def _read_bytes(self, client, db: int, byte: int, size: int):
         if client is None:
             return None

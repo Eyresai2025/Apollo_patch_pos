@@ -12,7 +12,7 @@
 #       TriggerMode     = On
 #   - Python executes TriggerSoftware after PLC rising edge
 #   - Same physical camera can have multiple roles
-#       Example: serial 254901431 -> innerwall(main) + bead(bead)
+#       Example: serial 254901428 -> innerwall(main) + bead(bead)
 #   - One CameraActor per physical camera, so duplicate serial is never opened twice
 #   - SKU camera settings are applied through apply_camera_profile() before streams start
 #   - Software FFC is applied after stitching and before images are returned to the app
@@ -169,7 +169,7 @@ TRIGGER_ACTIVATION = _env_str("CAM_TRIGGER_ACTIVATION", "RisingEdge")
 
 # Production flow: BEAD group first, INNERWALL second. MAIN is pre-armed
 # while LOW and may latch only after the valid BEAD edge. Shared serial
-# Shared 4K serial 254901431 uses AcquisitionStart/software triggering and is
+# Shared 4K serial 254901428 uses AcquisitionStart/software triggering and is
 # fully re-armed between its bead and innerwall roles.
 PLC_TRIGGER_SEQUENCE = "BEAD_GROUP_THEN_LATCHED_MAIN_INNER_ONLY"
 MAIN_TRIGGER_POLICY = "LATCH_CURRENT_EDGE_RELEASE_WHEN_SHARED_INNER_CAMERA_READY"
@@ -226,7 +226,7 @@ SERIALIZE_CHUNK_COPY = _env_bool("CAM_SERIALIZE_CHUNK_COPY", True)
 INNER_TRIGGER_WARN_MS = max(0.0, _env_float("CAM_INNER_TRIGGER_WARN_MS", 250.0))
 CAMERA_BUFFER_COPY_LOCK = threading.Lock()
 
-# Full stop/start reset for shared 4K serial 254901431 between BEAD and INNERWALL.
+# Full stop/start reset for shared 4K serial 254901428 between BEAD and INNERWALL.
 SHARED_FULL_REARM_STOP_DELAY_SEC = _env_float(
     "CAM_SHARED_FULL_REARM_STOP_DELAY_SEC", 0.20
 )
@@ -256,17 +256,14 @@ SHARED_TRIGGER_RECOVERY_RETRIES = max(
 PARALLEL = _env_bool("CAM_PARALLEL_CAPTURE", True)
 
 # Shared inner/bead behavior from final standalone.
-# True = bead and innerwall share serial 254901431, opened only once.
+# True = bead and innerwall share serial 254901428, opened only once.
 SHARED_INNER_BEAD = _env_bool("CAM_SHARED_INNER_BEAD", True)
-_configured_shared_serial = _env_str("CAM_INNERWALL_SERIAL", "254901431")
-# Automatic migration: older .env files may still contain the removed 2K serial.
-SHARED_INNER_BEAD_SERIAL = (
-    "254901431"
-    if _configured_shared_serial in ("", "250500042")
-    else str(_configured_shared_serial)
-)
+_configured_shared_serial = _env_str("CAM_INNERWALL_SERIAL", "254901428")
+# The current machine uses serial 254901428 for both BEAD and INNERWALL.
+# The .env value is the source of truth; no legacy 2K migration is applied.
+SHARED_INNER_BEAD_SERIAL = str(_configured_shared_serial or "254901428")
 
-# Shared 254901431 is now a normal 4K AcquisitionStart camera. It uses the
+# Shared 254901428 is a normal 4K AcquisitionStart camera. It uses the
 # same chunk stitching as all other cameras and a full stream re-arm between roles.
 SHARED_FRAME_START_MODE = False
 SHARED_CAMERA_HEIGHT = _env_int("CAM_SHARED_CAMERA_HEIGHT", 15000)
@@ -721,26 +718,6 @@ def get_camera_role_config() -> List[Dict[str, Any]]:
             ),
         }
 
-        # Migrate old 2K .env defaults automatically. This is applied only when
-        # CAM_INNERWALL_SERIAL still contains the removed serial, so new 4K
-        # profiles with user-entered values are not overwritten.
-        if (
-            side_name in ("innerwall", "bead")
-            and SHARED_INNER_BEAD
-            and str(_configured_shared_serial) == "250500042"
-        ):
-            cfg.update({
-                "serial": str(SHARED_INNER_BEAD_SERIAL),
-                "width": 4096,
-                "camera_height": 15000,
-                "final_height": 90000,
-                "pixel_format": "Mono8",
-                "exposure_time": 61.0,
-                "gain": 24.0,
-                "acquisition_line_rate_enable": True,
-                "acquisition_line_rate": 11575.0,
-                "acquisition_mode": "Continuous",
-            })
 
         configs.append(cfg)
 
@@ -774,7 +751,7 @@ def get_physical_camera_config() -> List[Dict[str, Any]]:
     One entry per physical camera serial.
     The first role in CAMERA_ROLE_ORDER decides physical camera node settings.
     Therefore the shared innerwall/bead camera uses the INNERWALL pixel format.
-    This prevents duplicate opening of shared 4K serial 254901431.
+    This prevents duplicate opening of shared 4K serial 254901428.
     """
     role_configs = get_camera_role_config()
     physical: Dict[str, Dict[str, Any]] = {}
@@ -3065,7 +3042,7 @@ class MultiCameraManager:
         from the SKU JSON. The .env remains only a startup fallback and still
         owns PLC/trigger-address settings.
 
-        For shared serial 254901431, BEAD and INNERWALL are stored as separate
+        For shared serial 254901428, BEAD and INNERWALL are stored as separate
         logical profiles and are switched during the existing full re-arm.
         """
         if not isinstance(profile, dict):
@@ -3082,25 +3059,9 @@ class MultiCameraManager:
 
             cfg = dict(raw_cfg)
             if side_name in ("innerwall", "bead") and SHARED_INNER_BEAD:
-                old_serial = str(cfg.get("serial", "")).strip()
+                # BEAD and INNERWALL always use the current shared physical camera.
+                # Preserve each role's independent geometry/exposure/gain/line-rate values.
                 cfg["serial"] = str(SHARED_INNER_BEAD_SERIAL)
-                if old_serial == "250500042":
-                    cfg.update({
-                        "width": 4096,
-                        "camera_height": 15000,
-                        "height": 15000,
-                        "final_height": 90000,
-                        "pixel_format": "Mono8",
-                        "acquisition_line_rate_enable": True,
-                        "acquisition_line_rate": 11575.0,
-                        "exposure_time": 61.0,
-                        "gain": 24.0,
-                    })
-                    log(
-                        f"[CAMERA PROFILE] Migrated legacy shared 2K profile "
-                        f"for side={side_name} to 4K "
-                        f"serial={SHARED_INNER_BEAD_SERIAL}"
-                    )
             cameras_cfg[side_name] = cfg
 
         if not cameras_cfg:

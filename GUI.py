@@ -600,8 +600,8 @@ class MainWindow(QMainWindow):
             )
         )
         self.copy_full_text = (
-            "Copyright © Radome Technologies and Services Pvt Ltd | "
-            "All Rights Reserved | Our privacy policy | www.radometechnologies.com | "
+            "Copyright © Eyres.AI Solutions Pvt Ltd | "
+            "All Rights Reserved | Our privacy policy | www.eyresaisolutions.com | "
             "Version: v1.0"
         )
         self.copy_padded_text = self.copy_full_text
@@ -2717,7 +2717,7 @@ class MainWindow(QMainWindow):
 
         logo_label = QLabel()
         logo_pixmap = QPixmap(
-            os.path.join(MEDIA_PATH, "img", "Apollo_white-removebg-preview.png")
+            os.path.join(MEDIA_PATH, "img", "LOGO-02.png")
         )
         if not logo_pixmap.isNull():
             logo_label.setPixmap(
@@ -2846,7 +2846,7 @@ class MainWindow(QMainWindow):
 
         bottom_logo = QLabel()
         bottom_pixmap = QPixmap(
-            os.path.join(MEDIA_PATH, "img", "Radome-removebg-preview.png")
+            os.path.join(MEDIA_PATH, "img", "LOGO-02s.png")
         )
         if not bottom_pixmap.isNull():
             bottom_logo.setPixmap(

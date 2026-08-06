@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -129,6 +130,49 @@ class SKUDeviceProfileStore:
             raise FileNotFoundError(f"Laser profile not found: {path}")
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+
+    def copy_camera_profile(self, source_sku: str, destination_sku: str) -> Path:
+        """Copy one SKU camera JSON into another SKU safely.
+
+        The complete camera settings are preserved, including serial mappings,
+        image geometry, line rates, exposure, gain, transport settings and the
+        separate Inner/Bead logical profiles.  Destination identity and copy
+        traceability are rewritten before the normal save/upsert path is used.
+        """
+        source = str(source_sku or "").strip()
+        destination = str(destination_sku or "").strip()
+        if not source or not destination:
+            raise ValueError("Source SKU and destination SKU are required")
+        if source == destination:
+            raise ValueError("Source and destination camera profile SKU are the same")
+
+        profile = deepcopy(self.load_camera_profile(source))
+        profile["sku"] = destination
+        profile["sku_name"] = destination
+        profile["copied_from_sku"] = source
+        profile["copied_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return self.save_camera_profile(destination, profile)
+
+    def copy_laser_profile(self, source_sku: str, destination_sku: str) -> Path:
+        """Copy one SKU laser JSON into another SKU safely.
+
+        The complete laser mapping/settings are preserved, including serials,
+        UserSet selection, scan/AOI parameters, trigger settings and output
+        configuration. Destination identity and provenance are rewritten.
+        """
+        source = str(source_sku or "").strip()
+        destination = str(destination_sku or "").strip()
+        if not source or not destination:
+            raise ValueError("Source SKU and destination SKU are required")
+        if source == destination:
+            raise ValueError("Source and destination laser profile SKU are the same")
+
+        profile = deepcopy(self.load_laser_profile(source))
+        profile["sku"] = destination
+        profile["sku_name"] = destination
+        profile["copied_from_sku"] = source
+        profile["copied_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return self.save_laser_profile(destination, profile)
 
     def _upsert_to_postgres(
         self,

@@ -58,7 +58,9 @@ from src.models.feature_thresh.config import (
 from src.models.feature_thresh.patchcore_scorer import PatchCoreScorer
 from src.models.five_side_patchcore import detect_and_crop_utils as dc
 from src.models.five_side_patchcore import detect_and_crop_fast as dcf
+from src.models.five_side_patchcore import detect_and_crop_fast_sidewall2 as dcf_sw2
 from src.models.five_side_patchcore import r_locator_fast as rlf
+from src.models.five_side_patchcore import r_locator_fast_sidewall2 as rlf_sw2
 from src.models.five_side_patchcore import tread_offset_utils as tu
 
 logger = get_logger(__name__, component="PATCHCORE")
@@ -1016,9 +1018,14 @@ class PatchCoreSideRuntime:
                     f"Got: {requested_method!r}"
                 )
 
-            self.fast_r_recipe: Optional[rlf.Recipe] = None
+            self.fast_r_recipe: Optional[Any] = None
             if self.artifacts.r_recipe_path is not None:
-                self.fast_r_recipe = rlf.Recipe.load(self.artifacts.r_recipe_path)
+                recipe_type = (
+                    rlf_sw2.Recipe
+                    if self.side_name == "sidewall2"
+                    else rlf.Recipe
+                )
+                self.fast_r_recipe = recipe_type.load(self.artifacts.r_recipe_path)
                 resolved_template = _resolve_recipe_template_path(
                     self.artifacts.r_recipe_path,
                     self.fast_r_recipe.template_path,
@@ -1387,7 +1394,12 @@ class PatchCoreSideRuntime:
 
         if self.r_detection_method == "fast":
             assert self.fast_r_recipe is not None
-            match_boxes, r_bands, detection_metadata = dcf.detect_r_bands_fast(
+            fast_detector = (
+                dcf_sw2
+                if self.side_name == "sidewall2"
+                else dcf
+            )
+            match_boxes, r_bands, detection_metadata = fast_detector.detect_r_bands_fast(
                 raw_image,
                 self.fast_r_recipe,
                 scale=self.r_fast_scale,
