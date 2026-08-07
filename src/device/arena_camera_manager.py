@@ -2,10 +2,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 import ctypes
+import os
 import time
 
 import numpy as np
 import cv2
+
+from src.device.camera_profile_manager import camera_supports_line_rate
 
 
 @dataclass
@@ -23,6 +26,7 @@ class ArenaCameraManager:
         self.arena_available = False
         self.current_settings_by_serial = {}
         self.streaming_serials = set()
+        self.allowed_camera_serials = self._load_allowed_camera_serials()
 
         try:
             from arena_api.system import system
@@ -33,41 +37,187 @@ class ArenaCameraManager:
             print("[ARENA] Arena SDK not available:", e)
             self.arena_available = False
 
+    def _load_allowed_camera_serials(self):
+        """Return the exact Lucid camera serials allowed on the Device Camera tab.
+
+        Both Lucid line-scan cameras and Teledyne laser profilers are GigE Vision
+        devices. Arena can therefore enumerate the laser profilers too. Opening
+        every enumerated GigE device is unsafe because the Sapera-controlled
+        lasers may reject Arena control with GC_ERR_ACCESS_DENIED.
+
+        The camera role serials in .env are the source of truth. An optional
+        DEVICE_CAMERA_ALLOWED_SERIALS comma-separated value can override them.
+        """
+        explicit = str(os.getenv("DEVICE_CAMERA_ALLOWED_SERIALS", "")).strip()
+        if explicit:
+            serials = {item.strip() for item in explicit.split(",") if item.strip()}
+        else:
+            defaults = {
+                "CAM_SIDEWALL1_SERIAL": "254901432",
+                "CAM_SIDEWALL2_SERIAL": "254901431",
+                "CAM_TREAD_SERIAL": "254901430",
+                "CAM_INNERWALL_SERIAL": "254901428",
+                "CAM_BEAD_SERIAL": "254901428",
+            }
+            serials = {
+                str(os.getenv(key, default)).strip()
+                for key, default in defaults.items()
+                if str(os.getenv(key, default)).strip()
+            }
+
+        print(
+            "[ARENA] Device Camera allowed serials: "
+            + ", ".join(sorted(serials))
+        )
+        return serials
+
+    @staticmethod
+    def _device_info_value(info, *keys, default="-"):
+        """Read a value from Arena device-info dictionaries across SDK versions."""
+        for key in keys:
+            try:
+                value = info.get(key)
+            except Exception:
+                value = None
+            if value not in (None, ""):
+                return value
+        return default
+
     # ---------------------------------------------------------------------
     # Camera discovery
     # ---------------------------------------------------------------------
     def refresh_cameras(self):
+        """Discover and open cameras one at a time.
+
+        Opening every discovered camera in one ``create_device()`` call is unsafe:
+        if one camera is owned by another process, Arena can raise after partially
+        opening other cameras. Opening per device keeps failures isolated and also
+        identifies the exact serial that is busy.
+        """
         camera_list = []
 
         if not self.arena_available:
             print("[ARENA] Cannot refresh. Arena SDK not available.")
             return camera_list
 
+        self.close_all()
+        self.devices.clear()
+
         try:
-            self.close_all()
+            device_infos = list(self.system.device_infos)
+        except Exception as e:
+            print(f"[ARENA] Device enumeration failed: {e}")
+            return camera_list
 
-            devices = self.system.create_device()
-            self.devices.clear()
+        if not device_infos:
+            print("[ARENA] No Lucid cameras discovered.")
+            return camera_list
 
-            for dev in devices:
-                serial = str(self._get_node_value(dev, "DeviceSerialNumber", "-"))
-                model = str(self._get_node_value(dev, "DeviceModelName", "-"))
-                ip_raw = self._get_node_value(dev, "GevCurrentIPAddress", "-")
-                ip = self._format_ip(ip_raw)
+        skipped_non_camera = []
 
-                self.devices[serial] = dev
+        for info in device_infos:
+            serial = str(
+                self._device_info_value(
+                    info,
+                    "serial",
+                    "serial_number",
+                    "DeviceSerialNumber",
+                    default="-",
+                )
+            ).strip()
+            model = str(
+                self._device_info_value(
+                    info,
+                    "model",
+                    "model_name",
+                    "DeviceModelName",
+                    default="-",
+                )
+            ).strip()
+            vendor = str(
+                self._device_info_value(
+                    info,
+                    "vendor",
+                    "vendor_name",
+                    "DeviceVendorName",
+                    default="-",
+                )
+            ).strip()
+            ip = self._format_ip(
+                self._device_info_value(
+                    info,
+                    "ip",
+                    "ip_address",
+                    "GevCurrentIPAddress",
+                    default="-",
+                )
+            )
 
-                camera_list.append(
-                    CameraInfo(
-                        serial=serial,
-                        model=model,
-                        ip=ip,
-                        status="Connected"
-                    )
+            # Important: never ask Arena to open Teledyne/Sapera laser profilers.
+            # Only the camera serials configured for Apollo camera roles are allowed.
+            if serial not in self.allowed_camera_serials:
+                skipped_non_camera.append(serial)
+                print(
+                    f"[ARENA] Skipping non-camera GigE device | serial={serial} "
+                    f"model={model} vendor={vendor} ip={ip}"
+                )
+                continue
+
+            dev = None
+
+            try:
+                opened = self.system.create_device([info])
+                if not opened:
+                    raise RuntimeError("Arena returned no device handle")
+
+                dev = opened[0]
+                serial = str(self._get_node_value(dev, "DeviceSerialNumber", serial))
+                model = str(self._get_node_value(dev, "DeviceModelName", model))
+                ip = self._format_ip(
+                    self._get_node_value(dev, "GevCurrentIPAddress", info.get("ip", ip))
                 )
 
-        except Exception as e:
-            print("[ARENA] refresh_cameras error:", e)
+                self.devices[serial] = dev
+                camera_list.append(
+                    CameraInfo(serial=serial, model=model, ip=ip, status="Connected")
+                )
+                print(f"[ARENA] Camera opened | serial={serial} model={model} ip={ip}")
+
+            except Exception as e:
+                if dev is not None:
+                    try:
+                        self.system.destroy_device(dev)
+                    except Exception:
+                        pass
+
+                error_text = str(e)
+                lowered = error_text.lower()
+                if "access_denied" in lowered or "access denied" in lowered or "security" in lowered:
+                    status = "Busy / Access denied"
+                else:
+                    status = "Open failed"
+
+                camera_list.append(
+                    CameraInfo(serial=serial, model=model, ip=ip, status=status)
+                )
+                print(
+                    f"[ARENA] Camera open failed | serial={serial} model={model} "
+                    f"ip={ip} status={status}\n{error_text}"
+                )
+
+        if skipped_non_camera:
+            print(
+                "[ARENA] Non-camera GigE devices ignored: "
+                + ", ".join(sorted(set(skipped_non_camera)))
+            )
+
+        discovered_serials = {item.serial for item in camera_list}
+        missing = sorted(self.allowed_camera_serials - discovered_serials)
+        if missing:
+            print(
+                "[ARENA] Configured camera serials not discovered/opened: "
+                + ", ".join(missing)
+            )
 
         return camera_list
 
@@ -173,10 +323,15 @@ class ArenaCameraManager:
 
             exposure_us = float(settings.get("exposure_time", 150.0))
             gain_db = float(settings.get("gain", 0.0))
-            line_rate = float(settings.get("acquisition_line_rate", 4096.0))
+            supports_line_rate = camera_supports_line_rate(serial)
+            line_rate_enabled = bool(
+                settings.get("acquisition_line_rate_enable", True)
+            ) and supports_line_rate
+            line_rate = float(settings.get("acquisition_line_rate", 4096.0) or 0.0)
 
             # Use 1500 as safe default. Use 9000 only after Jumbo Frames are enabled in Windows NIC.
             packet_size = int(settings.get("packet_size", 1500))
+            packet_delay = int(settings.get("packet_delay", 1000))
 
             # Trigger must be off before geometry/network changes.
             self._set_node(nm, "TriggerMode", "Off")
@@ -194,22 +349,39 @@ class ArenaCameraManager:
             self._set_node(nm, "GainAuto", "Off")
             self._set_node(nm, "Gain", gain_db)
 
-            # Line rate
-            self._set_node(nm, "AcquisitionLineRateEnable", True)
-            self._set_node(nm, "AcquisitionLineRate", line_rate)
+            # Line rate. Some 2K cameras do not expose these nodes at all.
+            if supports_line_rate:
+                self._set_node(
+                    nm,
+                    "AcquisitionLineRateEnable",
+                    bool(line_rate_enabled),
+                )
+                if line_rate_enabled and line_rate > 0:
+                    self._set_node(nm, "AcquisitionLineRate", line_rate)
+            else:
+                print(
+                    f"[ARENA] {serial} has no line-rate nodes; "
+                    "AcquisitionLineRateEnable/AcquisitionLineRate skipped"
+                )
 
             # Acquisition
             self._set_node(nm, "AcquisitionMode", "Continuous", required=True)
 
-            # Network packet size
+            # Network transport settings
             self._set_node(nm, "GevSCPSPacketSize", packet_size)
+            self._set_node(nm, "GevSCPD", packet_delay)
 
             if mode == "preview_free_run":
                 self._set_node(nm, "TriggerMode", "Off", required=True)
 
                 print("[ARENA] Applied SOFTWARE/FREE-RUN preview settings")
-                self.current_settings_by_serial[serial] = dict(settings)
-                self.current_settings_by_serial[serial]["packet_size"] = packet_size
+                normalized_settings = dict(settings)
+                normalized_settings["packet_size"] = packet_size
+                normalized_settings["acquisition_line_rate_enable"] = bool(line_rate_enabled)
+                normalized_settings["acquisition_line_rate"] = (
+                    line_rate if line_rate_enabled else 0.0
+                )
+                self.current_settings_by_serial[serial] = normalized_settings
                 return True, "Software/free-run preview settings applied"
 
             # Hardware trigger production mode
@@ -267,9 +439,14 @@ class ArenaCameraManager:
             )
 
             print("[ARENA] Applied HARDWARE TRIGGER Line0 settings")
-            self.current_settings_by_serial[serial] = dict(settings)
-            self.current_settings_by_serial[serial]["packet_size"] = packet_size
-            self.current_settings_by_serial[serial]["trigger_selector"] = trigger_selector
+            normalized_settings = dict(settings)
+            normalized_settings["packet_size"] = packet_size
+            normalized_settings["trigger_selector"] = trigger_selector
+            normalized_settings["acquisition_line_rate_enable"] = bool(line_rate_enabled)
+            normalized_settings["acquisition_line_rate"] = (
+                line_rate if line_rate_enabled else 0.0
+            )
+            self.current_settings_by_serial[serial] = normalized_settings
             return True, "Hardware trigger settings applied"
 
         except Exception as e:
@@ -295,9 +472,18 @@ class ArenaCameraManager:
 
         try:
             packet_size = int(settings.get("packet_size", 1500))
-            print(f"[ARENA] Starting stream for {serial} with packet_size={packet_size}")
+            stream_buffers = int(settings.get("num_stream_buffers", 16))
+            print(
+                f"[ARENA] Starting stream for {serial} with "
+                f"packet_size={packet_size}, buffers={stream_buffers}"
+            )
 
-            dev.start_stream()
+            try:
+                dev.start_stream(buffer_count=stream_buffers)
+            except TypeError:
+                # Compatibility fallback for Arena API releases that do not
+                # accept buffer_count as a keyword argument.
+                dev.start_stream()
             self.streaming_serials.add(serial)
 
             print(f"[ARENA] Stream started for {serial} | mode={mode}")
@@ -470,6 +656,7 @@ class ArenaCameraManager:
 
         self.streaming_serials.clear()
 
+        # Destroy only camera handles owned by this Device-page manager.
         for serial, dev in list(self.devices.items()):
             try:
                 dev.stop_stream()
@@ -477,14 +664,15 @@ class ArenaCameraManager:
             except Exception:
                 pass
 
-        try:
-            if self.arena_available and self.system is not None and self.devices:
-                self.system.destroy_device()
-                print("[ARENA] system.destroy_device() done")
-        except Exception as e:
-            print(f"[ARENA] destroy_device warning: {e}")
+            try:
+                if self.arena_available and self.system is not None:
+                    self.system.destroy_device(dev)
+                    print(f"[ARENA] destroy_device done for {serial}")
+            except Exception as e:
+                print(f"[ARENA] destroy_device warning for {serial}: {e}")
 
         self.devices.clear()
         self.current_settings_by_serial.clear()
 
         print("[ARENA] Device Page camera cleanup completed")
+

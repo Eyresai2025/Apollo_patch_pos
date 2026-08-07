@@ -218,6 +218,7 @@ class LiveInspectionWorker(QObject):
         media_root,
         sku_name="SKU_001",
         tyre_name="195_65_R15",
+        barcode="",
         device="cuda",
         seg_model_a_path=None,
         seg_model_b_path=None,
@@ -229,6 +230,7 @@ class LiveInspectionWorker(QObject):
         self.media_root = media_root
         self.sku_name = sku_name
         self.tyre_name = tyre_name
+        self.barcode = barcode
         self.device = device
         self.seg_model_a_path = seg_model_a_path
         self.seg_model_b_path = seg_model_b_path
@@ -247,6 +249,7 @@ class LiveInspectionWorker(QObject):
                 media_root=self.media_root,
                 sku_name=self.sku_name,
                 tyre_name=self.tyre_name,
+                barcode=self.barcode,
                 device=self.device,
                 seg_model_a_path=self.seg_model_a_path,
                 seg_model_b_path=self.seg_model_b_path,
@@ -381,27 +384,36 @@ class LatestCycleImagesWorker(QObject):
                 if not os.path.isdir(date_root):
                     continue
 
-                for cycle_name in os.listdir(date_root):
-                    cycle_dir = os.path.join(date_root, cycle_name)
-
-                    if not os.path.isdir(cycle_dir):
+                # Support both legacy date/Cycle_N and barcode-aware
+                # date/<BARCODE>/Cycle_N output layouts.
+                for first_level_name in os.listdir(date_root):
+                    first_level = os.path.join(date_root, first_level_name)
+                    if not os.path.isdir(first_level):
                         continue
 
-                    if not cycle_name.startswith("Cycle_"):
-                        continue
+                    if first_level_name.startswith("Cycle_"):
+                        possible_cycles = [(first_level_name, first_level)]
+                    else:
+                        possible_cycles = [
+                            (name, os.path.join(first_level, name))
+                            for name in os.listdir(first_level)
+                            if name.startswith("Cycle_")
+                            and os.path.isdir(os.path.join(first_level, name))
+                        ]
 
-                    try:
-                        cycle_num = int(cycle_name.replace("Cycle_", "").strip())
-                    except Exception:
-                        cycle_num = -1
+                    for cycle_name, cycle_dir in possible_cycles:
+                        try:
+                            cycle_num = int(cycle_name.replace("Cycle_", "").strip())
+                        except Exception:
+                            cycle_num = -1
 
-                    cycle_candidates.append(
-                        {
-                            "cycle_dir": cycle_dir,
-                            "cycle_num": cycle_num,
-                            "mtime": os.path.getmtime(cycle_dir),
-                        }
-                    )
+                        cycle_candidates.append(
+                            {
+                                "cycle_dir": cycle_dir,
+                                "cycle_num": cycle_num,
+                                "mtime": os.path.getmtime(cycle_dir),
+                            }
+                        )
 
         if not cycle_candidates:
             return None

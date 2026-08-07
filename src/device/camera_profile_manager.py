@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from copy import deepcopy
 
@@ -12,6 +13,26 @@ ZONE_KEYS = {
 }
 
 ZONE_NAMES = list(ZONE_KEYS.keys())
+
+
+def _csv_env_set(name: str, default: str = "") -> set[str]:
+    raw = os.getenv(name, default)
+    return {
+        item.strip()
+        for item in str(raw or "").split(",")
+        if item.strip()
+    }
+
+
+NO_LINE_RATE_SERIALS = _csv_env_set(
+    "CAM_NO_LINE_RATE_SERIALS",
+    "",
+)
+
+
+def camera_supports_line_rate(serial: str) -> bool:
+    """Return False for camera models/serials that expose no line-rate nodes."""
+    return str(serial or "").strip() not in NO_LINE_RATE_SERIALS
 
 
 DEFAULT_CAMERA_SETTINGS = {
@@ -42,6 +63,33 @@ DEFAULT_CAMERA_SETTINGS = {
     "packet_size": 9000,
     "packet_delay": 1000,
 }
+
+
+def default_camera_settings_for(serial: str, role_key: str = "") -> dict:
+    """Build serial-aware defaults used by the Device page.
+
+    Serial-specific line-rate exceptions are controlled only through
+    CAM_NO_LINE_RATE_SERIALS. The current production mapping uses four 4K
+    cameras, so the default exception list is empty.
+    """
+    serial = str(serial or "").strip()
+    role_key = str(role_key or "").strip()
+
+    settings = deepcopy(DEFAULT_CAMERA_SETTINGS)
+    settings["serial"] = serial
+    settings["role"] = role_key
+
+    if role_key == "bead":
+        settings["final_height"] = 60000
+    elif role_key == "inner":
+        settings["final_height"] = 75000
+
+    if not camera_supports_line_rate(serial):
+        settings["width"] = 2048
+        settings["acquisition_line_rate_enable"] = False
+        settings["acquisition_line_rate"] = 0.0
+
+    return settings
 
 
 class CameraProfileManager:
@@ -75,10 +123,7 @@ class CameraProfileManager:
         }
 
         for _zone_name, zone_key in ZONE_KEYS.items():
-            settings = deepcopy(DEFAULT_CAMERA_SETTINGS)
-            if zone_key in ("inner", "bead"):
-                settings["final_height"] = 60000
-            profile["cameras"][zone_key] = settings
+            profile["cameras"][zone_key] = default_camera_settings_for("", zone_key)
 
         return profile
 

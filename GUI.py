@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QApplication, QDialog, QFrame, QHBoxLayout, QLineEdit, QLabel,
     QMainWindow, QMessageBox, QPushButton, QSizePolicy, QStackedWidget,
     QStatusBar, QToolButton, QVBoxLayout, QWidget, QMenu, QComboBox,
+    QInputDialog,
 )
 from PyQt5.QtCore import QSize, QTimer, Qt, pyqtSignal, QEvent
 from PyQt5.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
@@ -47,6 +48,7 @@ from src.COMMON.security import (
 from src.Pages.login_window import LoginWindow
 from src.Pages.user_management_page import UserManagementPage
 from src.Pages.inspection_history_page import InspectionHistoryPage
+from src.Pages.barcode_recall_page import BarcodeRecallPage
 from src.Pages.test_mode_page import TestModePage
 from src.Pages.new_sku_page import NewSKUPage
 from src.Pages.repeatability_page import RepeatabilityPage
@@ -61,6 +63,11 @@ from src.Main_cam import CAMERA_CAPTURE_ENABLED, start_continuous_cycle
 from src.COMMON.cycle_engine import (
     get_active_inspection_sides,
     validate_sku_runtime_assets,
+)
+from src.COMMON.barcode_context import (
+    BarcodeContext,
+    build_barcode_context,
+    existing_barcode_cycles,
 )
 from src.COMMON.system_check import show_startup_system_popup
 from src.COMMON.full_hardware_check import (
@@ -443,6 +450,7 @@ class MainWindow(QMainWindow):
         self.capture_settings_page = None
         self.user_management_page = None
         self.inspection_history_page = None
+        self.barcode_recall_page = None
         self.roi_measurement_window = None
         self._last_stack_widget = None
         self.available_skus = []
@@ -500,10 +508,13 @@ class MainWindow(QMainWindow):
         )
         self.available_skus = get_available_sku_names(MEDIA_PATH)
         self.selected_live_sku = ""
-        self.selected_live_tyre_name = ""
+        self.selected_live_tyre_name = app_config.inference.default_tyre_name
+        self.selected_live_barcode = ""
         self.pending_live_start = False
         self.pending_live_sku = None
         self.pending_live_tyre_name = None
+        self.pending_live_barcode = None
+        self._barcode_dialog_active = False
         self.current_recipe_context = {}
 
         # Lightweight Live Page component health service
@@ -866,13 +877,13 @@ class MainWindow(QMainWindow):
         self.available_skus = get_available_sku_names(MEDIA_PATH)
         return self.available_skus
     
-    def update_live_info_cards(self, sku_name, tyre_name):
+    def update_live_info_cards(self, sku_name, barcode):
         self.selected_live_sku = sku_name
-        self.selected_live_tyre_name = tyre_name
+        self.selected_live_barcode = str(barcode or "").strip()
         if hasattr(self, "selected_sku_value_label"):
             self.selected_sku_value_label.setText(sku_name or "--")
         if hasattr(self, "selected_tyre_value_label"):
-            self.selected_tyre_value_label.setText(tyre_name or "--")
+            self.selected_tyre_value_label.setText(self.selected_live_barcode or "--")
     
     # ========================================================================
     # THROTTLED IMAGE REFRESH
@@ -1006,6 +1017,132 @@ class MainWindow(QMainWindow):
     # LIVE INSPECTION WITH THREAD SAFETY    
     # ========================================================================
     
+    def _validated_barcode_context(
+        self,
+        raw_barcode,
+        sku_name,
+        *,
+        parent=None,
+        confirm_retest=True,
+    ):
+        dialog_parent = parent or self
+        try:
+            context = build_barcode_context(raw_barcode)
+        except ValueError as error:
+            QMessageBox.warning(
+                dialog_parent,
+                "Barcode Number",
+                str(error),
+            )
+            return None
+
+        try:
+            cycles = existing_barcode_cycles(
+                MEDIA_PATH,
+                sku_name,
+                context.raw,
+            )
+        except ValueError as error:
+            QMessageBox.warning(
+                dialog_parent,
+                "Barcode Number",
+                str(error),
+            )
+            return None
+        if cycles and confirm_retest:
+            latest = max(cycles)
+            reply = QMessageBox.question(
+                dialog_parent,
+                "Barcode Already Exists",
+                f"Barcode {context.raw} already has Cycle_1 through "
+                f"Cycle_{latest} for today's {sku_name}.\n\n"
+                f"Continue as a retest and create Cycle_{latest + 1}?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return None
+        return context
+
+    def _stop_live_from_barcode_wait(self):
+        self._continuous_stop_requested = True
+        self._set_stop_inspection_button_state(running=True, stopping=True)
+        worker = self.continuous_worker
+        if worker is not None:
+            try:
+                worker.request_graceful_stop()
+            except Exception:
+                logger.exception("Failed to stop Live while waiting for barcode")
+        self.statusBar().showMessage(
+            "Live inspection stopping; next barcode was not supplied."
+        )
+
+    def _on_continuous_barcode_required(self, request):
+        """Ask for exactly one barcode before the next PLC trigger wait."""
+        if self._continuous_stop_requested or not self.is_continuous_running:
+            return
+        if self._barcode_dialog_active:
+            return
+
+        self._barcode_dialog_active = True
+        try:
+            previous_barcode = str((request or {}).get("previous_barcode") or "-")
+            previous_cycle = str((request or {}).get("previous_cycle_id") or "-")
+            previous_result = str((request or {}).get("previous_result") or "-")
+            sku_name = str((request or {}).get("sku_name") or self.selected_live_sku).strip()
+
+            while self.is_continuous_running and not self._continuous_stop_requested:
+                text, accepted = QInputDialog.getText(
+                    self,
+                    "Next Tyre Barcode",
+                    "Previous tyre completed.\n"
+                    f"Barcode: {previous_barcode}\n"
+                    f"Cycle: {previous_cycle}\n"
+                    f"Result: {previous_result}\n\n"
+                    "Enter the next tyre barcode:",
+                    QLineEdit.Normal,
+                    "",
+                )
+                if not accepted:
+                    reply = QMessageBox.question(
+                        self,
+                        "Stop Live Inspection",
+                        "No next barcode was entered. Stop Live inspection?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes,
+                    )
+                    if reply == QMessageBox.Yes:
+                        self._stop_live_from_barcode_wait()
+                        return
+                    continue
+
+                context = self._validated_barcode_context(
+                    text,
+                    sku_name,
+                    parent=self,
+                    confirm_retest=True,
+                )
+                if context is None:
+                    continue
+
+                self.update_live_info_cards(sku_name, context.raw)
+                self.current_recipe_context.update(context.as_dict())
+                worker = self.continuous_worker
+                if worker is None:
+                    QMessageBox.warning(
+                        self,
+                        "Live Inspection",
+                        "Continuous inspection worker is no longer available.",
+                    )
+                    return
+                worker.set_next_barcode(context.raw)
+                self.statusBar().showMessage(
+                    f"Barcode {context.raw} confirmed. Waiting for PLC trigger."
+                )
+                return
+        finally:
+            self._barcode_dialog_active = False
+
     def open_live_selection_dialog(self):
         """
         Open the Live Inspection setup dialog.
@@ -1186,15 +1323,16 @@ class MainWindow(QMainWindow):
 
             card_layout.addWidget(sku_combo)
 
-        tyre_label = QLabel("Tyre Number")
-        tyre_label.setObjectName("FieldLabel")
-        card_layout.addWidget(tyre_label)
+        barcode_label = QLabel("Barcode Number")
+        barcode_label.setObjectName("FieldLabel")
+        card_layout.addWidget(barcode_label)
 
-        tyre_edit = QLineEdit()
-        tyre_edit.setPlaceholderText("Enter tyre number / tyre name")
-        tyre_edit.setText(self.selected_live_tyre_name or "")
-        tyre_edit.setMinimumHeight(self.s(44))
-        card_layout.addWidget(tyre_edit)
+        barcode_edit = QLineEdit()
+        barcode_edit.setPlaceholderText("Enter or scan the tyre barcode")
+        barcode_edit.setText("")
+        barcode_edit.setMinimumHeight(self.s(44))
+        barcode_edit.setClearButtonEnabled(True)
+        card_layout.addWidget(barcode_edit)
 
         info_badge = QLabel(
             "AI files will be loaded using the PLC active recipe."
@@ -1223,7 +1361,7 @@ class MainWindow(QMainWindow):
         start_btn.setObjectName("StartBtn")
 
         def proceed():
-            tyre_name = tyre_edit.text().strip()
+            raw_barcode = barcode_edit.text().strip()
             sku_name = (
                 fixed_sku_name
                 if is_deployment
@@ -1234,22 +1372,31 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(dialog, "SKU", "Please select a SKU.")
                 return
 
-            if not tyre_name:
-                QMessageBox.warning(dialog, "Tyre Number", "Please enter tyre number.")
+            barcode_context = self._validated_barcode_context(
+                raw_barcode,
+                sku_name,
+                parent=dialog,
+                confirm_retest=True,
+            )
+            if barcode_context is None:
                 return
 
+            tyre_name = app_config.inference.default_tyre_name
             self.current_recipe_context = {
                 "source": "PLC" if is_deployment else "LOCAL",
                 "recipe_number": recipe_number,
                 "plc_tag": plc_tag,
                 "sku_name": sku_name,
+                **barcode_context.as_dict(),
             }
 
             dialog.accept()
-            self.update_live_info_cards(sku_name, tyre_name)
-            self.begin_live_flow(sku_name, tyre_name)
+            self.update_live_info_cards(sku_name, barcode_context.raw)
+            self.begin_live_flow(sku_name, tyre_name, barcode_context.raw)
 
         start_btn.clicked.connect(proceed)
+        barcode_edit.returnPressed.connect(proceed)
+        QTimer.singleShot(0, barcode_edit.setFocus)
 
         button_layout.addStretch()
         button_layout.addWidget(cancel_btn)
@@ -1287,9 +1434,9 @@ class MainWindow(QMainWindow):
         return True
 
     # REPLACE ENTIRE METHOD:
-    def begin_live_flow(self, sku_name, tyre_name):
-        """Start live inspection based on deployment mode"""
-        self.update_live_info_cards(sku_name, tyre_name)
+    def begin_live_flow(self, sku_name, tyre_name, barcode):
+        """Start live inspection with one confirmed barcode for the first tyre."""
+        self.update_live_info_cards(sku_name, barcode)
 
         if not self.validate_selected_sku_calibration(sku_name):
             return
@@ -1310,7 +1457,7 @@ class MainWindow(QMainWindow):
         globals()["plc_client"] = hardware_state.get("plc_client")
 
         if deployment and CAMERA_CAPTURE_ENABLED:
-            self.start_continuous_inspection(sku_name, tyre_name)
+            self.start_continuous_inspection(sku_name, tyre_name, barcode)
         else:
             if self.thread_manager.active_threads.get("inspection"):
                 if self.thread_manager.active_threads["inspection"].isRunning():
@@ -1318,12 +1465,17 @@ class MainWindow(QMainWindow):
                     return
 
             if self.current_preloaded_sku == sku_name:
-                self.start_live_inspection(sku_name=sku_name, tyre_name=tyre_name)
+                self.start_live_inspection(
+                    sku_name=sku_name,
+                    tyre_name=tyre_name,
+                    barcode=barcode,
+                )
                 return
 
             self.pending_live_start = True
             self.pending_live_sku = sku_name
             self.pending_live_tyre_name = tyre_name
+            self.pending_live_barcode = barcode
             self.start_runtime_preload(sku_name=sku_name)
 
     def _set_stop_inspection_button_state(
@@ -1338,7 +1490,7 @@ class MainWindow(QMainWindow):
         button.setText("Stopping..." if stopping else "Stop Inspection")
         button.setEnabled(bool(running and not stopping))
 
-    def start_continuous_inspection(self, sku_name, tyre_name):
+    def start_continuous_inspection(self, sku_name, tyre_name, barcode):
         """Start continuous PLC/hardware monitored inspection."""
         if self._inspection_is_active():
             QMessageBox.information(
@@ -1365,6 +1517,7 @@ class MainWindow(QMainWindow):
             sku_name=sku_name,
             tyre_name=tyre_name,
             multi_camera_manager=self.multi_cam,
+            barcode=barcode,
             min_capture_interval=2.0,
             seg_model_a_path=MAIN_SEG_MODEL_PATH,
             seg_model_b_path=MAIN_SEG_MODEL_PATH,
@@ -1401,6 +1554,9 @@ class MainWindow(QMainWindow):
         self.continuous_worker.processing_completed.connect(
             self._on_continuous_completed
         )
+        self.continuous_worker.barcode_required.connect(
+            self._on_continuous_barcode_required
+        )
         self.continuous_worker.processing_error.connect(
             lambda err: logger.error(f"Continuous error: {err}")
         )
@@ -1428,7 +1584,7 @@ class MainWindow(QMainWindow):
         apply_live_progress_to_gui(self)
 
         self.statusBar().showMessage(
-            f"Continuous inspection | SKU={sku_name} | Monitoring trigger..."
+            f"Continuous inspection | SKU={sku_name} | Barcode={barcode} | Monitoring trigger..."
         )
 
     def request_stop_continuous_inspection(self, checked=False):
@@ -1544,6 +1700,7 @@ class MainWindow(QMainWindow):
         self.pending_live_start = False
         self.pending_live_sku = None
         self.pending_live_tyre_name = None
+        self.pending_live_barcode = None
         self.current_preloaded_sku = None
         self.pending_preload_sku = None
         self.current_recipe_context = {}
@@ -1674,7 +1831,10 @@ class MainWindow(QMainWindow):
         apply_tyre_result_to_gui(self)
         self._queue_final_inspection_save(result, summary, plc_status)
 
-        self.statusBar().showMessage(f"✅ {cycle_id} | Result: {final_label}")
+        completed_barcode = result.get("barcode") or "-"
+        self.statusBar().showMessage(
+            f"✅ {completed_barcode} | {cycle_id} | Result: {final_label}"
+        )
         self.update_label_async()
 
         cycle_output_dir = (
@@ -1725,9 +1885,15 @@ class MainWindow(QMainWindow):
                 self.pending_live_start = False
                 sku_to_start = self.pending_live_sku
                 tyre_to_start = self.pending_live_tyre_name
+                barcode_to_start = self.pending_live_barcode
                 self.pending_live_sku = None
                 self.pending_live_tyre_name = None
-                self.start_live_inspection(sku_name=sku_to_start, tyre_name=tyre_to_start)
+                self.pending_live_barcode = None
+                self.start_live_inspection(
+                    sku_name=sku_to_start,
+                    tyre_name=tyre_to_start,
+                    barcode=barcode_to_start,
+                )
             return
         
         self.pending_preload_sku = sku_name
@@ -1752,21 +1918,28 @@ class MainWindow(QMainWindow):
                 self.pending_live_start = False
                 sku_name_to_start = self.pending_live_sku
                 tyre_name_to_start = self.pending_live_tyre_name
+                barcode_to_start = self.pending_live_barcode
                 self.pending_live_sku = None
                 self.pending_live_tyre_name = None
-                self.start_live_inspection(sku_name=sku_name_to_start, tyre_name=tyre_name_to_start)
+                self.pending_live_barcode = None
+                self.start_live_inspection(
+                    sku_name=sku_name_to_start,
+                    tyre_name=tyre_name_to_start,
+                    barcode=barcode_to_start,
+                )
         
         def on_error(message):
             logger.error(f"[PRELOAD][ERROR] {message}")
             self.pending_live_start = False
             self.pending_live_sku = None
             self.pending_live_tyre_name = None
+            self.pending_live_barcode = None
             self.statusBar().showMessage("Preload failed")
             QMessageBox.critical(self, "Preload Error", message)
         
         self.thread_manager.start_thread("preload", worker, on_finished, on_error)
     
-    def start_live_inspection(self, sku_name=None, tyre_name=None):
+    def start_live_inspection(self, sku_name=None, tyre_name=None, barcode=None):
         # Check if already running
         insp_thread = self.thread_manager.active_threads.get("inspection")
         if insp_thread and insp_thread.isRunning():
@@ -1778,7 +1951,14 @@ class MainWindow(QMainWindow):
             return
 
         sku_name = (sku_name or self.selected_live_sku or "").strip()
-        tyre_name = (tyre_name or self.selected_live_tyre_name or "195_65_R15").strip()
+        tyre_name = (
+            tyre_name
+            or self.selected_live_tyre_name
+            or app_config.inference.default_tyre_name
+        ).strip()
+        barcode_context = build_barcode_context(
+            barcode or self.selected_live_barcode
+        )
 
         if not sku_name:
             QMessageBox.critical(
@@ -1833,13 +2013,14 @@ class MainWindow(QMainWindow):
         apply_tyre_result_to_gui(self)
 
         self.statusBar().showMessage(
-            f"Live Inspection Started | SKU={sku_name} | TYRE={tyre_name}"
+            f"Live Inspection Started | SKU={sku_name} | BARCODE={barcode_context.raw}"
         )
 
         worker = LiveInspectionWorker(
             media_root=MEDIA_PATH,
             sku_name=sku_name,
             tyre_name=tyre_name,
+            barcode=barcode_context.raw,
             device="cuda" if TORCH_GPU_OK else "cpu",
             seg_model_a_path=MAIN_SEG_MODEL_PATH,
             seg_model_b_path=MAIN_SEG_MODEL_PATH,
@@ -1853,9 +2034,9 @@ class MainWindow(QMainWindow):
 
             try:
                 sku = result.get("sku_name", "Unknown") if isinstance(result, dict) else "Unknown"
-                tyre = result.get("tyre_name", "Unknown") if isinstance(result, dict) else "Unknown"
+                result_barcode = result.get("barcode", "Unknown") if isinstance(result, dict) else "Unknown"
                 self.statusBar().showMessage(
-                    f"Inspection finished | SKU={sku} | TYRE={tyre}"
+                    f"Inspection finished | SKU={sku} | BARCODE={result_barcode}"
                 )
             except Exception:
                 self.statusBar().showMessage("Inspection completed")
@@ -1927,21 +2108,28 @@ class MainWindow(QMainWindow):
             self.pending_live_start = False
             sku_name = self.pending_live_sku
             tyre_name = self.pending_live_tyre_name
+            barcode = self.pending_live_barcode
             self.pending_live_sku = None
             self.pending_live_tyre_name = None
-            self.start_live_inspection(sku_name=sku_name, tyre_name=tyre_name)
+            self.pending_live_barcode = None
+            self.start_live_inspection(
+                sku_name=sku_name,
+                tyre_name=tyre_name,
+                barcode=barcode,
+            )
     
     def on_preload_error(self, message):
         logger.error(f"[PRELOAD][ERROR] {message}")
         self.pending_live_start = False
         self.pending_live_sku = None
         self.pending_live_tyre_name = None
+        self.pending_live_barcode = None
         self.statusBar().showMessage("Preload failed")
         QMessageBox.critical(self, "Preload Error", message)
     
     def on_live_inspection_finished(self, result):
         self.statusBar().showMessage(
-            f"Inspection finished successfully | SKU={result.get('sku_name')} | TYRE={result.get('tyre_name')}"
+            f"Inspection finished successfully | SKU={result.get('sku_name')} | BARCODE={result.get('barcode')}"
         )
         self.update_label_async()
         QTimer.singleShot(700, self.refresh_cycle_images_async)
@@ -2744,6 +2932,7 @@ class MainWindow(QMainWindow):
             ("OSC Page", "action_code_plan.png", self.open_action_code_plan, Permission.OSC_MANAGE),
             ("Dashboard", "dashboard.png", self.open_dashboard, Permission.DASHBOARD_VIEW),
             ("Inspection History", "history.png", self.open_inspection_history_page, Permission.INSPECTION_HISTORY_VIEW),
+            ("Data Recall", "history.png", self.open_barcode_recall_page, Permission.INSPECTION_HISTORY_VIEW),
             ("Annotation Tool", "annotation_tool.png", self.open_annotation_tool, Permission.ANNOTATION_USE),
             ("ROI Measure", "cam.png", self.open_roi_measurement_tool, Permission.ROI_MEASURE),
             ("User Management", "User.png", self.open_user_management_page, Permission.USER_MANAGE),
@@ -2784,6 +2973,7 @@ class MainWindow(QMainWindow):
                 "OSC Page": "Open the action-code and OSC management page.",
                 "Dashboard": "Open production and inspection summary dashboards.",
                 "Inspection History": "Review completed inspections and traceability records.",
+                "Data Recall": "Recall all input, output, laser and timing data using a tyre barcode.",
                 "Annotation Tool": "Open the image annotation workspace.",
                 "ROI Measure": "Open the ROI pixel-to-millimetre measurement tool.",
                 "User Management": "Manage Apollo users, roles and permissions.",
@@ -2801,7 +2991,10 @@ class MainWindow(QMainWindow):
                 callback()
 
             btn.clicked.connect(invoke)
-            self.sidebar_buttons[permission.value] = btn
+            button_key = permission.value
+            if button_key in self.sidebar_buttons:
+                button_key = f"{permission.value}:{text}"
+            self.sidebar_buttons[button_key] = btn
             sidebar_layout.addWidget(btn)
 
             if text == "Live":
@@ -2935,7 +3128,7 @@ class MainWindow(QMainWindow):
         sku_layout.addWidget(self.selected_sku_value_label)
         info_layout.addWidget(sku_card)
         
-        tyre_card, tyre_layout = _make_info_card("Tyre Number")
+        tyre_card, tyre_layout = _make_info_card("Barcode Number")
         self.selected_tyre_value_label = QLabel("--")
         self.selected_tyre_value_label.setStyleSheet("""
             QLabel {
@@ -3414,6 +3607,35 @@ class MainWindow(QMainWindow):
                 self,
                 "Inspection History",
                 f"Failed to open Inspection History page:\n\n{exc}",
+            )
+
+    @permission_required(Permission.INSPECTION_HISTORY_VIEW)
+    def open_barcode_recall_page(self):
+        try:
+            if getattr(self, "barcode_recall_page", None) is None:
+                self.barcode_recall_page = BarcodeRecallPage(
+                    media_root=MEDIA_PATH,
+                    session=self.session,
+                    on_close=self._go_dashboard_from_inner_pages,
+                    parent=self,
+                )
+                self.content_stack.addWidget(self.barcode_recall_page)
+            self.content_stack.setCurrentWidget(self.barcode_recall_page)
+            if self.back_btn:
+                self.back_btn.setVisible(True)
+        except Exception as exc:
+            logger.exception(
+                "Failed to open Barcode Data Recall page",
+                extra={
+                    "event_code": "BARCODE_RECALL_OPEN_FAILED",
+                    "error_code": "RECALL-UI-001",
+                    "user_id": self.session.user.user_id,
+                },
+            )
+            QMessageBox.critical(
+                self,
+                "Barcode Data Recall",
+                f"Failed to open Barcode Data Recall page:\n\n{exc}",
             )
 
     @permission_required(Permission.DASHBOARD_VIEW)

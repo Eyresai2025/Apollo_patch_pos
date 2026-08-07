@@ -1,23 +1,28 @@
+import os
+
 from PyQt5.QtWidgets import (
     QScrollArea, QSizePolicy, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTabWidget, QTableWidget, QTableWidgetItem, QComboBox,
     QLineEdit, QFormLayout, QGroupBox, QMessageBox, QCheckBox,
-    QAbstractItemView, QHeaderView, QFrame,
+    QAbstractItemView, QHeaderView, QFrame, QDialog, QShortcut,
     QSpinBox, QDoubleSpinBox
 )
-from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor
-from PyQt5.QtCore import Qt, QObject, QEvent, QPointF
+from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QKeySequence
+from PyQt5.QtCore import Qt, QObject, QEvent, QPointF, pyqtSignal
 
 from src.device.camera_profile_manager import (
     CameraProfileManager,
     ZONE_NAMES,
     ZONE_KEYS,
-    DEFAULT_CAMERA_SETTINGS
+    DEFAULT_CAMERA_SETTINGS,
+    camera_supports_line_rate,
+    default_camera_settings_for,
 )
 from src.device.arena_camera_manager import ArenaCameraManager
 from src.workers.camera_live_preview_worker import CameraLivePreviewWorker
 from src.workers.camera_capture_worker import CameraCaptureWorker
 from src.device.sku_device_profile_store import SKUDeviceProfileStore
+from src.Pages.device_laser_tab import DeviceLaserTab
 
 
 SHARED_INNER_BEAD_ZONE = "Inner + Bead (Shared)"
@@ -102,6 +107,143 @@ class WheelChangeBlocker(QObject):
                 return True
 
         return super().eventFilter(watched, event)
+
+
+class ClickablePreviewLabel(QLabel):
+    """QLabel that opens the large viewer when the image area is clicked."""
+
+    clicked = pyqtSignal()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class CameraPreviewDialog(QDialog):
+    """Large live viewer that reuses frames already received by DevicePage."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Apollo Camera Live Preview")
+        self.setModal(False)
+        self.setMinimumSize(900, 650)
+        self.setStyleSheet("""
+            QDialog { background: #F4F6FA; }
+            QLabel#LargePreview {
+                background: #FFFFFF;
+                color: #64748B;
+                border: 1px solid #D8E0EA;
+            }
+            QPushButton {
+                min-height: 30px;
+                padding: 4px 12px;
+                border: 1px solid #C7D0DD;
+                border-radius: 6px;
+                background: #FFFFFF;
+                color: #172033;
+                font-weight: 600;
+            }
+            QPushButton:hover { border-color: #7C3AED; color: #5B21B6; }
+        """)
+
+        self._source_pixmap = None
+        self._fit_to_window = True
+        self._zoom_factor = 1.0
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        controls = QHBoxLayout()
+        self.fit_btn = QPushButton("Fit Window")
+        self.actual_btn = QPushButton("100%")
+        self.zoom_out_btn = QPushButton("Zoom −")
+        self.zoom_in_btn = QPushButton("Zoom +")
+        self.close_btn = QPushButton("Close")
+        controls.addWidget(self.fit_btn)
+        controls.addWidget(self.actual_btn)
+        controls.addWidget(self.zoom_out_btn)
+        controls.addWidget(self.zoom_in_btn)
+        controls.addStretch(1)
+        controls.addWidget(self.close_btn)
+        root.addLayout(controls)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(False)
+        self.scroll.setAlignment(Qt.AlignCenter)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setStyleSheet("QScrollArea { background: #FFFFFF; border: none; }")
+
+        self.image_label = QLabel("No Image")
+        self.image_label.setObjectName("LargePreview")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setMinimumSize(760, 520)
+        self.scroll.setWidget(self.image_label)
+        root.addWidget(self.scroll, 1)
+
+        self.fit_btn.clicked.connect(self.fit_to_window)
+        self.actual_btn.clicked.connect(self.actual_size)
+        self.zoom_out_btn.clicked.connect(lambda: self.change_zoom(0.8))
+        self.zoom_in_btn.clicked.connect(lambda: self.change_zoom(1.25))
+        self.close_btn.clicked.connect(self.close)
+        QShortcut(QKeySequence(Qt.Key_Escape), self, activated=self.close)
+
+    def set_pixmap(self, pixmap):
+        if pixmap is None or pixmap.isNull():
+            return
+        self._source_pixmap = QPixmap(pixmap)
+        self._render()
+
+    def fit_to_window(self):
+        self._fit_to_window = True
+        self._render()
+
+    def actual_size(self):
+        self._fit_to_window = False
+        self._zoom_factor = 1.0
+        self._render()
+
+    def change_zoom(self, multiplier):
+        if self._source_pixmap is None or self._source_pixmap.isNull():
+            return
+        self._fit_to_window = False
+        self._zoom_factor = min(8.0, max(0.1, self._zoom_factor * float(multiplier)))
+        self._render()
+
+    def _render(self):
+        if self._source_pixmap is None or self._source_pixmap.isNull():
+            self.image_label.setText("No Image")
+            return
+
+        if self._fit_to_window:
+            viewport = self.scroll.viewport().size()
+            target_w = max(100, viewport.width() - 12)
+            target_h = max(100, viewport.height() - 12)
+            shown = self._source_pixmap.scaled(
+                target_w,
+                target_h,
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation,
+            )
+        else:
+            target_w = max(1, int(self._source_pixmap.width() * self._zoom_factor))
+            target_h = max(1, int(self._source_pixmap.height() * self._zoom_factor))
+            shown = self._source_pixmap.scaled(
+                target_w,
+                target_h,
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation,
+            )
+
+        self.image_label.setText("")
+        self.image_label.setPixmap(shown)
+        self.image_label.resize(shown.size())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._fit_to_window:
+            self._render()
 
 class DevicePage(QWidget):
     def __init__(self, parent=None):
@@ -425,6 +567,7 @@ class DevicePage(QWidget):
         self.live_worker = None
         self.capture_worker = None
         self._last_camera_preview_pixmap = None
+        self.preview_dialog = None
 
         self.init_ui()
 
@@ -442,7 +585,8 @@ class DevicePage(QWidget):
         title = QLabel("Device Configuration")
         title.setObjectName("PageTitle")
         subtitle = QLabel(
-            "Configure SKU-specific camera profiles, verify live quality, and save production settings."
+            "Configure SKU-specific camera and laser profiles, verify live quality, "
+            "and save production settings."
         )
         subtitle.setObjectName("PageSubtitle")
 
@@ -459,6 +603,12 @@ class DevicePage(QWidget):
 
         self.tabs.addTab(self.camera_tab, "Camera")
         self.build_camera_tab()
+
+        self.laser_tab = DeviceLaserTab(
+            profile_store=self.sku_profile_store,
+            parent=self,
+        )
+        self.tabs.addTab(self.laser_tab, "Laser")
 
     def disable_accidental_wheel_changes(self, parent_widget):
         """Closed combos and numeric fields never change while the page scrolls."""
@@ -487,37 +637,50 @@ class DevicePage(QWidget):
         profile_title.setObjectName("CardTitle")
         profile_layout.addWidget(profile_title)
 
-        top_row = QHBoxLayout()
-        top_row.setSpacing(7)
+        existing_row = QHBoxLayout()
+        existing_row.setSpacing(7)
 
         self.sku_input = ModernComboBox()
-        self.sku_input.setEditable(True)
+        self.sku_input.setEditable(False)
         self.sku_input.setInsertPolicy(QComboBox.NoInsert)
-        self.sku_input.lineEdit().setPlaceholderText(
-            "Select or enter SKU, example: SKU_003"
-        )
-        self.sku_input.lineEdit().setClearButtonEnabled(True)
+        self.sku_input.setToolTip("Existing camera-profile SKUs")
 
         self.refresh_sku_btn = QPushButton("Refresh SKU List")
         self.refresh_btn = QPushButton("Refresh Cameras")
-        self.load_profile_btn = QPushButton("Load Profile")
-        self.save_profile_btn = QPushButton("Save Profile")
+        self.load_profile_btn = QPushButton("Load Existing Profile")
+        self.save_profile_btn = QPushButton("Update Selected Profile")
         self.load_profile_btn.setObjectName("PrimaryButton")
         self.save_profile_btn.setObjectName("PrimaryButton")
 
-        sku_label = QLabel("SKU")
-        sku_label.setMinimumWidth(28)
-        top_row.addWidget(sku_label)
-        top_row.addWidget(self.sku_input, 1)
-        top_row.addWidget(self.refresh_sku_btn)
-        top_row.addWidget(self.refresh_btn)
-        top_row.addWidget(self.load_profile_btn)
-        top_row.addWidget(self.save_profile_btn)
-        profile_layout.addLayout(top_row)
+        existing_label = QLabel("Existing SKU")
+        existing_label.setMinimumWidth(72)
+        existing_row.addWidget(existing_label)
+        existing_row.addWidget(self.sku_input, 1)
+        existing_row.addWidget(self.refresh_sku_btn)
+        existing_row.addWidget(self.refresh_btn)
+        existing_row.addWidget(self.load_profile_btn)
+        existing_row.addWidget(self.save_profile_btn)
+        profile_layout.addLayout(existing_row)
+
+        create_row = QHBoxLayout()
+        create_row.setSpacing(7)
+        create_label = QLabel("New SKU")
+        create_label.setMinimumWidth(72)
+        self.new_sku_input = QLineEdit()
+        self.new_sku_input.setPlaceholderText("Enter new SKU, example: SKU_004")
+        self.new_sku_input.setClearButtonEnabled(True)
+        self.use_env_mapping_btn = QPushButton("Use .env Camera Mapping")
+        self.create_profile_btn = QPushButton("Create New Camera Profile")
+        self.create_profile_btn.setObjectName("SuccessButton")
+        create_row.addWidget(create_label)
+        create_row.addWidget(self.new_sku_input, 1)
+        create_row.addWidget(self.use_env_mapping_btn)
+        create_row.addWidget(self.create_profile_btn)
+        profile_layout.addLayout(create_row)
 
         profile_help = QLabel(
-            "Production capture uses PLC software trigger. This page stores only "
-            "SKU image, line-rate, exposure, gain, transport and stitch-height settings."
+            "Four physical cameras are saved as five logical role settings: Sidewall 1, "
+            "Sidewall 2, Tread, Innerwall and Bead. Production triggering remains in .env."
         )
         profile_help.setObjectName("HelpText")
         profile_help.setWordWrap(True)
@@ -564,7 +727,9 @@ class DevicePage(QWidget):
         self.refresh_sku_btn.clicked.connect(lambda: self.refresh_camera_sku_list(True))
         self.refresh_btn.clicked.connect(self.refresh_cameras)
         self.load_profile_btn.clicked.connect(self.load_profile)
-        self.save_profile_btn.clicked.connect(self.save_profile)
+        self.save_profile_btn.clicked.connect(lambda: self.save_profile(create_new=False))
+        self.create_profile_btn.clicked.connect(lambda: self.save_profile(create_new=True))
+        self.use_env_mapping_btn.clicked.connect(self.apply_env_camera_mapping)
         self.camera_table.cellClicked.connect(self.on_camera_selected)
         self.disable_accidental_wheel_changes(self.camera_tab)
         self.refresh_camera_sku_list(select_current=False)
@@ -639,7 +804,9 @@ class DevicePage(QWidget):
         acquisition_form.addRow("Exposure time", self.exposure_input)
         acquisition_form.addRow("Gain auto", QLabel("Off"))
         acquisition_form.addRow("Gain", self.gain_input)
-        acquisition_form.addRow("Line-rate enabled", QLabel("True"))
+        self.line_rate_enable_checkbox = QCheckBox("Enabled")
+        self.line_rate_enable_checkbox.setChecked(True)
+        acquisition_form.addRow("Line-rate enabled", self.line_rate_enable_checkbox)
         acquisition_form.addRow("Acquisition line rate", self.line_rate_input)
         acquisition_form.addRow("Acquisition mode", self.acquisition_mode_combo)
         root.addLayout(acquisition_form)
@@ -682,6 +849,11 @@ class DevicePage(QWidget):
         action_row_2.addWidget(self.stop_preview_btn, 1)
         root.addLayout(action_row_2)
 
+        self.line_rate_enable_checkbox.toggled.connect(
+            lambda checked: self.line_rate_input.setEnabled(
+                bool(checked) and camera_supports_line_rate(self.selected_serial)
+            )
+        )
         self.apply_settings_btn.clicked.connect(self.apply_settings_to_selected)
         self.start_preview_btn.clicked.connect(self.start_live_preview)
         self.stop_preview_btn.clicked.connect(self.stop_live_preview)
@@ -706,26 +878,35 @@ class DevicePage(QWidget):
         preview_header.addWidget(self.capture_status_label)
         layout.addLayout(preview_header)
 
-        self.preview_label = QLabel("No Image")
+        self.open_preview_btn = QPushButton("Open Full Screen")
+        self.open_preview_btn.setObjectName("InfoButton")
+        preview_header.insertWidget(1, self.open_preview_btn)
+
+        self.preview_label = ClickablePreviewLabel("No Image · click to enlarge")
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumHeight(410)
         self.preview_label.setContentsMargins(0, 0, 0, 0)
+        self.preview_label.setCursor(Qt.PointingHandCursor)
         self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.preview_label.setStyleSheet("""
             QLabel {
-                background-color: #0E1117;
-                color: #E2E8F0;
-                border: 1px solid #2C3440;
+                background-color: #FFFFFF;
+                color: #64748B;
+                border: 1px solid #D8E0EA;
                 border-radius: 9px;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: 600;
             }
+            QLabel:hover {
+                border: 2px solid #8B5CF6;
+            }
         """)
+        self.preview_label.clicked.connect(self.open_fullscreen_preview)
+        self.open_preview_btn.clicked.connect(self.open_fullscreen_preview)
 
         self.preview_help_label = QLabel(
-            "Select a physical camera and role profile, apply the settings, then "
-            "start free-run preview or capture one test image. Production PLC "
-            "software triggering is handled by the Live/Capture core."
+            "The small preview preserves the real line-scan aspect ratio. Click the image "
+            "or Open Full Screen for a large live view with fit and zoom controls."
         )
         self.preview_help_label.setObjectName("HelpText")
         self.preview_help_label.setWordWrap(True)
@@ -746,6 +927,9 @@ class DevicePage(QWidget):
 
     def _camera_sku_text(self):
         return self.sku_input.currentText().strip()
+
+    def _new_camera_sku_text(self):
+        return self.new_sku_input.text().strip()
 
 
     def _replace_combo_items(self, combo, values, current_text=""):
@@ -779,15 +963,34 @@ class DevicePage(QWidget):
         return str(serial), str(role_key)
 
     def _default_settings_for_role(self, serial, role_key):
-        settings = DEFAULT_CAMERA_SETTINGS.copy()
-        settings["serial"] = str(serial)
-        settings["role"] = str(role_key)
-        settings["camera_height"] = int(settings.get("camera_height", settings.get("height", 15000)))
+        settings = default_camera_settings_for(serial, role_key)
+        settings["camera_height"] = int(
+            settings.get("camera_height", settings.get("height", 15000))
+        )
         settings["height"] = int(settings["camera_height"])
-        settings["final_height"] = 60000 if role_key in ("inner", "bead") else int(settings.get("final_height", 75000))
         settings["num_stream_buffers"] = int(settings.get("num_stream_buffers", 16))
         settings["packet_delay"] = int(settings.get("packet_delay", 1000))
         return settings
+
+    def _update_line_rate_controls(self, serial, settings=None):
+        supports = camera_supports_line_rate(serial)
+        settings = settings or {}
+        enabled = bool(settings.get("acquisition_line_rate_enable", supports)) and supports
+        self.line_rate_enable_checkbox.blockSignals(True)
+        self.line_rate_enable_checkbox.setEnabled(supports)
+        self.line_rate_enable_checkbox.setChecked(enabled)
+        self.line_rate_input.setEnabled(supports and enabled)
+        if supports:
+            self.line_rate_enable_checkbox.setText("Enabled")
+            self.line_rate_input.setToolTip("Camera acquisition line rate")
+        else:
+            self.line_rate_enable_checkbox.setText("Not supported (2K camera)")
+            self.width_input.setText("2048")
+            self.line_rate_input.setText("0.0")
+            self.line_rate_input.setToolTip(
+                "This camera has no AcquisitionLineRate nodes; Apollo skips them."
+            )
+        self.line_rate_enable_checkbox.blockSignals(False)
 
     def _assignment_to_roles(self, assignment):
         if assignment == SHARED_INNER_BEAD_ZONE:
@@ -837,6 +1040,93 @@ class DevicePage(QWidget):
         self.selected_camera_role = new_role
         if new_role:
             self.load_memory_to_form(self.selected_serial, new_role)
+
+    def _environment_camera_mapping(self):
+        values = {}
+        env_path = os.path.join(os.getcwd(), ".env")
+        file_values = {}
+        try:
+            if os.path.isfile(env_path):
+                with open(env_path, "r", encoding="utf-8") as handle:
+                    for raw_line in handle:
+                        line = raw_line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, value = line.split("=", 1)
+                        file_values[key.strip()] = value.strip().strip('"').strip("'")
+        except Exception as exc:
+            print(f"[DEVICE PAGE] .env mapping read warning: {exc}")
+
+        for key in (
+            "CAM_SIDEWALL1_SERIAL",
+            "CAM_SIDEWALL2_SERIAL",
+            "CAM_TREAD_SERIAL",
+            "CAM_INNERWALL_SERIAL",
+            "CAM_BEAD_SERIAL",
+        ):
+            values[key] = str(os.getenv(key) or file_values.get(key) or "").strip()
+        return values
+
+    def apply_env_camera_mapping(self):
+        if self.camera_table.rowCount() == 0:
+            QMessageBox.information(
+                self,
+                "No Cameras",
+                "Refresh Cameras before applying the .env mapping.",
+            )
+            return
+
+        env_map = self._environment_camera_mapping()
+        serial_to_assignment = {}
+        if env_map["CAM_SIDEWALL1_SERIAL"]:
+            serial_to_assignment[env_map["CAM_SIDEWALL1_SERIAL"]] = "Sidewall 1"
+        if env_map["CAM_SIDEWALL2_SERIAL"]:
+            serial_to_assignment[env_map["CAM_SIDEWALL2_SERIAL"]] = "Sidewall 2"
+        if env_map["CAM_TREAD_SERIAL"]:
+            serial_to_assignment[env_map["CAM_TREAD_SERIAL"]] = "Tread"
+
+        inner_serial = env_map["CAM_INNERWALL_SERIAL"]
+        bead_serial = env_map["CAM_BEAD_SERIAL"]
+        if inner_serial and inner_serial == bead_serial:
+            serial_to_assignment[inner_serial] = SHARED_INNER_BEAD_ZONE
+        else:
+            if inner_serial:
+                serial_to_assignment[inner_serial] = "Inner"
+            if bead_serial:
+                serial_to_assignment[bead_serial] = "Bead"
+
+        applied = 0
+        missing = []
+        detected = {
+            self.camera_table.item(row, 0).text().strip()
+            for row in range(self.camera_table.rowCount())
+            if self.camera_table.item(row, 0)
+        }
+        for serial, assignment in serial_to_assignment.items():
+            if serial not in detected:
+                missing.append(f"{serial} → {assignment}")
+                continue
+            for row in range(self.camera_table.rowCount()):
+                item = self.camera_table.item(row, 0)
+                if not item or item.text().strip() != serial:
+                    continue
+                combo = self.camera_table.cellWidget(row, 4)
+                if combo:
+                    combo.setCurrentText(assignment)
+                    self.camera_assignment_by_serial[serial] = assignment
+                    applied += 1
+                break
+
+        self.capture_status_label.setText(
+            f"Status: Applied .env mapping to {applied} physical camera(s)"
+        )
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Some Configured Cameras Not Detected",
+                "The following .env camera assignments were not detected:\n\n"
+                + "\n".join(missing),
+            )
 
     def refresh_cameras(self):
         if self.live_worker:
@@ -909,7 +1199,13 @@ class DevicePage(QWidget):
 
         try:
             camera_height = int(self.height_input.text())
-            settings = {
+            settings = dict(
+                self.camera_settings_by_role.get(
+                    self._settings_key(serial, role_key),
+                    {}
+                )
+            )
+            settings.update({
                 "serial": str(serial),
                 "role": role_key,
                 "enabled": True,
@@ -922,14 +1218,22 @@ class DevicePage(QWidget):
                 "exposure_time": float(self.exposure_input.text()),
                 "gain_auto": "Off",
                 "gain": float(self.gain_input.text()),
-                "acquisition_line_rate_enable": True,
-                "acquisition_line_rate": float(self.line_rate_input.text()),
+                "acquisition_line_rate_enable": (
+                    camera_supports_line_rate(serial)
+                    and self.line_rate_enable_checkbox.isChecked()
+                ),
+                "acquisition_line_rate": (
+                    float(self.line_rate_input.text())
+                    if camera_supports_line_rate(serial)
+                    and self.line_rate_enable_checkbox.isChecked()
+                    else 0.0
+                ),
                 "acquisition_mode": self.acquisition_mode_combo.currentText(),
                 "packet_size": int(self.packet_size_input.text()),
                 "num_stream_buffers": int(self.stream_buffers_input.text()),
                 "packet_delay": int(self.packet_delay_input.text()),
                 "exposure_auto_limit_auto": "Off",
-            }
+            })
 
             self.camera_settings_by_role[self._settings_key(serial, role_key)] = settings
             self.camera_settings_by_serial[str(serial)] = settings.copy()
@@ -949,8 +1253,11 @@ class DevicePage(QWidget):
             settings = dict(base) if base else self._default_settings_for_role(serial, role_key)
             previous_role = str(settings.get("role", ""))
             settings["role"] = role_key
-            if role_key in ("inner", "bead") and previous_role != role_key:
-                settings["final_height"] = 60000
+            if previous_role != role_key:
+                if role_key == "bead":
+                    settings["final_height"] = 60000
+                elif role_key == "inner":
+                    settings["final_height"] = 75000
             settings.setdefault("num_stream_buffers", 16)
             settings.setdefault("packet_delay", 1000)
             self.camera_settings_by_role[self._settings_key(serial, role_key)] = settings
@@ -961,11 +1268,13 @@ class DevicePage(QWidget):
         self.width_input.setText(str(settings.get("width", 4096)))
         camera_height = int(settings.get("camera_height", settings.get("height", 15000)))
         self.height_input.setText(str(camera_height))
-        self.final_height_input.setText(str(settings.get("final_height", 60000 if role_key in ("inner", "bead") else 75000)))
+        default_final_height = 60000 if role_key == "bead" else 75000
+        self.final_height_input.setText(str(settings.get("final_height", default_final_height)))
         self.pixel_format_combo.setCurrentText(settings.get("pixel_format", "Mono8"))
         self.exposure_input.setText(str(settings.get("exposure_time", 75.0)))
         self.gain_input.setText(str(settings.get("gain", 24.0)))
         self.line_rate_input.setText(str(settings.get("acquisition_line_rate", 13117.0)))
+        self._update_line_rate_controls(serial, settings)
         self.acquisition_mode_combo.setCurrentText(settings.get("acquisition_mode", "Continuous"))
         self.stream_buffers_input.setText(str(settings.get("num_stream_buffers", 16)))
         self.packet_size_input.setText(str(settings.get("packet_size", 9000)))
@@ -1083,12 +1392,32 @@ class DevicePage(QWidget):
         self.preview_label.setText("")
         self.preview_label.setPixmap(scaled)
 
+        if self.preview_dialog is not None and self.preview_dialog.isVisible():
+            self.preview_dialog.set_pixmap(pixmap)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
 
         if getattr(self, "_last_camera_preview_pixmap", None) is not None:
             self._show_camera_preview_pixmap(self._last_camera_preview_pixmap)
         
+    def open_fullscreen_preview(self):
+        if self._last_camera_preview_pixmap is None or self._last_camera_preview_pixmap.isNull():
+            QMessageBox.information(
+                self,
+                "No Preview Image",
+                "Start Live Preview or capture one image before opening the large viewer.",
+            )
+            return
+
+        if self.preview_dialog is None:
+            self.preview_dialog = CameraPreviewDialog(self)
+
+        self.preview_dialog.set_pixmap(self._last_camera_preview_pixmap)
+        self.preview_dialog.showMaximized()
+        self.preview_dialog.raise_()
+        self.preview_dialog.activateWindow()
+
     def stop_live_preview(self):
         if self.live_worker:
             self.live_worker.stop()
@@ -1196,6 +1525,17 @@ class DevicePage(QWidget):
         cleaned["final_height"] = int(cleaned.get("final_height", 75000))
         cleaned["num_stream_buffers"] = int(cleaned.get("num_stream_buffers", 16))
         cleaned["packet_delay"] = int(cleaned.get("packet_delay", 1000))
+        if not camera_supports_line_rate(serial):
+            cleaned["width"] = 2048
+            cleaned["acquisition_line_rate_enable"] = False
+            cleaned["acquisition_line_rate"] = 0.0
+        else:
+            cleaned["acquisition_line_rate_enable"] = bool(
+                cleaned.get("acquisition_line_rate_enable", True)
+            )
+            cleaned["acquisition_line_rate"] = float(
+                cleaned.get("acquisition_line_rate", 0.0)
+            )
         cleaned.pop("role", None)
         for key in (
             "use_hardware_trigger", "line_selector", "line_mode", "line_source",
@@ -1204,11 +1544,54 @@ class DevicePage(QWidget):
             cleaned.pop(key, None)
         return cleaned
 
-    def save_profile(self):
-        sku = self._camera_sku_text()
+    def save_profile(self, create_new=False):
+        sku = self._new_camera_sku_text() if create_new else self._camera_sku_text()
+        action = "create" if create_new else "update"
+
         if not sku:
-            QMessageBox.warning(self, "Missing SKU", "Please select or enter an SKU name.")
+            field_name = "New SKU" if create_new else "Existing SKU"
+            QMessageBox.warning(
+                self,
+                "Missing SKU",
+                f"Please provide a value in the {field_name} field.",
+            )
             return
+
+        try:
+            sku = self.sku_profile_store.normalize_sku_name(sku)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid SKU", str(exc))
+            return
+
+        exists = self.sku_profile_store.camera_profile_exists(sku)
+        if create_new and exists:
+            QMessageBox.warning(
+                self,
+                "Profile Already Exists",
+                f"A camera profile already exists for {sku}. Select it in Existing SKU "
+                "and use Update Selected Profile.",
+            )
+            return
+        if not create_new and not exists:
+            QMessageBox.warning(
+                self,
+                "Profile Does Not Exist",
+                f"No existing camera profile was found for {sku}. Enter it under New SKU "
+                "and use Create New Camera Profile.",
+            )
+            return
+
+        if not create_new:
+            answer = QMessageBox.question(
+                self,
+                "Confirm Profile Update",
+                f"Update the existing camera profile for {sku}?\n\n"
+                "A backup of the previous JSON will be created automatically.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
 
         if self.selected_serial and self.selected_camera_role:
             self.save_form_to_memory(self.selected_serial, self.selected_camera_role)
@@ -1226,7 +1609,7 @@ class DevicePage(QWidget):
             if not serial_item:
                 continue
 
-            serial = serial_item.text()
+            serial = serial_item.text().strip()
             zone_combo = self.camera_table.cellWidget(row, 4)
             enabled_checkbox = self.camera_table.cellWidget(row, 5)
             assignment = zone_combo.currentText() if zone_combo else "Unassigned"
@@ -1239,15 +1622,17 @@ class DevicePage(QWidget):
             roles = self._assignment_to_roles(assignment)
             if assignment == SHARED_INNER_BEAD_ZONE:
                 missing_shared_roles = [
-                    role_key for role_key in roles
-                    if self._settings_key(serial, role_key) not in self.camera_settings_by_role
+                    role_key
+                    for role_key in roles
+                    if self._settings_key(serial, role_key)
+                    not in self.camera_settings_by_role
                 ]
                 if missing_shared_roles:
                     QMessageBox.warning(
                         self,
                         "Shared Camera Profiles Incomplete",
-                        "Select the shared camera row and configure both the Innerwall "
-                        "and Bead role profiles before saving. Missing: "
+                        "Select the shared camera and configure both Innerwall and Bead "
+                        "role profiles before saving. Missing: "
                         + ", ".join(missing_shared_roles),
                     )
                     return
@@ -1257,7 +1642,7 @@ class DevicePage(QWidget):
                     QMessageBox.warning(
                         self,
                         "Duplicate Camera Role",
-                        f"Role '{role_key}' is assigned more than once. Correct the camera table before saving.",
+                        f"Role '{role_key}' is assigned more than once.",
                     )
                     return
 
@@ -1268,7 +1653,9 @@ class DevicePage(QWidget):
                     settings = self._default_settings_for_role(serial, role_key)
 
                 profile["cameras"][role_key] = self._clean_camera_profile_settings(
-                    settings, serial, enabled
+                    settings,
+                    serial,
+                    enabled,
                 )
                 assigned_roles.add(role_key)
                 saved_count += 1
@@ -1277,23 +1664,66 @@ class DevicePage(QWidget):
                 profile["shared_inner_bead_serial"] = serial
                 profile["shared_role_profiles_enabled"] = True
 
+        required_roles = {"sidewall1", "sidewall2", "tread", "inner", "bead"}
+        missing_roles = sorted(required_roles - assigned_roles)
+        if missing_roles:
+            readable = [
+                "Innerwall" if role == "inner" else ROLE_KEY_TO_DISPLAY.get(role, role)
+                for role in missing_roles
+            ]
+            QMessageBox.warning(
+                self,
+                "Camera Profile Incomplete",
+                "The profile was not saved. Assign and configure all five logical roles:\n\n"
+                "• Sidewall 1\n• Sidewall 2\n• Tread\n• Innerwall\n• Bead\n\n"
+                "Missing: " + ", ".join(readable),
+            )
+            return
+
         try:
             path = self.sku_profile_store.save_camera_profile(sku, profile)
         except Exception as exc:
             QMessageBox.critical(
                 self,
-                "Camera Profile Database Error",
-                f"Camera profile JSON was created, but PostgreSQL save failed:\n{exc}",
+                "Camera Profile Save Failed",
+                f"The camera profile JSON could not be saved:\n{exc}",
             )
             return
 
-        self.refresh_camera_sku_list(select_current=True)
-        msg = f"Saved {saved_count} logical camera role profile(s):\n{path}"
+        self.new_sku_input.clear()
+        self.refresh_camera_sku_list(select_current=False)
+        index = self.sku_input.findText(sku)
+        if index >= 0:
+            self.sku_input.setCurrentIndex(index)
+
+        operation_text = "created" if create_new else "updated"
+        msg = (
+            f"Camera profile {operation_text} successfully.\n\n"
+            f"SKU: {sku}\n"
+            f"Physical cameras detected: {self.camera_table.rowCount()}\n"
+            f"Logical role settings saved: {saved_count}\n"
+            f"JSON file:\n{path}"
+        )
+
+        if self.sku_profile_store.last_camera_backup_path:
+            msg += (
+                "\n\nPrevious JSON backup:\n"
+                f"{self.sku_profile_store.last_camera_backup_path}"
+            )
         if profile.get("shared_role_profiles_enabled"):
-            msg += "\n\nShared Innerwall + Bead profiles saved with one physical serial."
+            msg += "\n\nInnerwall and Bead were saved as separate settings using one shared serial."
         if unassigned_serials:
-            msg += "\n\nNot saved because role is Unassigned:\n" + "\n".join(unassigned_serials)
-        QMessageBox.information(self, "Profile Saved", msg)
+            msg += "\n\nExtra unassigned cameras were not included:\n" + "\n".join(unassigned_serials)
+        if self.sku_profile_store.last_database_error:
+            msg += (
+                "\n\nJSON save succeeded, but PostgreSQL synchronization reported:\n"
+                f"{self.sku_profile_store.last_database_error}"
+            )
+
+        self.capture_status_label.setText(
+            f"Status: Camera profile {operation_text} for {sku}"
+        )
+        QMessageBox.information(self, "Camera Profile Saved", msg)
 
     def load_profile(self):
         sku = self._camera_sku_text()
@@ -1312,6 +1742,8 @@ class DevicePage(QWidget):
             cameras_config["inner"] = cameras_config["innerwall"]
 
         self.camera_assignment_by_serial.clear()
+        self.camera_settings_by_role.clear()
+        self.camera_settings_by_serial.clear()
         for role_key in ("sidewall1", "sidewall2", "tread", "inner", "bead"):
             cam_cfg = cameras_config.get(role_key, {})
             serial = str(cam_cfg.get("serial", "")).strip()
@@ -1321,9 +1753,13 @@ class DevicePage(QWidget):
             normalized["role"] = role_key
             normalized.setdefault("camera_height", normalized.get("height", 15000))
             normalized.setdefault("height", normalized.get("camera_height", 15000))
-            normalized.setdefault("final_height", 60000 if role_key in ("inner", "bead") else 75000)
+            normalized.setdefault("final_height", 60000 if role_key == "bead" else 75000)
             normalized.setdefault("num_stream_buffers", 16)
             normalized.setdefault("packet_delay", 1000)
+            if not camera_supports_line_rate(serial):
+                normalized["width"] = 2048
+                normalized["acquisition_line_rate_enable"] = False
+                normalized["acquisition_line_rate"] = 0.0
             self.camera_settings_by_role[self._settings_key(serial, role_key)] = normalized
             self.camera_settings_by_serial[serial] = normalized.copy()
 
@@ -1407,6 +1843,19 @@ class DevicePage(QWidget):
                     self.camera_manager.close_all()
             except Exception as e:
                 print(f"[DEVICE PAGE] camera_manager cleanup warning: {e}")
+        try:
+            if self.preview_dialog is not None:
+                self.preview_dialog.close()
+                self.preview_dialog = None
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "laser_tab", None) is not None:
+                self.laser_tab.shutdown()
+        except Exception as e:
+            print(f"[DEVICE PAGE] laser_tab cleanup warning: {e}")
+
         # Reset buttons safely
         try:
             self.start_preview_btn.setEnabled(True)

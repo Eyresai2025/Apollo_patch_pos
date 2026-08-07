@@ -360,13 +360,18 @@ class LiveLaserCycleService:
                 self._status(" " + line)
         handle.result_event.set()
 
-    def start_cycle(self, cycle_id: str) -> Optional[LaserCycleHandle]:
+    def start_cycle(
+        self,
+        cycle_id: str,
+        barcode_folder: str = "",
+        date_folder: str = "",
+    ) -> Optional[LaserCycleHandle]:
         if not self.enabled:
             return None
         if self.profile is None:
             self.validate_configuration()
 
-        date_str = datetime.now().strftime("%d-%m-%Y")
+        date_str = str(date_folder or "").strip() or datetime.now().strftime("%d-%m-%Y")
         output_root_value = str(
             _value("LIVE_LASER_OUTPUT_ROOT", "media/Laser_Capture")
         ).strip()
@@ -374,7 +379,10 @@ class LiveLaserCycleService:
         if not output_root.is_absolute():
             project_root = self.media_root.parent
             output_root = project_root / output_root
-        cycle_dir = output_root / self.sku_name / date_str / str(cycle_id)
+        cycle_dir = output_root / self.sku_name / date_str
+        if str(barcode_folder or "").strip():
+            cycle_dir = cycle_dir / str(barcode_folder).strip()
+        cycle_dir = cycle_dir / str(cycle_id)
         cycle_dir.mkdir(parents=True, exist_ok=True)
 
         runner = Path(__file__).with_name("live_laser_cycle_runner.py")
@@ -412,7 +420,8 @@ class LiveLaserCycleService:
         while time.monotonic() < deadline:
             if handle.ready_event.wait(0.05):
                 self._status(
-                    f" Laser prepared and armed | SKU={self.sku_name} | cycle={cycle_id}"
+                    f" Laser prepared and armed | SKU={self.sku_name} | "
+                    f"barcode={barcode_folder or '-'} | cycle={cycle_id}"
                 )
                 return handle
             return_code = process.poll()

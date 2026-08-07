@@ -3,7 +3,7 @@
 # PyQt5 CAMERA CAPTURE SETTINGS TAB
 # Lucid Arena SDK + Multi Camera Stitching
 # Four 4K cameras with one shared innerwall/bead camera
-# Shared 4K serial: 254901431
+# Shared 4K serial: 254901428
 # =========================================================
 
 import os
@@ -865,7 +865,7 @@ class ManualCameraCaptureTab(QWidget):
         # Optional exact serial order. Leave blank to use first N detected cameras.
         self.camera_serials_edit = QLineEdit("")
         self.camera_serials_edit.setPlaceholderText(
-            "Optional: 254901428,254901432,254901430,254901431"
+            "Optional: 254901432,254901431,254901430,254901428"
         )
 
         # CAMERA SETTINGS - default values for normal 4K cameras.
@@ -1454,7 +1454,7 @@ class AutoPLCFFCProcessTab(QWidget):
         transport_panel, transport_l = panel("Image & Transport")
         transport_form = compact_form()
         self.camera_height_spin = self.make_spin(1, 100000, 15000)
-        self.shared_camera_serial = "254901431"
+        self.shared_camera_serial = "254901428"
         self.final_height_spin = self.make_spin(1, 200000, 60000)
         self.stream_buffers_spin = self.make_spin(1, 128, 16)
         self.buffer_timeout_spin = self.make_spin(1000, 300000, 300000)
@@ -2091,7 +2091,7 @@ class AutoPLCFFCProcessTab(QWidget):
             or self.shared_camera_serial
         ).strip()
         if not shared_serial:
-            shared_serial = "254901431"
+            shared_serial = "254901428"
         cameras["innerwall"]["serial"] = shared_serial
         cameras["bead"]["serial"] = shared_serial
 
@@ -2134,7 +2134,7 @@ class AutoPLCFFCProcessTab(QWidget):
         self.loaded_camera_profile = profile
         self.loaded_camera_profile_path = str(path)
         self.loaded_sku_name = sku
-        self.shared_camera_serial = str(profile.get("shared_inner_bead_serial", "254901431"))
+        self.shared_camera_serial = str(profile.get("shared_inner_bead_serial", "254901428"))
         self.profile_status_label.setText(
             f"Loaded SKU={sku} | {path} | shared bead/inner serial={self.shared_camera_serial}"
         )
@@ -2215,7 +2215,7 @@ class AutoPLCFFCProcessTab(QWidget):
         profile = {
             "profile_type": "camera",
             "sku_name": "CAPTURE_PAGE_DEFAULT",
-            "shared_inner_bead_serial": "254901431",
+            "shared_inner_bead_serial": "254901428",
             "cameras": {
                 "sidewall1": {
                     "serial": "254901432", "enabled": True, "width": 4096,
@@ -2224,7 +2224,7 @@ class AutoPLCFFCProcessTab(QWidget):
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
                 },
                 "sidewall2": {
-                    "serial": "254901428", "enabled": True, "width": 4096,
+                    "serial": "254901431", "enabled": True, "width": 4096,
                     "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
                     "acquisition_line_rate": 11471.0, "exposure_time": 86.0, "gain": 24.0,
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
@@ -2236,14 +2236,14 @@ class AutoPLCFFCProcessTab(QWidget):
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
                 },
                 "bead": {
-                    "serial": "254901431", "enabled": True, "width": 4096,
+                    "serial": "254901428", "enabled": True, "width": 4096,
                     "camera_height": 15000, "pixel_format": "Mono8", "final_height": 60000,
                     "acquisition_line_rate": 8937.0, "exposure_time": 61.5, "gain": 20.0,
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
                 },
                 "innerwall": {
-                    "serial": "254901431", "enabled": True, "width": 4096,
-                    "camera_height": 15000, "pixel_format": "Mono8", "final_height": 60000,
+                    "serial": "254901428", "enabled": True, "width": 4096,
+                    "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
                     "acquisition_line_rate": 12744.0, "exposure_time": 78.0, "gain": 24.0,
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
                 },
@@ -2466,7 +2466,7 @@ class AutoPLCFFCProcessTab(QWidget):
                 "Main Trigger Latch": self.main_latch_chk.isChecked(),
                 "Shared FrameStart Stream": False,
                 "Post-trigger Buffer Delay sec": self.after_trigger_delay_spin.value(),
-                "Shared 254901431 Acquisition": "Validated native-copy capture; immediate BEAD-to-INNERWALL profile switch",
+                "Shared 254901428 Acquisition": "Validated native-copy capture; immediate BEAD-to-INNERWALL profile switch",
                 "Main Images": self.num_main_spin.value(),
                 "Bead Images": self.num_bead_spin.value(),
                 "4K Camera/Patch Height": self.camera_height_spin.value(),

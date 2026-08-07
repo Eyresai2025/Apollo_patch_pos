@@ -126,9 +126,20 @@ def derive_cycle_uid(result: Mapping[str, Any]) -> str:
             break
 
     date_key = date_key or datetime.now().strftime("%Y%m%d")
+    barcode = str(
+        result.get("barcode_folder")
+        or result.get("barcode")
+        or ""
+    ).strip()
     safe_sku = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in sku_name)
     safe_cycle = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in cycle_id)
-    return f"{safe_sku}:{date_key}:{safe_cycle}"
+    if not barcode:
+        # Preserve the legacy UID format for historical/non-barcode workflows.
+        return f"{safe_sku}:{date_key}:{safe_cycle}"
+    safe_barcode = "".join(
+        ch if ch.isalnum() or ch in "-_" else "_" for ch in barcode
+    ) or "NO_BARCODE"
+    return f"{safe_sku}:{date_key}:{safe_barcode}:{safe_cycle}"
 
 
 def _first_non_empty(mapping: Mapping[str, Any], *keys: str) -> Any:
@@ -465,6 +476,9 @@ def build_inspection_document(
         "inspectionDate": now_local.strftime("%d-%m-%Y"),
         "sku_name": result.get("sku_name"),
         "tyre_name": result.get("tyre_name"),
+        "barcode": result.get("barcode"),
+        "barcode_normalized": result.get("barcode_normalized"),
+        "barcode_folder": result.get("barcode_folder"),
         "cycle_decision": source_label,
         "final_label": source_label,
         "cycle_latency_sec": result.get("cycle_latency_sec"),
@@ -478,6 +492,17 @@ def build_inspection_document(
         "image_map": mongo_safe(image_map),
         "side_results": mongo_safe(side_results),
         "cycle_output_dir": result.get("cycle_dir") or result.get("output_dir"),
+        "cycle_capture_dir": result.get("capture_dir"),
+        "cycle_laser_dir": (
+            (result.get("laser_capture") or {}).get("cycle_dir")
+            if isinstance(result.get("laser_capture"), Mapping)
+            else result.get("laser_dir")
+        ),
+        "cycle_timing_dir": (
+            (result.get("cycle_timing_files") or {}).get("cycle_dir")
+            if isinstance(result.get("cycle_timing_files"), Mapping)
+            else result.get("timing_dir")
+        ),
 
         # Schema V2 fields.
         "schema_version": config.inspection.schema_version,

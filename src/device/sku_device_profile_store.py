@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from datetime import datetime
-from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.COMMON.repositories import DeviceProfileRepository
 
@@ -22,6 +23,20 @@ def _json_safe(value: Any) -> Any:
         return str(value)
 
 
+def _safe_sku_name(value: str) -> str:
+    """Validate the folder name used by Main_cam and the Device page."""
+    sku = str(value or "").strip()
+    if not sku:
+        raise ValueError("SKU name is required")
+    if any(part in sku for part in ("..", "/", "\\")):
+        raise ValueError(f"Unsafe SKU name: {sku!r}")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", sku):
+        raise ValueError(
+            "SKU may contain only letters, numbers, underscore, hyphen and dot"
+        )
+    return sku
+
+
 class SKUDeviceProfileStore:
     def __init__(self, media_root: str):
         self.media_root = Path(media_root)
@@ -32,11 +47,28 @@ class SKUDeviceProfileStore:
         self.laser_root.mkdir(parents=True, exist_ok=True)
         self.profile_repository = DeviceProfileRepository()
 
+        self.last_database_error: Optional[str] = None
+        self.last_camera_backup_path: Optional[Path] = None
+        self.last_camera_save_created: Optional[bool] = None
+        self.last_laser_backup_path: Optional[Path] = None
+        self.last_laser_save_created: Optional[bool] = None
+
+    def normalize_sku_name(self, sku_name: str) -> str:
+        return _safe_sku_name(sku_name)
+
     def camera_profile_path(self, sku_name: str) -> Path:
-        return self.camera_root / str(sku_name).strip() / "camera_profile.json"
+        sku = self.normalize_sku_name(sku_name)
+        return self.camera_root / sku / "camera_profile.json"
 
     def laser_profile_path(self, sku_name: str) -> Path:
-        return self.laser_root / str(sku_name).strip() / "laser_profile.json"
+        sku = self.normalize_sku_name(sku_name)
+        return self.laser_root / sku / "laser_profile.json"
+
+    def camera_profile_exists(self, sku_name: str) -> bool:
+        try:
+            return self.camera_profile_path(sku_name).is_file()
+        except ValueError:
+            return False
 
     def list_camera_skus(self) -> List[str]:
         return sorted(
@@ -52,14 +84,24 @@ class SKUDeviceProfileStore:
             if entry.is_dir() and (entry / "laser_profile.json").is_file()
         )
 
+    def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(path.name + ".tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=4)
+            handle.flush()
+        temp_path.replace(path)
+
     def save_camera_profile(self, sku_name: str, profile: Dict[str, Any]) -> Path:
+        sku = self.normalize_sku_name(sku_name)
         profile = _json_safe(profile)
+
         # Version 2 stores separate logical Inner and Bead profiles even when
         # both roles share one physical camera serial.
         profile["schema_version"] = max(int(profile.get("schema_version", 2)), 2)
         profile["profile_type"] = "camera"
-        profile["sku"] = str(profile.get("sku") or sku_name)
-        profile["sku_name"] = str(sku_name)
+        profile["sku"] = sku
+        profile["sku_name"] = sku
         profile["global_trigger_source"] = ".env"
         profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -72,29 +114,47 @@ class SKUDeviceProfileStore:
             profile["shared_inner_bead_serial"] = inner_serial
             profile["shared_role_profiles_enabled"] = True
         else:
-            profile.setdefault("shared_role_profiles_enabled", False)
-            if not profile.get("shared_role_profiles_enabled"):
-                profile.pop("shared_inner_bead_serial", None)
+            profile["shared_role_profiles_enabled"] = False
+            profile.pop("shared_inner_bead_serial", None)
 
-        path = self.camera_profile_path(sku_name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(profile, f, indent=4)
+        path = self.camera_profile_path(sku)
+        existed = path.is_file()
+        self.last_camera_save_created = not existed
+        self.last_camera_backup_path = None
+        self.last_database_error = None
 
-        self._upsert_to_postgres(
-            collection_name="Camera Device Profiles",
-            sku_name=sku_name,
-            profile_type="camera",
-            profile=profile,
-            json_path=str(path),
-        )
+        if existed:
+            backup_path = path.with_name(
+                "camera_profile.before_device_update.json"
+            )
+            shutil.copy2(path, backup_path)
+            self.last_camera_backup_path = backup_path
+
+        self._atomic_write_json(path, profile)
+
+        # The JSON file is the canonical runtime input loaded by Main_cam.
+        # PostgreSQL is synchronized separately; a database outage must not
+        # make a successfully written JSON profile appear lost to the operator.
+        try:
+            self._upsert_to_postgres(
+                collection_name="Camera Device Profiles",
+                sku_name=sku,
+                profile_type="camera",
+                profile=profile,
+                json_path=str(path),
+            )
+        except Exception as exc:
+            self.last_database_error = str(exc)
+            print(f"[PROFILE][PostgreSQL][WARN] Save failed: {exc}")
+
         return path
 
     def load_camera_profile(self, sku_name: str) -> Dict[str, Any]:
-        path = self.camera_profile_path(sku_name)
+        sku = self.normalize_sku_name(sku_name)
+        path = self.camera_profile_path(sku)
         if not path.exists():
             raise FileNotFoundError(f"Camera profile not found: {path}")
-        with open(path, "r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             profile = json.load(f)
 
         # Accept older files that used innerwall instead of inner.
@@ -104,75 +164,53 @@ class SKUDeviceProfileStore:
         return profile
 
     def save_laser_profile(self, sku_name: str, profile: Dict[str, Any]) -> Path:
+        sku = self.normalize_sku_name(sku_name)
         profile = _json_safe(profile)
-        profile["schema_version"] = max(int(profile.get("schema_version", 1)), 1)
+        # Sapera Live integration requires laser profile schema version 2.
+        profile["schema_version"] = max(int(profile.get("schema_version", 2)), 2)
         profile["profile_type"] = "laser"
-        profile["sku_name"] = str(sku_name)
+        profile["sku"] = sku
+        profile["sku_name"] = sku
+        profile["inherit_env_defaults"] = bool(
+            profile.get("inherit_env_defaults", True)
+        )
         profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        path = self.laser_profile_path(sku_name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(profile, f, indent=4)
+        path = self.laser_profile_path(sku)
+        existed = path.is_file()
+        self.last_laser_save_created = not existed
+        self.last_laser_backup_path = None
+        self.last_database_error = None
 
-        self._upsert_to_postgres(
-            collection_name="Laser Device Profiles",
-            sku_name=sku_name,
-            profile_type="laser",
-            profile=profile,
-            json_path=str(path),
-        )
+        if existed:
+            backup_path = path.with_name(
+                "laser_profile.before_device_update.json"
+            )
+            shutil.copy2(path, backup_path)
+            self.last_laser_backup_path = backup_path
+
+        self._atomic_write_json(path, profile)
+
+        try:
+            self._upsert_to_postgres(
+                collection_name="Laser Device Profiles",
+                sku_name=sku,
+                profile_type="laser",
+                profile=profile,
+                json_path=str(path),
+            )
+        except Exception as exc:
+            self.last_database_error = str(exc)
+            print(f"[PROFILE][PostgreSQL][WARN] Save failed: {exc}")
+
         return path
 
     def load_laser_profile(self, sku_name: str) -> Dict[str, Any]:
         path = self.laser_profile_path(sku_name)
         if not path.exists():
             raise FileNotFoundError(f"Laser profile not found: {path}")
-        with open(path, "r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             return json.load(f)
-
-    def copy_camera_profile(self, source_sku: str, destination_sku: str) -> Path:
-        """Copy one SKU camera JSON into another SKU safely.
-
-        The complete camera settings are preserved, including serial mappings,
-        image geometry, line rates, exposure, gain, transport settings and the
-        separate Inner/Bead logical profiles.  Destination identity and copy
-        traceability are rewritten before the normal save/upsert path is used.
-        """
-        source = str(source_sku or "").strip()
-        destination = str(destination_sku or "").strip()
-        if not source or not destination:
-            raise ValueError("Source SKU and destination SKU are required")
-        if source == destination:
-            raise ValueError("Source and destination camera profile SKU are the same")
-
-        profile = deepcopy(self.load_camera_profile(source))
-        profile["sku"] = destination
-        profile["sku_name"] = destination
-        profile["copied_from_sku"] = source
-        profile["copied_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return self.save_camera_profile(destination, profile)
-
-    def copy_laser_profile(self, source_sku: str, destination_sku: str) -> Path:
-        """Copy one SKU laser JSON into another SKU safely.
-
-        The complete laser mapping/settings are preserved, including serials,
-        UserSet selection, scan/AOI parameters, trigger settings and output
-        configuration. Destination identity and provenance are rewritten.
-        """
-        source = str(source_sku or "").strip()
-        destination = str(destination_sku or "").strip()
-        if not source or not destination:
-            raise ValueError("Source SKU and destination SKU are required")
-        if source == destination:
-            raise ValueError("Source and destination laser profile SKU are the same")
-
-        profile = deepcopy(self.load_laser_profile(source))
-        profile["sku"] = destination
-        profile["sku_name"] = destination
-        profile["copied_from_sku"] = source
-        profile["copied_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return self.save_laser_profile(destination, profile)
 
     def _upsert_to_postgres(
         self,
@@ -183,13 +221,9 @@ class SKUDeviceProfileStore:
         json_path: str,
     ) -> None:
         """Persist the profile JSON and its fixed relational keys in PostgreSQL."""
-        try:
-            self.profile_repository.upsert_profile(
-                sku_name=sku_name,
-                profile_type=profile_type,
-                profile=_json_safe(profile),
-                json_path=json_path,
-            )
-        except Exception as exc:
-            print(f"[PROFILE][PostgreSQL][WARN] Save failed: {exc}")
-            raise
+        self.profile_repository.upsert_profile(
+            sku_name=sku_name,
+            profile_type=profile_type,
+            profile=_json_safe(profile),
+            json_path=json_path,
+        )

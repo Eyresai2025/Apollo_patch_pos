@@ -21,7 +21,7 @@
 #   - No image display
 #   - No histogram
 #   - No gain plot
-#   - Same physical camera serial 254901431 is opened only once
+#   - Same physical camera serial 254901428 is opened only once
 #     and used for both inner and bead roles.
 #
 # FFC method used here:
@@ -122,7 +122,7 @@ PIXEL_FORMAT = "Mono8"  # final production fallback; each camera can override th
 #   BEAD edge -> sidewall1 + sidewall2 + tread + bead capture in parallel.
 #   MAIN is pre-armed while LOW and is allowed to latch only after the BEAD edge.
 #   The stored MAIN edge is consumed only after the BEAD group is complete and
-#   shared camera 254901431 is fully re-armed. Therefore an early/short MAIN
+#   shared camera 254901428 is fully re-armed. Therefore an early/short MAIN
 #   pulse during BEAD capture/reset is not lost, but INNERWALL never starts early.
 PLC_TRIGGER_SEQUENCE = "BEAD_GROUP_THEN_LATCHED_MAIN_INNER_ONLY"
 MAIN_TRIGGER_POLICY = "LATCH_AFTER_BEAD_EDGE_RELEASE_AFTER_GROUP_READY"
@@ -151,7 +151,7 @@ TRIGGER_ACTIVATION = "RisingEdge"
 AFTER_TRIGGER_DELAY_SEC = 0.0
 
 # All four cameras use AcquisitionStart/Software triggering and normal
-# multi-buffer stitching. Serial 254901431 is shared by BEAD and INNERWALL, so
+# multi-buffer stitching. Serial 254901428 is shared by BEAD and INNERWALL, so
 # it receives a full AcquisitionStop + stream stop/start re-arm between roles.
 AFTER_ACQ_STOP_DELAY_SEC = 0.10
 ACQUISITION_STOP_RETRIES = 3
@@ -170,7 +170,7 @@ SHARED_FULL_REARM_VERIFY_DELAY_SEC = 0.10
 # Shared physical 4K camera used for bead first and innerwall later.
 # It uses the same AcquisitionStart/Software trigger and 4K stitching logic as
 # the other cameras. A complete stream re-arm separates the two logical roles.
-SHARED_INNER_BEAD_SERIAL = "254901431"
+SHARED_INNER_BEAD_SERIAL = "254901428"
 SHARED_FRAME_START_MODE = False
 SHARED_CAMERA_HEIGHT = 15000
 SHARED_SINGLE_FRAME_MODE = False
@@ -240,13 +240,13 @@ SAVE_GAIN_NPY = False
 # CAMERA SERIAL CONFIG
 #
 # IMPORTANT:
-# Do NOT repeat serial 254901431 twice.
+# Do NOT repeat serial 254901428 twice.
 # The same 4K camera has two roles: innerwall + bead.
 # All physical cameras use width 4096 and editable line-rate settings.
 # ============================================================
 
 CAMERA_CONFIGS: Dict[str, Dict[str, Any]] = {
-    "254901428": {
+    "254901431": {
         "enabled": True,
         "camera_name": "sidewall2",
         "width": 4096,
@@ -294,7 +294,7 @@ CAMERA_CONFIGS: Dict[str, Dict[str, Any]] = {
             {"name": "tread", "group": "bead", "enabled": True},
         ],
     },
-    "254901431": {
+    "254901428": {
         "enabled": True,
         "camera_name": "inner_camera_used_for_inner_and_bead",
         "width": 4096,
@@ -1136,7 +1136,7 @@ def rearm_triggered_camera_for_next_cycle(
     """
     Re-arm an AcquisitionStart/software-triggered camera.
 
-    Shared serial 254901431:
+    Shared serial 254901428:
         Use the original full reset required between BEAD and INNERWALL:
         AcquisitionStop -> stop Arena stream -> reapply trigger nodes ->
         start Arena stream -> flush stale buffers -> verify trigger state.
@@ -1475,7 +1475,7 @@ def capture_one_full_image(camera, info: Dict[str, Any], task: "CaptureTask") ->
     full_dtype = get_capture_dtype(info)
 
     # Optional compatibility path for any explicitly configured FrameStart direct frame.
-    # Production serial 254901431 does not use this path.
+    # Production serial 254901428 does not use this path.
     if frame_trigger_stream and SHARED_SINGLE_FRAME_MODE:
         if final_height != camera_height:
             raise RuntimeError(
@@ -2013,7 +2013,7 @@ def rearm_unique_actors_for_next_cycle(targets, label: str) -> bool:
 
 
 def rearm_shared_camera_for_innerwall(targets, label: str) -> bool:
-    """Re-arm only shared serial 254901431 between bead and innerwall."""
+    """Re-arm only shared serial 254901428 between bead and innerwall."""
     shared_targets = [
         (actor, role_name)
         for actor, role_name in targets
@@ -2045,7 +2045,7 @@ def capture_bead_group_with_overlapped_shared_rearm(
     """
     Capture SW1 + SW2 + tread + bead in parallel.
 
-    Shared serial 254901431 is a normal 4K AcquisitionStart camera. After its
+    Shared serial 254901428 is a normal 4K AcquisitionStart camera. After its
     bead image is complete, it is fully re-armed while the remaining BEAD-group
     cameras finish. INNERWALL is released only after that re-arm succeeds.
     """
@@ -2157,7 +2157,7 @@ def plc_bead_then_main_controller(main_targets, bead_targets) -> None:
         2. Wait for a fresh BEAD LOW -> HIGH edge.
         3. Immediately open the MAIN latch gate.
         4. Capture sidewall1 + sidewall2 + tread + bead in parallel.
-        5. Fully re-arm shared 254901431 after BEAD using the same 4K AcquisitionStart profile.
+        5. Fully re-arm shared 254901428 after BEAD using the same 4K AcquisitionStart profile.
         6. After the complete BEAD group is ready, consume
            the stored MAIN edge. If MAIN has not arrived yet, wait for it.
         7. Capture innerwall only.

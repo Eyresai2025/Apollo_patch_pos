@@ -57,13 +57,16 @@ def save_cycle_timing_report(
     camera_timing: Optional[Mapping[str, Any]] = None,
     image_save_timing: Optional[Mapping[str, Any]] = None,
     ai_result: Optional[Mapping[str, Any]] = None,
+    barcode: str = '',
+    barcode_folder: str = '',
+    date_folder: str = '',
     status: str = 'COMPLETED',
     error: str = '',
 ) -> Dict[str, str]:
     """Save one cycle timing report in long CSV + JSON form.
 
     Layout:
-      media/cycle_time_breakdown/<SKU>/<DD-MM-YYYY>/<Cycle_N>/
+      media/cycle_time_breakdown/<SKU>/<DD-MM-YYYY>/<BARCODE>/<Cycle_N>/
         cycle_timing_breakdown.csv
         ai_side_stage_timing.csv
         cycle_timing_summary.json
@@ -72,12 +75,33 @@ def save_cycle_timing_report(
     """
     sku = _safe_name(sku_name, 'unknown_sku')
     cycle = _safe_name(cycle_id, 'unknown_cycle')
-    try:
-        date_folder = datetime.strptime(cycle_wall_start[:10], '%Y-%m-%d').strftime('%d-%m-%Y')
-    except Exception:
-        date_folder = datetime.now().strftime('%d-%m-%Y')
+    requested_date_folder = str(date_folder or '').strip()
+    if requested_date_folder:
+        resolved_date_folder = requested_date_folder
+    else:
+        try:
+            resolved_date_folder = datetime.strptime(
+                cycle_wall_start[:10], '%Y-%m-%d'
+            ).strftime('%d-%m-%Y')
+        except Exception:
+            resolved_date_folder = datetime.now().strftime('%d-%m-%Y')
+    date_folder = resolved_date_folder
 
-    root = Path(media_root).expanduser().resolve() / 'cycle_time_breakdown' / sku / date_folder
+    barcode_value = str(barcode or '').strip()
+    has_barcode = bool(barcode_value or str(barcode_folder or '').strip())
+    barcode_dir_name = (
+        _safe_name(barcode_folder or barcode_value, 'NO_BARCODE')
+        if has_barcode
+        else ''
+    )
+    root = (
+        Path(media_root).expanduser().resolve()
+        / 'cycle_time_breakdown'
+        / sku
+        / date_folder
+    )
+    if has_barcode:
+        root = root / barcode_dir_name
     cycle_dir = root / cycle
     cycle_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,6 +111,8 @@ def save_cycle_timing_report(
             'sku_name': sku,
             'date': date_folder,
             'cycle_id': cycle,
+            'barcode': barcode_value,
+            'barcode_folder': barcode_dir_name,
             'cycle_start': cycle_wall_start,
             'status': status,
             'category': category,
@@ -129,6 +155,8 @@ def save_cycle_timing_report(
                 'sku_name': sku,
                 'date': date_folder,
                 'cycle_id': cycle,
+                'barcode': barcode_value,
+                'barcode_folder': barcode_dir_name,
                 'cycle_start': cycle_wall_start,
                 'side': side,
                 'pipeline_status': side_result.get('pipeline_status',''),
@@ -142,8 +170,8 @@ def save_cycle_timing_report(
             ai_rows.append(row)
             add('AI', side, stage, duration, value=side_result.get('final_label',''))
 
-    cycle_fields = ['sku_name','date','cycle_id','cycle_start','status','category','side','stage','duration_sec','value','detail']
-    ai_fields = ['sku_name','date','cycle_id','cycle_start','side','pipeline_status','final_label','stage','duration_sec','patch_count','defect_count','score']
+    cycle_fields = ['sku_name','date','cycle_id','barcode','barcode_folder','cycle_start','status','category','side','stage','duration_sec','value','detail']
+    ai_fields = ['sku_name','date','cycle_id','barcode','barcode_folder','cycle_start','side','pipeline_status','final_label','stage','duration_sec','patch_count','defect_count','score']
 
     cycle_csv = cycle_dir / 'cycle_timing_breakdown.csv'
     ai_csv = cycle_dir / 'ai_side_stage_timing.csv'
@@ -157,6 +185,8 @@ def save_cycle_timing_report(
         'sku_name': sku,
         'date': date_folder,
         'cycle_id': cycle,
+        'barcode': barcode_value,
+        'barcode_folder': barcode_dir_name,
         'cycle_start': cycle_wall_start,
         'status': status,
         'error': error,

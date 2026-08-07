@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.COMMON.structured_logging import get_logger
 logger = get_logger(__name__, component="INSPECTION")
 from src.COMMON.cycle_timing_reporter import save_cycle_timing_report
-from src.COMMON.barcode_context import BarcodeContext, build_barcode_context
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
 import traceback
@@ -78,7 +77,6 @@ class ContinuousCycleWorker(QObject):
     finished = pyqtSignal()
     error = pyqtSignal(str)
     ready_for_inspection = pyqtSignal(str)
-    barcode_required = pyqtSignal(dict)
    
     def __init__(
         self,
@@ -95,17 +93,11 @@ class ContinuousCycleWorker(QObject):
         capture_sides: Optional[List[str]] = None,
         side_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         auto_preload: bool = True,
-        barcode: str = "",
     ):
         super().__init__()
         self.media_root = os.path.abspath(media_root)
         self.sku_name = sku_name
         self.tyre_name = tyre_name
-        self._barcode_lock = threading.RLock()
-        self._barcode_ready_event = threading.Event()
-        self._current_barcode: Optional[BarcodeContext] = None
-        if str(barcode or "").strip():
-            self.set_next_barcode(barcode)
         self.device = _normalize_device(device)
         self.seg_model_a_path = seg_model_a_path
         self.seg_model_b_path = seg_model_b_path
@@ -153,11 +145,7 @@ class ContinuousCycleWorker(QObject):
         self.status_update.emit(" Starting Continuous Inspection System")
         self.status_update.emit(f"   Trigger Mode: {TRIGGER_MODE.upper()}")
         self.status_update.emit(f"   SKU: {self.sku_name}")
-        self.status_update.emit(f"   Tyre profile: {self.tyre_name}")
-        initial_barcode = self.get_current_barcode()
-        self.status_update.emit(
-            f"   Barcode: {initial_barcode.raw if initial_barcode else '-'}"
-        )
+        self.status_update.emit(f"   Tyre: {self.tyre_name}")
         self.status_update.emit(f"   Device: {self.device}")
         self.status_update.emit(f"   Min Interval: {self.min_capture_interval}s")
         self.status_update.emit(f"   Sides: {', '.join(self.sides_to_run)}")
@@ -247,8 +235,7 @@ class ContinuousCycleWorker(QObject):
         ready_msg = (
             f"Camera configuration completed and PatchCore runtime loaded.\n\n"
             f"SKU: {self.sku_name}\n"
-            f"Tyre profile: {self.tyre_name}\n"
-            f"Barcode: {(self.get_current_barcode().raw if self.get_current_barcode() else '-')}\n"
+            f"Tyre: {self.tyre_name}\n"
             f"Active views: {', '.join(self.sides_to_run)}\n"
             f"Laser capture: {'Enabled' if (self.live_laser_service and self.live_laser_service.enabled) else 'Disabled'}\n\n"
             f"Click OK to start waiting for trigger."
@@ -270,17 +257,11 @@ class ContinuousCycleWorker(QObject):
         else:
             self.status_update.emit(" Waiting for PLC software trigger signal...")
  
-        # MAIN LOOP - every tyre requires a confirmed barcode before the worker
-        # reserves folders, arms the laser or enters the PLC trigger wait.
-        previous_result: Optional[Dict[str, Any]] = None
+        # MAIN LOOP - capture_all() blocks internally based on CAM_TRIGGER_MODE
         while not self._stop_event.is_set() and not self._stopping:
             try:
-                barcode_context = self._wait_for_barcode(previous_result)
-                if barcode_context is None:
-                    break
-
                 should_capture = False
-
+ 
                 # PLC mode should re-enter the fresh LOW->HIGH wait immediately
                 # after the previous cycle and camera preparation are complete.
                 # The interval guard remains only for non-PLC test modes.
@@ -289,23 +270,19 @@ class ContinuousCycleWorker(QObject):
                     should_capture = True
                 elif current_time - last_capture_time >= self.min_capture_interval:
                     should_capture = True
-
+ 
                 if should_capture:
                     capture_count += 1
                     wait_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
                     self.status_update.emit("")
                     self.status_update.emit(
-                        f" Barcode {barcode_context.raw} confirmed for cycle #{capture_count}"
-                    )
-                    self.status_update.emit(
                         f" Waiting for BEAD trigger for cycle #{capture_count}..."
                     )
 
-                    capture_success, cycle_result = self._execute_capture(
+                    capture_success = self._execute_capture(
                         capture_count,
                         wait_timestamp,
-                        barcode_context,
                     )
 
                     if self._stop_event.is_set() or self._stopping:
@@ -313,11 +290,6 @@ class ContinuousCycleWorker(QObject):
 
                     if capture_success:
                         last_capture_time = time.time()
-                        previous_result = dict(cycle_result or {})
-                        # One manually-entered barcode belongs to exactly one
-                        # completed tyre cycle. The next loop cannot accept a PLC
-                        # trigger until GUI supplies a fresh barcode.
-                        self._clear_current_barcode()
                     else:
                         # Do not automatically enter another trigger cycle with
                         # cameras in ERROR/not-ready state. Require operator restart.
@@ -346,55 +318,6 @@ class ContinuousCycleWorker(QObject):
             # GUI object may already be closing; never crash during shutdown.
             pass
    
-    def set_next_barcode(self, raw_barcode: str) -> Dict[str, str]:
-        """Supply the barcode for the next tyre without reloading runtimes."""
-        context = build_barcode_context(raw_barcode)
-        with self._barcode_lock:
-            self._current_barcode = context
-            self._barcode_ready_event.set()
-        try:
-            self.status_update.emit(
-                f" Barcode confirmed: {context.raw} | folder={context.folder_name}"
-            )
-        except RuntimeError:
-            pass
-        return context.as_dict()
-
-    def get_current_barcode(self) -> Optional[BarcodeContext]:
-        with self._barcode_lock:
-            return self._current_barcode
-
-    def _clear_current_barcode(self) -> None:
-        with self._barcode_lock:
-            self._current_barcode = None
-            self._barcode_ready_event.clear()
-
-    def _wait_for_barcode(self, previous_result: Optional[Dict[str, Any]] = None) -> Optional[BarcodeContext]:
-        """Block before PLC trigger wait until the operator confirms a barcode."""
-        if not self._barcode_ready_event.is_set():
-            request = {
-                "sku_name": self.sku_name,
-                "previous_cycle_id": (previous_result or {}).get("cycle_id"),
-                "previous_barcode": (previous_result or {}).get("barcode"),
-                "previous_result": (previous_result or {}).get("final_label"),
-            }
-            self.status_update.emit(
-                " Waiting for next tyre barcode. PLC trigger is not being accepted."
-            )
-            set_live_progress(
-                phase="WAITING_BARCODE",
-                active_zone="-",
-                images_captured=0,
-                total_images=len(self.capture_sides),
-                message="Enter and confirm the next tyre barcode",
-            )
-            self.barcode_required.emit(request)
-
-        while not self._stop_event.is_set() and not self._stopping:
-            if self._barcode_ready_event.wait(0.1):
-                return self.get_current_barcode()
-        return None
-
     def confirm_ready_to_start(self):
         self._ready_confirm_event.set()
 
@@ -629,16 +552,11 @@ class ContinuousCycleWorker(QObject):
             images.clear()
         gc.collect()
 
-    def _execute_capture(
-        self,
-        capture_count: int,
-        wait_timestamp: str,
-        barcode_context: BarcodeContext,
-    ) -> tuple[bool, Optional[Dict[str, Any]]]:
-        """Execute one barcode-owned capture, save and AI cycle."""
+    def _execute_capture(self, capture_count: int, wait_timestamp: str) -> bool:
+        """Execute capture, saving and AI; cycle timing begins at BEAD trigger."""
         if self._stop_event.is_set():
             self.status_update.emit(" Capture cancelled because stop was requested.")
-            return False, None
+            return False
 
         begin_production(f"capture_ai_cycle_{capture_count}")
 
@@ -661,7 +579,6 @@ class ContinuousCycleWorker(QObject):
         laser_cycle_result: Optional[Dict[str, Any]] = None
         cycle_capture_dir: Optional[str] = None
         cycle_id: Optional[str] = None
-        cycle_date_folder: Optional[str] = None
 
         try:
             # Reserve one shared cycle identifier before either hardware path
@@ -671,24 +588,14 @@ class ContinuousCycleWorker(QObject):
             cycle_capture_dir, cycle_id = build_cycle_capture_dir(
                 self.media_root,
                 sku_name=self.sku_name,
-                barcode=barcode_context.raw,
             )
-            cycle_date_folder = os.path.basename(
-                os.path.dirname(os.path.dirname(cycle_capture_dir))
-            )
-            self.status_update.emit(
-                f" Reserved cycle directory: {barcode_context.folder_name}/{cycle_id}"
-            )
+            self.status_update.emit(f" Reserved cycle directory: {cycle_id}")
 
             if self.live_laser_service is not None and self.live_laser_service.enabled:
                 self.status_update.emit(
                     f" Preparing and arming laser for {cycle_id} before BEAD wait..."
                 )
-                laser_cycle_handle = self.live_laser_service.start_cycle(
-                    cycle_id,
-                    barcode_folder=barcode_context.folder_name,
-                    date_folder=cycle_date_folder or "",
-                )
+                laser_cycle_handle = self.live_laser_service.start_cycle(cycle_id)
 
             set_live_progress(
                 phase="CAPTURING",
@@ -761,7 +668,7 @@ class ContinuousCycleWorker(QObject):
                         " Trigger wait released by operator stop; "
                         "no new inspection cycle was started."
                     )
-                    return False, result
+                    return False
 
                 camera_timing = getattr(
                     self.multi_camera_manager,
@@ -795,7 +702,7 @@ class ContinuousCycleWorker(QObject):
 
             if self._stop_event.is_set():
                 self.status_update.emit(" Capture stopped during camera acquisition.")
-                return False, result
+                return False
 
             missing_capture_sides = [
                 side for side in self.capture_sides
@@ -814,7 +721,7 @@ class ContinuousCycleWorker(QObject):
             if not images or not any(img is not None for img in images.values()):
                 self.status_update.emit(" Capture failed - no images received")
                 self.processing_error.emit("No images captured")
-                return False, result
+                return False
 
             success_count = sum(1 for img in images.values() if img is not None)
             set_live_progress(
@@ -843,10 +750,7 @@ class ContinuousCycleWorker(QObject):
                     "tyre_id": self.tyre_name,
                     "sku_name": self.sku_name,
                     "status": "CAPTURED",
-                    "details": {
-                        "barcode": barcode_context.raw,
-                        "capture_count": capture_count,
-                    },
+                    "details": {"capture_count": capture_count},
                 },
             )
 
@@ -862,7 +766,7 @@ class ContinuousCycleWorker(QObject):
             if not image_map:
                 self.status_update.emit(" No images saved to cycle directory")
                 self.processing_error.emit("Failed to save images")
-                return False, result
+                return False
 
             self.images_saved.emit(image_map)
 
@@ -910,14 +814,13 @@ class ContinuousCycleWorker(QObject):
                 self.status_update.emit(
                     " Inspection stage skipped because stop was requested."
                 )
-                return False, result
+                return False
 
             pipeline_t0 = time.perf_counter()
             result = self._run_ai_pipeline(
                 image_map,
                 cycle_id,
                 cycle_capture_dir,
-                barcode_context,
             )
             pipeline_sec = time.perf_counter() - pipeline_t0
             self._timing_log(
@@ -930,10 +833,7 @@ class ContinuousCycleWorker(QObject):
 
             if not result:
                 self.processing_error.emit("Inspection stage returned no result")
-                return False, result
-
-            result.update(barcode_context.as_dict())
-            result["capture_dir"] = cycle_capture_dir
+                return False
 
             # Camera preparation has already overlapped FFC, saving and AI. Only
             # now, at the cycle boundary, verify that all cameras are ready before
@@ -1031,9 +931,6 @@ class ContinuousCycleWorker(QObject):
                     {},
                 ),
                 ai_result=result,
-                barcode=barcode_context.raw,
-                barcode_folder=barcode_context.folder_name,
-                date_folder=cycle_date_folder or "",
                 status=str(result.get("pipeline_status") or "COMPLETED"),
             )
             result["cycle_timing_files"] = timing_files
@@ -1066,7 +963,6 @@ class ContinuousCycleWorker(QObject):
                     "cycle_id": cycle_id,
                     "tyre_id": self.tyre_name,
                     "sku_name": self.sku_name,
-                    "details": {"barcode": barcode_context.raw},
                     "status": final_label,
                     "duration_ms": round(total_cycle_sec * 1000.0, 3),
                 },
@@ -1080,8 +976,8 @@ class ContinuousCycleWorker(QObject):
                 f"   Time from trigger: {total_cycle_sec:.2f}s"
             )
             self.status_update.emit("─" * 40)
-            self.status_update.emit(" Cycle complete - waiting for next tyre barcode...")
-            return True, result
+            self.status_update.emit(" Cameras ready - waiting for next trigger...")
+            return True
 
         except Exception as error:
             # An operator stop can interrupt a blocking PLC/camera wait. Do not
@@ -1098,7 +994,7 @@ class ContinuousCycleWorker(QObject):
                     )
                 except RuntimeError:
                     pass
-                return False, result
+                return False
 
             try:
                 failure_cycle_id = locals().get("cycle_id") or f"Capture_{capture_count}"
@@ -1128,9 +1024,6 @@ class ContinuousCycleWorker(QObject):
                         {},
                     ),
                     ai_result=result if isinstance(result, dict) else {},
-                    barcode=barcode_context.raw,
-                    barcode_folder=barcode_context.folder_name,
-                    date_folder=cycle_date_folder or "",
                     status="FAILED",
                     error=str(error),
                 )
@@ -1152,11 +1045,10 @@ class ContinuousCycleWorker(QObject):
                     "error_code": "INSPECTION-001",
                     "tyre_id": self.tyre_name,
                     "sku_name": self.sku_name,
-                    "details": {"barcode": barcode_context.raw},
                     "status": "FAILED",
                 },
             )
-            return False, result
+            return False
         finally:
             self._set_cycle_active(False)
             try:
@@ -1365,14 +1257,8 @@ class ContinuousCycleWorker(QObject):
 
         return image_map
 
-    def _run_ai_pipeline(
-        self,
-        image_map: Dict[str, str],
-        cycle_id: str,
-        cycle_capture_dir: str,
-        barcode_context: BarcodeContext,
-    ) -> Optional[Dict[str, Any]]:
-        """Run the configured inspection stage on captured images."""
+    def _run_ai_pipeline(self, image_map: Dict[str, str], cycle_id: str, cycle_capture_dir: str) -> Optional[Dict[str, Any]]:
+        """Run the configured inspection stage on captured images"""
         try:
             self.status_update.emit("─" * 40)
             self.status_update.emit(f"[INSPECTION PIPELINE] Starting for {cycle_id}")
@@ -1398,16 +1284,13 @@ class ContinuousCycleWorker(QObject):
             r_gpu_sem = threading.Semaphore(R_ALIGN_GPU_CONCURRENCY)
             yolo_gpu_sem = threading.Semaphore(YOLO_GPU_CONCURRENCY)
            
-            date_str = os.path.basename(
-                os.path.dirname(os.path.dirname(cycle_capture_dir))
-            ) or datetime.now().strftime("%d-%m-%Y")
+            date_str = datetime.now().strftime("%d-%m-%Y")
  
             output_root = os.path.join(
                 self.media_root,
                 "Output",
                 self.sku_name,
                 date_str,
-                barcode_context.folder_name,
             )
  
             os.makedirs(output_root, exist_ok=True)
@@ -1424,8 +1307,6 @@ class ContinuousCycleWorker(QObject):
                 yolo_gpu_sem=yolo_gpu_sem,
                 sku_name=self.sku_name,
                 tyre_name=self.tyre_name,
-                barcode=barcode_context.raw,
-                barcode_folder=barcode_context.folder_name,
             )
             if not isinstance(result, dict):
                 self.processing_error.emit("run_cycle returned invalid result")
@@ -1561,7 +1442,6 @@ def start_continuous_cycle(
     sku_name: str,
     tyre_name: str,
     multi_camera_manager,
-    barcode: str = "",
     min_capture_interval: float = 2.0,
     seg_model_a_path: Optional[str] = None,
     seg_model_b_path: Optional[str] = None,
@@ -1600,7 +1480,6 @@ def start_continuous_cycle(
         capture_sides=capture_sides,
         side_configs=side_configs,
         auto_preload=auto_preload,
-        barcode=barcode,
     )
    
     if on_capture_started:
@@ -1630,13 +1509,11 @@ def resolve_cycle_capture_dir(
     cycle_id: Optional[str],
     demo_capture_root: Optional[str],
     sku_name: str = "UNKNOWN_SKU",
-    barcode: str = "",
 ) -> tuple[str, str]:
     if CAMERA_CAPTURE_ENABLED:
         cycle_capture_dir, cycle_id = build_cycle_capture_dir(
             media_root,
             sku_name=sku_name,
-            barcode=barcode or None,
         )
         return cycle_capture_dir, cycle_id
  
@@ -1653,7 +1530,6 @@ def resolve_cycle_capture_dir(
     today_root = _get_today_capture_root(
         media_root,
         sku_name=sku_name,
-        barcode=barcode or None,
     )
     existing = [
         d for d in os.listdir(today_root)
@@ -1736,7 +1612,6 @@ def run_capture_folder_cycle(
     seg_model_a_path: Optional[str] = None, seg_model_b_path: Optional[str] = None,
     r_detector_path: Optional[str] = None,
     tyre_name: str = "195_65_R15",
-    barcode: str = "",
     side_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     sides_to_run: Optional[List[str]] = None,
     multi_camera_manager=None, demo_capture_root: Optional[str] = None,
@@ -1756,7 +1631,6 @@ def run_capture_folder_cycle(
         cycle_id=cycle_id,
         demo_capture_root=demo_capture_root,
         sku_name=sku_name,
-        barcode=barcode,
     )
  
     image_map = build_cycle_image_map(
@@ -1783,18 +1657,14 @@ def run_capture_folder_cycle(
  
     r_gpu_sem, yolo_gpu_sem = build_gpu_semaphores()
  
-    if str(barcode or "").strip() and CAMERA_CAPTURE_ENABLED:
-        date_str = os.path.basename(
-            os.path.dirname(os.path.dirname(cycle_capture_dir))
-        ) or datetime.now().strftime("%d-%m-%Y")
-    else:
-        date_str = datetime.now().strftime("%d-%m-%Y")
+    date_str = datetime.now().strftime("%d-%m-%Y")
  
-    output_parts = [media_root, "Output", sku_name, date_str]
-    barcode_context = build_barcode_context(barcode) if str(barcode or "").strip() else None
-    if barcode_context is not None:
-        output_parts.append(barcode_context.folder_name)
-    output_root = os.path.join(*output_parts)
+    output_root = os.path.join(
+        media_root,
+        "Output",
+        sku_name,
+        date_str,
+    )
  
     os.makedirs(output_root, exist_ok=True)
     set_live_progress(
@@ -1809,15 +1679,8 @@ def run_capture_folder_cycle(
         cycle_id=cycle_id, sides_to_run=sides_to_run,
         r_gpu_sem=r_gpu_sem, yolo_gpu_sem=yolo_gpu_sem,
         sku_name=sku_name, tyre_name=tyre_name,
-        barcode=(barcode_context.raw if barcode_context else None),
-        barcode_folder=(barcode_context.folder_name if barcode_context else None),
     )
  
-    if isinstance(result, dict):
-        result["capture_dir"] = cycle_capture_dir
-        if barcode_context is not None:
-            result.update(barcode_context.as_dict())
-
     try:
         set_live_progress(
             phase="COMPLETED",

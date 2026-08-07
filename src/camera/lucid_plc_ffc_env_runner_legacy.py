@@ -63,7 +63,7 @@ def print_runner_settings(cap) -> None:
     print(f"[UI_RUNNER] GLOBAL_PIXEL_FORMAT_FALLBACK={cap.PIXEL_FORMAT}", flush=True)
     print(f"[UI_RUNNER] PLC_TRIGGER_SEQUENCE={getattr(cap, 'PLC_TRIGGER_SEQUENCE', 'BEAD_THEN_MAIN')}", flush=True)
     print("[UI_RUNNER] MAIN_TRIGGER_POLICY=LATCH_AFTER_BEAD_EDGE_RELEASE_AFTER_READY", flush=True)
-    print("[UI_RUNNER] SHARED_254901431_ACQUISITION=4K_ACQUISITIONSTART_STITCH_AND_REARM", flush=True)
+    print("[UI_RUNNER] SHARED_254901428_ACQUISITION=4K_ACQUISITIONSTART_STITCH_AND_REARM", flush=True)
     print(f"[UI_RUNNER] NUM_STREAM_BUFFERS={cap.NUM_STREAM_BUFFERS}", flush=True)
     print(f"[UI_RUNNER] BUFFER_TIMEOUT_MS={cap.BUFFER_TIMEOUT_MS}", flush=True)
     print(f"[UI_RUNNER] PACKET_SIZE={cap.PACKET_SIZE}", flush=True)
@@ -123,7 +123,7 @@ CAPTURE_GROUP_BY_ROLE = {
 }
 
 
-def enforce_requested_capture_flow(configs, shared_serial: str = "254901431"):
+def enforce_requested_capture_flow(configs, shared_serial: str = "254901428"):
     """Force production role groups and the shared 4K AcquisitionStart profile."""
     shared_serial = str(shared_serial)
     for serial, cfg in configs.items():
@@ -180,7 +180,7 @@ def main() -> int:
     )
     cap.SHARED_INNER_BEAD_SERIAL = env_str(
         "APOLLO_SHARED_CAMERA_SERIAL",
-        getattr(cap, "SHARED_INNER_BEAD_SERIAL", "254901431"),
+        getattr(cap, "SHARED_INNER_BEAD_SERIAL", "254901428"),
     )
     cap.SHARED_FRAME_START_MODE = env_bool(
         "APOLLO_SHARED_FRAME_START_MODE",

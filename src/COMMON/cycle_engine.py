@@ -29,6 +29,7 @@ import torch
 
 from src.COMMON.config import get_config
 from src.COMMON.structured_logging import get_logger
+from src.COMMON.barcode_context import build_barcode_context
 from src.camera.HARDWARE_TRIGGER import get_camera_to_side_map, get_side_to_camera_map
 from src.models.patchcore_runtime import (
     PatchCoreSideRuntime,
@@ -108,9 +109,16 @@ def clear_runtime_cache() -> None:
     logger.info("PatchCore runtime cache cleared")
 
 
-def _get_today_capture_root(media_root: str, sku_name: str = "UNKNOWN_SKU") -> str:
+def _get_today_capture_root(
+    media_root: str,
+    sku_name: str = "UNKNOWN_SKU",
+    barcode: Optional[str] = None,
+) -> str:
     date_str = datetime.now().strftime("%d-%m-%Y")
-    today_dir = os.path.join(media_root, "Capture_Input", sku_name, date_str)
+    parts = [media_root, "Capture_Input", sku_name, date_str]
+    if barcode:
+        parts.append(build_barcode_context(barcode).folder_name)
+    today_dir = os.path.join(*parts)
     os.makedirs(today_dir, exist_ok=True)
     return today_dir
 
@@ -133,51 +141,132 @@ def _cycle_numbers_from_root(root: str) -> List[int]:
     return values
 
 
-def _next_cycle_number(media_root: str, sku_name: str, date_str: str) -> int:
-    """
-    Choose a cycle number that is unique across raw captures, AI output and
-    timing reports.
+def _next_cycle_number(
+    media_root: str,
+    sku_name: str,
+    date_str: str,
+    barcode: Optional[str] = None,
+) -> int:
+    """Choose a cycle number unique for this SKU/date/barcode.
 
-    The old implementation inspected only Capture_Input. If a downstream stage
-    moved or cleaned that folder, the next tyre was incorrectly created again
-    as Cycle_1 and could overwrite the previous tyre's Output/Cycle_1 results.
+    When a barcode is supplied, every tyre starts with ``Cycle_1`` inside its
+    own barcode folder. Re-inspecting the same barcode creates ``Cycle_2`` and
+    never overwrites prior input, output, laser or timing artifacts.
     """
-    roots = (
-        os.path.join(media_root, "Capture_Input", sku_name, date_str),
-        os.path.join(media_root, "Output", sku_name, date_str),
-        os.path.join(media_root, "cycle_time_breakdown", sku_name, date_str),
+
+    barcode_folder = (
+        build_barcode_context(barcode).folder_name if barcode else None
     )
+    roots = []
+    for category in (
+        "Capture_Input",
+        "Output",
+        "Laser_Capture",
+        "cycle_time_breakdown",
+    ):
+        parts = [media_root, category, sku_name, date_str]
+        if barcode_folder:
+            parts.append(barcode_folder)
+        roots.append(os.path.join(*parts))
+
     values: List[int] = []
     for root in roots:
         values.extend(_cycle_numbers_from_root(root))
     return max(values) + 1 if values else 1
 
 
+def _ensure_barcode_identity(
+    barcode_root: str,
+    *,
+    sku_name: str,
+    date_str: str,
+    raw_barcode: str,
+) -> None:
+    """Persist and validate raw-to-folder barcode identity.
+
+    Two different raw barcodes can theoretically sanitize to the same Windows
+    folder. The marker prevents those tyres from ever being mixed silently.
+    """
+    context = build_barcode_context(raw_barcode)
+    marker = os.path.join(barcode_root, "barcode_identity.json")
+    payload = {
+        "schema_version": 1,
+        "sku_name": sku_name,
+        "date": date_str,
+        **context.as_dict(),
+    }
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        with open(marker, "r", encoding="utf-8") as handle:
+            existing = json.load(handle)
+        existing_raw = str(existing.get("barcode") or "").strip()
+        if existing_raw and existing_raw != context.raw:
+            raise RuntimeError(
+                "Barcode folder collision detected. "
+                f"'{context.raw}' and '{existing_raw}' both resolve to "
+                f"folder '{context.folder_name}'."
+            )
+        return
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            os.unlink(marker)
+        except OSError:
+            pass
+        raise
+
+
 def build_cycle_capture_dir(
     media_root: str,
     sku_name: str = "UNKNOWN_SKU",
+    barcode: Optional[str] = None,
 ) -> tuple[str, str]:
     date_str = datetime.now().strftime("%d-%m-%Y")
-    today_root = _get_today_capture_root(media_root, sku_name)
+    barcode_folder = (
+        build_barcode_context(barcode).folder_name if barcode else None
+    )
+    today_root = _get_today_capture_root(media_root, sku_name, barcode)
+    if barcode:
+        _ensure_barcode_identity(
+            today_root,
+            sku_name=sku_name,
+            date_str=date_str,
+            raw_barcode=barcode,
+        )
 
     # A lock avoids two callers choosing the same cycle number in the same
     # process. The existence loop also protects against folders created by
     # another process between number selection and directory creation.
     with _CYCLE_DIRECTORY_LOCK:
-        cycle_number = _next_cycle_number(media_root, sku_name, date_str)
+        cycle_number = _next_cycle_number(
+            media_root,
+            sku_name,
+            date_str,
+            barcode,
+        )
         while True:
             cycle_id = f"Cycle_{cycle_number}"
             cycle_dir = os.path.join(today_root, cycle_id)
-            output_dir = os.path.join(
-                media_root, "Output", sku_name, date_str, cycle_id
-            )
-            timing_dir = os.path.join(
-                media_root, "cycle_time_breakdown", sku_name, date_str, cycle_id
-            )
-            if not (
-                os.path.exists(cycle_dir)
-                or os.path.exists(output_dir)
-                or os.path.exists(timing_dir)
+
+            def artifact_dir(category: str) -> str:
+                parts = [media_root, category, sku_name, date_str]
+                if barcode_folder:
+                    parts.append(barcode_folder)
+                parts.append(cycle_id)
+                return os.path.join(*parts)
+
+            output_dir = artifact_dir("Output")
+            laser_dir = artifact_dir("Laser_Capture")
+            timing_dir = artifact_dir("cycle_time_breakdown")
+            if not any(
+                os.path.exists(path)
+                for path in (cycle_dir, output_dir, laser_dir, timing_dir)
             ):
                 os.makedirs(cycle_dir, exist_ok=False)
                 return cycle_dir, cycle_id
@@ -601,6 +690,8 @@ def run_cycle(
     yolo_gpu_sem=None,
     sku_name: Optional[str] = None,
     tyre_name: Optional[str] = None,
+    barcode: Optional[str] = None,
+    barcode_folder: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the selected five-side PatchCore flow.
 
@@ -779,6 +870,8 @@ def run_cycle(
         "cycle_id": cycle_id,
         "sku_name": sku_name or runtimes.get("sku_name"),
         "tyre_name": tyre_name or runtimes.get("tyre_name"),
+        "barcode": str(barcode or "").strip() or None,
+        "barcode_folder": str(barcode_folder or "").strip() or None,
         "pipeline": "PATCHCORE_FIVE_SIDE",
         "pipeline_status": pipeline_status,
         "final_label": final_label,
@@ -801,6 +894,8 @@ def run_cycle(
                 "cycle_id": cycle_id,
                 "sku_name": payload["sku_name"],
                 "tyre_name": payload["tyre_name"],
+                "barcode": payload.get("barcode"),
+                "barcode_folder": payload.get("barcode_folder"),
                 "side": side_name,
                 "input_image": image_map[side_name],
                 "cycle_latency_sec": elapsed,
