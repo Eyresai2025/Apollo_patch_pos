@@ -1116,34 +1116,28 @@ class RecipeService:
 
     def _write_recipe_name_to_plc(self, client, recipe_doc: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Write the operator-facing Tyre Name to the PLC recipe-name field.
+        Write tyre_name to the PLC RECIPE_NAME field.
 
-        PLC-confirmed DB75 layout:
-            DB75.DBW288       = RECIPE NO (INT)
-            DB75 byte 290     = RECIPE_NAME (Siemens STRING[50])
-            DB75.DBX546.0     = RECIPE LOAD
-            DB75.DBX546.1     = RECIPE MODE FROM GUI
+        PLC/TIA-confirmed DB75 layout:
+            DB75.DBW288   = RECIPE NO (INT)
+            DB75 byte 290 = RECIPE_NAME (Siemens STRING)
+            DB75.DBX546.0 = RECIPE LOAD
+            DB75.DBX546.1 = RECIPE MODE FROM GUI
 
-        Important:
-            P#DB75.DBX290.0 shown in TIA is the POINTER/START ADDRESS of the
-            STRING. It is NOT a BOOL command and must never be pulsed.
+        The offset gap 546 - 290 = 256 bytes, matching Siemens STRING[254]:
+            byte 290 = max length
+            byte 291 = current length
+            byte 292..545 = characters
 
-        Apollo uses tyre_name only for the PLC/HMI recipe name.
-        sku_name (for example SKU_008) remains Apollo/PostgreSQL identity.
-
-        Siemens classic STRING[n] memory layout:
-            byte 0 = maximum length
-            byte 1 = current length
-            byte 2 onward = characters
+        For safety the code first reads the PLC STRING header. If PLC byte 290
+        already contains a valid declared max length (1..254), that value is
+        used. Otherwise RECIPE_NAME_WRITE_MAX_LEN is used.
         """
         enabled = _to_bool(self.env.get("RECIPE_NAME_WRITE_ENABLED", "False"))
         if not enabled:
             return {
-                "enabled": False,
-                "written": False,
-                "verified": False,
-                "recipe_name": "",
-                "message": "PLC recipe-name write disabled.",
+                "enabled": False, "written": False, "verified": False,
+                "recipe_name": "", "message": "PLC recipe-name write disabled.",
             }
 
         recipe_name = (
@@ -1152,54 +1146,56 @@ class RecipeService:
             or ""
         )
         recipe_name = str(recipe_name).strip()
-
         if not recipe_name:
             return {
-                "enabled": True,
-                "written": False,
-                "verified": False,
-                "recipe_name": "",
-                "message": "Tyre Name is empty; PLC RECIPE_NAME was not written.",
+                "enabled": True, "written": False, "verified": False,
+                "recipe_name": "", "message": "Tyre Name is empty; RECIPE_NAME not written.",
             }
 
         db_no = _env_int(self.env, "RECIPE_NAME_WRITE_DB", 75)
         byte = _env_int(self.env, "RECIPE_NAME_WRITE_BYTE", 290)
-        max_len = _env_int(self.env, "RECIPE_NAME_WRITE_MAX_LEN", 50)
+        configured_max = _env_int(self.env, "RECIPE_NAME_WRITE_MAX_LEN", 254)
 
-        if db_no <= 0 or byte < 0 or max_len <= 0 or max_len > 254:
+        if db_no <= 0 or byte < 0 or configured_max <= 0 or configured_max > 254:
             return {
-                "enabled": True,
-                "written": False,
-                "verified": False,
-                "recipe_name": recipe_name,
-                "db": db_no,
-                "byte": byte,
-                "max_len": max_len,
+                "enabled": True, "written": False, "verified": False,
+                "recipe_name": recipe_name, "db": db_no, "byte": byte,
                 "message": "Invalid PLC recipe-name STRING configuration.",
             }
 
         try:
-            encoded = recipe_name.encode("ascii", errors="ignore")[:max_len]
+            # Read PLC header first. For a declared classic S7 STRING this first
+            # byte normally contains its maximum length (254 for plain 'String').
+            header_before = bytes(client.db_read(db_no, byte, 2))
+            plc_declared_max = int(header_before[0]) if len(header_before) >= 1 else 0
+            effective_max = (
+                plc_declared_max
+                if 1 <= plc_declared_max <= 254
+                else configured_max
+            )
+
+            encoded = recipe_name.encode("ascii", errors="ignore")[:effective_max]
             expected_text = encoded.decode("ascii", errors="ignore")
 
-            data = bytearray(max_len + 2)
-            data[0] = max_len
+            data = bytearray(effective_max + 2)
+            data[0] = effective_max
             data[1] = len(encoded)
             data[2:2 + len(encoded)] = encoded
 
             client.db_write(db_no, byte, data)
+            time.sleep(0.05)
 
-            # Read back the whole Siemens STRING for deterministic verification.
-            raw = bytes(client.db_read(db_no, byte, max_len + 2))
+            raw = bytes(client.db_read(db_no, byte, effective_max + 2))
             actual_max = int(raw[0]) if len(raw) >= 1 else -1
             actual_len = int(raw[1]) if len(raw) >= 2 else -1
-            if actual_len < 0 or actual_len > max_len:
-                actual_text = ""
-            else:
+
+            if 0 <= actual_len <= effective_max:
                 actual_text = raw[2:2 + actual_len].decode("ascii", errors="ignore")
+            else:
+                actual_text = ""
 
             verified = (
-                actual_max == max_len
+                actual_max == effective_max
                 and actual_len == len(encoded)
                 and actual_text == expected_text
             )
@@ -1212,10 +1208,16 @@ class RecipeService:
                 "actual_recipe_name": actual_text,
                 "db": db_no,
                 "byte": byte,
-                "max_len": max_len,
+                "configured_max_len": configured_max,
+                "plc_declared_max_before": plc_declared_max,
+                "effective_max_len": effective_max,
+                "readback_max_len": actual_max,
+                "readback_current_len": actual_len,
                 "message": (
                     f"Tyre Name '{expected_text}' written to DB{db_no} byte {byte} "
-                    f"as STRING[{max_len}]. Readback='{actual_text}', verified={verified}."
+                    f"as STRING[{effective_max}]. PLC declared max before={plc_declared_max}; "
+                    f"readback max={actual_max}, len={actual_len}, text='{actual_text}', "
+                    f"verified={verified}."
                 ),
             }
 
@@ -1228,7 +1230,7 @@ class RecipeService:
                 "actual_recipe_name": "",
                 "db": db_no,
                 "byte": byte,
-                "max_len": max_len,
+                "configured_max_len": configured_max,
                 "message": f"PLC recipe-name STRING write failed: {exc}",
             }
 
@@ -1647,9 +1649,30 @@ class RecipeService:
             except Exception:
                 active_confirmed = False
 
+            already_active_before = False
+            transition_observed = False
+            try:
+                already_active_before = (
+                    selected_recipe_number is not None
+                    and result.get("active_recipe_before") is not None
+                    and int(result.get("active_recipe_before")) == int(selected_recipe_number)
+                )
+                transition_observed = (
+                    selected_recipe_number is not None
+                    and result.get("active_recipe_before") is not None
+                    and int(result.get("active_recipe_before")) != int(selected_recipe_number)
+                    and active_after is not None
+                    and int(active_after) == int(selected_recipe_number)
+                )
+            except Exception:
+                already_active_before = False
+                transition_observed = False
+
             result.update({
                 "active_recipe_after": active_after,
                 "active_recipe_confirmed": active_confirmed,
+                "active_recipe_already_selected_before": already_active_before,
+                "activation_transition_observed": transition_observed,
                 "recipe_activated": bool(load_configured and load_ok and active_confirmed),
                 "recipe_number_written": bool(recipe_number_result.get("written", False)),
                 "recipe_number_verified": bool(recipe_number_result.get("verified", False)),
