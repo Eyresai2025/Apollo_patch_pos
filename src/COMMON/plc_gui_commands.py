@@ -1,10 +1,12 @@
-# src/COMMON/plc_gui_commands.py
-
 import time
 import threading
 from pathlib import Path
 
 from PyQt5.QtCore import QObject, pyqtSignal
+from src.COMMON.full_hardware_check import (
+    ensure_plc_client_connected,
+    plc_io_guard,
+)
 
 try:
     from snap7 import Client
@@ -70,19 +72,21 @@ class PlcGuiCommandService(QObject):
         return bool(data[0] & (1 << bit_index))
 
     def _write_bit(self, client, db_number, byte_index, bit_index, value):
+        # Read-modify-write preserves all other bits in the same PLC byte.
         data = client.db_read(db_number, byte_index, 1)
         byte_val = data[0]
 
         if value:
-            byte_val = byte_val | (1 << bit_index)
+            byte_val |= (1 << bit_index)
         else:
-            byte_val = byte_val & ~(1 << bit_index)
+            byte_val &= ~(1 << bit_index)
 
         client.db_write(db_number, byte_index, bytes([byte_val]))
 
     def _pulse_command(self, command_name, db, byte, bit):
         address = f"DB{db}.DBX{byte}.{bit}"
         client = None
+        command_asserted = False
 
         try:
             if Client is None:
@@ -90,87 +94,140 @@ class PlcGuiCommandService(QObject):
 
             self.reload_env()
 
-            deployment = str(self.env.get("DEPLOYMENT", "False")).strip()
-            if deployment != "True":
+            deployment = str(self.env.get("DEPLOYMENT", "False")).strip().lower()
+            if deployment not in ("1", "true", "yes", "y", "on"):
                 raise RuntimeError("DEPLOYMENT is not True. PLC command skipped.")
 
-            plc_ip = self.env.get("PLC_IP", "").strip()
+            # Keep the validation here so configuration errors are reported with
+            # a clear GUI-command message. Connection/reconnection ownership is
+            # handled centrally by ensure_plc_client_connected().
+            plc_ip = str(self.env.get("PLC_IP", "")).strip()
             if not plc_ip:
                 raise RuntimeError("PLC_IP missing in .env.")
 
-            rack = _env_int(self.env, "PLC_RACK", 0)
-            slot = _env_int(self.env, "PLC_SLOT", 1)
-            pulse_sec = _env_float(self.env, "PLC_GUI_COMMAND_PULSE_SEC", 0.5)
+            pulse_sec = _env_float(
+                self.env,
+                "PLC_GUI_COMMAND_PULSE_SEC",
+                0.5,
+            )
 
             self.started.emit(command_name, address)
 
-            client = Client()
-            client.connect(plc_ip, rack, slot)
+            # The Hardware Readiness layer owns this long-lived PLC connection.
+            # We borrow it under the common PLC I/O guard and NEVER disconnect it
+            # from this command service.
+            with plc_io_guard():
+                client = ensure_plc_client_connected(
+                    env_path=self.env_path
+                )
 
-            if hasattr(client, "get_connected") and not client.get_connected():
-                raise RuntimeError(f"PLC connection failed: {plc_ip}")
+                if client is None:
+                    raise RuntimeError("Shared PLC client is not available.")
 
-            self._write_bit(client, db, byte, bit, True)
-            time.sleep(0.05)
+                if hasattr(client, "get_connected") and not client.get_connected():
+                    raise RuntimeError("Shared PLC client is not connected.")
 
-            read_true = self._read_bit(client, db, byte, bit)
+                # Assert command.
+                self._write_bit(client, db, byte, bit, True)
+                command_asserted = True
+                time.sleep(0.05)
 
-            print(
-                f"[PLC][GUI_CMD] {command_name} TRUE -> {address} "
-                f"read_back={read_true}"
-            )
+                read_true = self._read_bit(client, db, byte, bit)
+                print(
+                    f"[PLC][GUI_CMD] {command_name} TRUE -> {address} "
+                    f"read_back={read_true}",
+                    flush=True,
+                )
 
-            if not read_true:
-                raise RuntimeError(f"TRUE write failed at {address}")
+                if not read_true:
+                    raise RuntimeError(f"TRUE write failed at {address}")
 
-            time.sleep(max(0.1, pulse_sec))
+                time.sleep(max(0.1, pulse_sec))
 
-            self._write_bit(client, db, byte, bit, False)
-            time.sleep(0.05)
+                # Reset command.
+                self._write_bit(client, db, byte, bit, False)
+                time.sleep(0.05)
 
-            read_false = self._read_bit(client, db, byte, bit)
+                read_false = self._read_bit(client, db, byte, bit)
+                print(
+                    f"[PLC][GUI_CMD] {command_name} FALSE -> {address} "
+                    f"read_back={read_false}",
+                    flush=True,
+                )
 
-            print(
-                f"[PLC][GUI_CMD] {command_name} FALSE -> {address} "
-                f"read_back={read_false}"
-            )
+                if read_false:
+                    raise RuntimeError(f"FALSE reset failed at {address}")
 
-            if read_false:
-                raise RuntimeError(f"FALSE reset failed at {address}")
+                command_asserted = False
 
             self.success.emit(command_name, address)
 
-        except Exception as e:
-            self.error.emit(command_name, address, str(e))
+        except Exception as exc:
+            # Safety cleanup: if anything failed after the command went HIGH,
+            # make a best-effort attempt to force the command LOW again.
+            cleanup_error = None
+            if command_asserted and client is not None:
+                try:
+                    with plc_io_guard():
+                        if (
+                            not hasattr(client, "get_connected")
+                            or client.get_connected()
+                        ):
+                            self._write_bit(client, db, byte, bit, False)
+                            time.sleep(0.05)
+                            still_high = self._read_bit(client, db, byte, bit)
+                            print(
+                                f"[PLC][GUI_CMD][RECOVERY] {command_name} FALSE "
+                                f"-> {address} read_back={still_high}",
+                                flush=True,
+                            )
+                            if still_high:
+                                cleanup_error = (
+                                    f"Safety reset verification failed at {address}"
+                                )
+                        else:
+                            cleanup_error = (
+                                "PLC disconnected before safety reset could be sent"
+                            )
+                except Exception as reset_exc:
+                    cleanup_error = f"Safety reset failed: {reset_exc}"
+
+            message = str(exc)
+            if cleanup_error:
+                message = f"{message}\n{cleanup_error}"
+
+            self.error.emit(command_name, address, message)
 
         finally:
-            try:
-                if client is not None:
-                    client.disconnect()
-            except Exception:
-                pass
-
+            # Do NOT disconnect the PLC here. The shared client is owned by the
+            # Hardware Readiness / common PLC connection manager.
             with self._lock:
                 self._busy = False
 
             self.busy_changed.emit(False)
 
     def pulse_command(self, command_name, db, byte, bit):
+        # Prevent Auto Start and Servo Reset from being issued concurrently.
         with self._lock:
             if self._busy:
-                self.error.emit(command_name, f"DB{db}.DBX{byte}.{bit}", "Another PLC command is already running.")
+                self.error.emit(
+                    command_name,
+                    f"DB{db}.DBX{byte}.{bit}",
+                    "Another PLC command is already running.",
+                )
                 return
 
             self._busy = True
 
         self.busy_changed.emit(True)
 
-        t = threading.Thread(
+        # Keep PLC pulse timing off the Qt GUI thread.
+        thread = threading.Thread(
             target=self._pulse_command,
             args=(command_name, db, byte, bit),
             daemon=True,
         )
-        t.start()
+        thread.start()
 
     def pulse_auto_start(self):
         self.reload_env()

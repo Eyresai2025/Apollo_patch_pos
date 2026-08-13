@@ -2677,7 +2677,14 @@ class NewSKUPage(QWidget):
         self.recipe_doc["training_assets"] = dict(self.latest_training_assets)
         self.recipe_doc["threshold_assets"] = dict(self.latest_threshold_assets)
 
-        is_saved_recipe = str(recipe.get("record_source") or "RECIPE") != "SKU_SETUP"
+        is_axis_setup_draft = (
+            str(recipe.get("draft_stage") or "").strip().upper() == "AXIS_SETUP"
+            or bool(recipe.get("axis_setup_only"))
+        )
+        is_saved_recipe = (
+            str(recipe.get("record_source") or "RECIPE") != "SKU_SETUP"
+            and not is_axis_setup_draft
+        )
         self.saved_recipe_doc = dict(recipe) if is_saved_recipe else None
         self.saved_recipe_result = {
             "loaded_existing": True,
@@ -3010,7 +3017,7 @@ class NewSKUPage(QWidget):
         self.axis_entry_mode_combo = QComboBox()
         self.axis_entry_mode_combo.addItems([
             "Capture Current Axis Position From PLC (DB74)",
-            "Copy Active Recipe Values From PLC (DB75)",
+            "Capture Current Active PLC Recipe Values (DB75)",
             "Load Saved Recipe Values From PostgreSQL",
             "Manual Entry From Software",
         ])
@@ -3048,7 +3055,7 @@ class NewSKUPage(QWidget):
         )
         active_row.addWidget(self.axis_active_refresh_btn)
 
-        self.axis_active_copy_btn = self._make_button("Copy All DB75 Values", "primary")
+        self.axis_active_copy_btn = self._make_button("Capture Active PLC Values", "primary")
         self.axis_active_copy_btn.clicked.connect(self._copy_active_recipe_values_to_present_sku)
         self.axis_active_copy_btn.setEnabled(False)
         active_row.addWidget(self.axis_active_copy_btn)
@@ -3183,6 +3190,13 @@ class NewSKUPage(QWidget):
         self.axis_selection_lbl = QLabel("0 targets selected")
         self.axis_selection_lbl.setObjectName("HintText")
 
+        self.axis_save_setup_btn = self._make_button("Save Axis Setup", "primary")
+        self.axis_save_setup_btn.setToolTip(
+            "Save the current complete axis target set to PostgreSQL as an Axis Setup draft. "
+            "Load it to the PLC later from Recipe Management."
+        )
+        self.axis_save_setup_btn.clicked.connect(self._save_axis_setup_to_postgresql)
+
         next_btn = self._make_button("Next: Capture Images", "secondary")
         next_btn.clicked.connect(lambda: self._switch_tab(TAB_CAPTURE))
 
@@ -3192,6 +3206,7 @@ class NewSKUPage(QWidget):
         btn_row.addWidget(self.axis_capture_selected_btn)
         btn_row.addWidget(self.axis_selection_lbl)
         btn_row.addStretch(1)
+        btn_row.addWidget(self.axis_save_setup_btn)
         btn_row.addWidget(next_btn)
         lay.addLayout(btn_row)
 
@@ -4196,12 +4211,154 @@ class NewSKUPage(QWidget):
             f"PLC active recipe number: {active_recipe_number}\n"
             f"PLC active SKU: {active_sku}\n"
             f"Present SKU: {destination_sku}\n\n"
-            "These are now working values in the New SKU page. Complete Save Recipe to store them in PostgreSQL."
+            "These are now working values in the New SKU page. Click Save Axis Setup to store them in PostgreSQL immediately."
         )
         if skipped_keys:
             message += f"\nMissing DB75 values skipped: {len(skipped_keys)}"
 
         QMessageBox.information(self, "Active PLC Recipe Values Loaded", message)
+
+    def _save_axis_setup_to_postgresql(self) -> bool:
+        """Persist Axis Teaching immediately as a PostgreSQL draft recipe version.
+
+        This intentionally does NOT require Capture/Training/Validation and does
+        NOT write anything to the PLC.  Recipe Management remains the single UI
+        responsible for loading a saved recipe/draft to the machine.
+        """
+        sku_name = str(self._current_axis_destination_sku_name() or "").strip()
+        if not sku_name:
+            QMessageBox.warning(
+                self,
+                "Save Axis Setup",
+                "Save the SKU Setup first before saving Axis Setup.",
+            )
+            return False
+
+        recipe_axis_targets = dict(self.recipe_doc.get("recipe_axis_targets") or {})
+        try:
+            target_configs = self.recipe_service.get_recipe_target_configs()
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Axis Setup", str(exc))
+            return False
+
+        required_keys = [
+            str(cfg.get("target_key") or "").strip()
+            for cfg in target_configs
+            if str(cfg.get("target_key") or "").strip()
+        ]
+        missing_keys = [
+            key
+            for key in required_keys
+            if key not in recipe_axis_targets
+            or not isinstance(recipe_axis_targets.get(key), dict)
+            or recipe_axis_targets.get(key, {}).get("value") in (None, "")
+        ]
+
+        if missing_keys:
+            preview = "\n".join(f"- {key}" for key in missing_keys[:12])
+            extra = "" if len(missing_keys) <= 12 else f"\n... and {len(missing_keys) - 12} more"
+            QMessageBox.warning(
+                self,
+                "Axis Setup Incomplete",
+                (
+                    "Axis Setup cannot be saved yet because some target values are missing.\n\n"
+                    f"{preview}{extra}\n\n"
+                    "Capture the active PLC recipe values, capture the required current positions, "
+                    "load saved PostgreSQL values, or enter the missing values manually."
+                ),
+            )
+            return False
+
+        self._sync_legacy_axis_targets_from_recipe_targets()
+
+        sku_meta = dict(self.sku_meta or {})
+        sku_meta.pop("machine_serial", None)
+        sku_meta["sku_name"] = sku_name
+        recipe_number = int(
+            sku_meta.get("recipe_number")
+            or sku_meta.get("plc_recipe_number")
+            or 0
+        )
+        if recipe_number <= 0:
+            QMessageBox.warning(
+                self,
+                "Save Axis Setup",
+                "A valid PLC recipe number is required in SKU Setup.",
+            )
+            return False
+
+        saved_at = datetime.now().isoformat(timespec="seconds")
+        try:
+            draft_doc = self.recipe_service.build_recipe_doc(
+                sku_meta=sku_meta,
+                camera_axis_targets=dict(self.recipe_doc.get("camera_axis_targets") or {}),
+                laser_axis_targets=dict(self.recipe_doc.get("laser_axis_targets") or {}),
+                recipe_axis_targets=recipe_axis_targets,
+                camera_config_links=self._collect_camera_config_links(),
+                laser_config_links=self._collect_laser_config_links(),
+                author=str(sku_meta.get("operator") or "operator"),
+            )
+            draft_doc["recipe_number"] = recipe_number
+            draft_doc["plc_recipe_number"] = recipe_number
+            draft_doc["status"] = "DRAFT"
+            draft_doc["draft_stage"] = "AXIS_SETUP"
+            draft_doc["axis_setup_only"] = True
+            draft_doc["axis_setup_saved_at"] = saved_at
+            draft_doc["validation_status"] = "NOT_RUN"
+
+            if self.recipe_doc.get("axis_targets_loaded_from_database"):
+                draft_doc["axis_targets_loaded_from_database"] = dict(
+                    self.recipe_doc.get("axis_targets_loaded_from_database") or {}
+                )
+            if self.recipe_doc.get("axis_targets_loaded_from_active_plc_recipe"):
+                draft_doc["axis_targets_loaded_from_active_plc_recipe"] = dict(
+                    self.recipe_doc.get("axis_targets_loaded_from_active_plc_recipe") or {}
+                )
+            if self.recipe_doc.get("device_profiles_copied_from"):
+                draft_doc["device_profiles_copied_from"] = dict(
+                    self.recipe_doc.get("device_profiles_copied_from") or {}
+                )
+
+            result = self.recipe_service.save_recipe(
+                draft_doc,
+                plc_client=None,
+                write_to_plc=False,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Axis Setup Save Error",
+                f"Could not save Axis Setup to PostgreSQL:\n\n{exc}",
+            )
+            return False
+
+        self.recipe_doc["axis_setup_saved_at"] = saved_at
+        self.recipe_doc["axis_setup_saved_version"] = result.get("version")
+        self.recipe_doc["axis_setup_saved_recipe_id"] = result.get("inserted_id")
+        self.recipe_doc["axis_setup_saved_status"] = "DRAFT"
+
+        if self.status_lbl is not None:
+            self.status_lbl.setText(
+                f"Axis Setup saved to PostgreSQL | SKU={sku_name} | "
+                f"Recipe={recipe_number} | Version={result.get('version')}"
+            )
+
+        self._refresh_workflow_header()
+        QMessageBox.information(
+            self,
+            "Axis Setup Saved",
+            (
+                "Axis Setup was saved to PostgreSQL successfully.\n\n"
+                f"SKU: {sku_name}\n"
+                f"Recipe Number: {recipe_number}\n"
+                f"Draft Version: {result.get('version')}\n"
+                f"Targets Saved: {len(recipe_axis_targets)}\n\n"
+                "No PLC write was performed here.\n"
+                "To load these values to the machine, open Recipe Management, "
+                "select this SKU/version, and click 'Load Recipe to Machine'."
+            ),
+        )
+        return True
 
     def _select_all_axis_targets(self) -> None:
         if self.axis_table is None or self.axis_table.rowCount() <= 0:
@@ -5386,7 +5543,7 @@ class NewSKUPage(QWidget):
         lay.setSpacing(16)
         lay.addLayout(self._section_header(
             "Save SKU Recipe",
-            "Save the complete SKU recipe including axis targets, sidewall R templates and camera/laser profile links.",
+            "Save the complete validated SKU recipe. PLC loading is handled centrally from Recipe Management.",
         ))
 
         self.recipe_summary_lbl = QLabel("Recipe preview not generated yet.")
@@ -5404,14 +5561,13 @@ class NewSKUPage(QWidget):
         save_btn = self._make_button("Save Recipe", "primary")
         save_btn.clicked.connect(self._save_recipe_final)
 
-        self.load_machine_btn = self._make_button("Load Recipe to Machine", "primary")
-        self.load_machine_btn.clicked.connect(self._load_saved_recipe_to_machine)
-        self.load_machine_btn.setEnabled(False)
+        # PLC recipe loading is intentionally centralized in Recipe Management.
+        # Keep New SKU responsible only for building/saving the recipe.
+        self.load_machine_btn = None
 
         btn_row.addWidget(preview_btn)
         btn_row.addStretch(1)
         btn_row.addWidget(save_btn)
-        btn_row.addWidget(self.load_machine_btn)
 
         lay.addLayout(btn_row)
 
@@ -5571,20 +5727,25 @@ class NewSKUPage(QWidget):
             existing_recipe = self.recipe_service.find_recipe_by_number(recipe_number)
 
             if existing_recipe:
-                existing_sku = existing_recipe.get("sku_name", "UNKNOWN")
+                existing_sku = str(existing_recipe.get("sku_name", "UNKNOWN") or "UNKNOWN").strip()
                 existing_version = existing_recipe.get("version", "-")
+                current_sku = str(recipe_doc.get("sku_name") or "").strip()
 
-                QMessageBox.warning(
-                    self,
-                    "Duplicate Recipe Number",
-                    (
-                        f"Recipe number {recipe_number} already exists.\n\n"
-                        f"Existing SKU: {existing_sku}\n"
-                        f"Version: {existing_version}\n\n"
-                        "Recipe was not saved again. Please use a different recipe number."
+                # The recipe number is unique across SKUs, but the same SKU is
+                # intentionally versioned. Axis Setup drafts therefore coexist
+                # with the later VALIDATED recipe using the same recipe number.
+                if _safe_name(existing_sku).lower() != _safe_name(current_sku).lower():
+                    QMessageBox.warning(
+                        self,
+                        "Duplicate Recipe Number",
+                        (
+                            f"Recipe number {recipe_number} already belongs to another SKU.\n\n"
+                            f"Existing SKU: {existing_sku}\n"
+                            f"Version: {existing_version}\n\n"
+                            "Please use a different recipe number."
+                        )
                     )
-                )
-                return
+                    return
             recipe_axis_targets = recipe_doc.get("recipe_axis_targets", {}) or {}
             camera_config_links = recipe_doc.get("camera_config_links", {}) or {}
             laser_config_links = recipe_doc.get("laser_config_links", {}) or {}
@@ -5868,8 +6029,8 @@ class NewSKUPage(QWidget):
 
             result = self.recipe_service.save_recipe(
                 recipe_doc,
-                plc_client=self.plc_client,
-                write_to_plc=None,
+                plc_client=None,
+                write_to_plc=False,
             )
             self.saved_recipe_doc = dict(recipe_doc)
             self.saved_recipe_doc["_id"] = result.get("inserted_id")
@@ -5880,52 +6041,11 @@ class NewSKUPage(QWidget):
 
             if self.load_machine_btn is not None:
                 self.load_machine_btn.setEnabled(True)
-            plc_result = result.get("plc_result", {}) or {}
-            verify_result = plc_result.get("verify_result", {}) or {}
-            recipe_number_result = plc_result.get("recipe_number_result", {}) or {}
-            plc_enabled = bool(plc_result.get("enabled", False))
-            plc_written = bool(plc_result.get("written", False))
-            plc_verified = bool(plc_result.get("verified", False))
-
-            written_items = plc_result.get("written_items", []) or []
-            skipped_items = plc_result.get("skipped_items", []) or []
-            mismatches = plc_result.get("mismatches", []) or verify_result.get("mismatches", []) or []
-
-            if not plc_enabled:
-                plc_block = (
-                    "PLC Write: Disabled\n"
-                    f"PLC Message: {plc_result.get('message', '')}"
-                )
-            else:
-                plc_block = (
-                    f"PLC Write: {'OK' if plc_written else 'NOT OK'}\n"
-                    f"PLC Verify: {'OK' if plc_verified else 'NOT OK / SKIPPED'}\n"
-                    f"Recipe Number Write: {'OK' if recipe_number_result.get('written') else 'NOT OK / SKIPPED'}\n"
-                    f"Recipe Number Verify: {'OK' if recipe_number_result.get('verified') else 'NOT OK / SKIPPED'}\n"
-                    f"Targets Written: {len(written_items)}\n"
-                    f"Targets Skipped: {len(skipped_items)}\n"
-                    f"Verify Count: {verify_result.get('verified_count', 0)}\n"
-                    f"Mismatch Count: {verify_result.get('mismatch_count', len(mismatches))}\n"
-                    f"PLC Message: {plc_result.get('message', '')}"
-                )
-
-            if mismatches:
-                mismatch_lines = []
-                for item in mismatches[:8]:
-                    mismatch_lines.append(
-                        f"- {item.get('target_key')} | "
-                        f"Expected={item.get('expected')} | "
-                        f"Actual={item.get('actual')} | "
-                        f"DB{item.get('db')}.DBD{item.get('byte')}"
-                    )
-
-                extra = ""
-                if len(mismatches) > 8:
-                    extra = f"\n... and {len(mismatches) - 8} more mismatches"
-
-                mismatch_text = "\n\nPLC Mismatches:\n" + "\n".join(mismatch_lines) + extra
-            else:
-                mismatch_text = ""
+            plc_block = (
+                "PLC Load: Not performed from New SKU\n"
+                "Use Recipe Management -> select SKU/version -> Load Recipe to Machine."
+            )
+            mismatch_text = ""
 
             msg = (
                 f"Recipe saved successfully.\n\n"

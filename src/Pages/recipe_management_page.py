@@ -514,8 +514,10 @@ class RecipeManagementPage(QWidget):
             target_count = len(camera_targets) + len(laser_targets)
             target_mode = "Legacy camera/laser targets"
 
+        draft_stage = _safe_text(recipe.get("draft_stage"), "-")
+        stage_line = f"    |    Draft Stage: {draft_stage}" if draft_stage != "-" else ""
         summary = (
-            f"SKU: {sku_name}    |    Recipe No: {recipe_number}    |    Version: {version}    |    Status: {status}\n"
+            f"SKU: {sku_name}    |    Recipe No: {recipe_number}    |    Version: {version}    |    Status: {status}{stage_line}\n"
             f"Tyre Size: {tyre_size}    |    Barcode: {barcode}\n"
             f"Author: {author}    |    Created: {created_at}    |    Updated: {updated_at}\n"
             f"Targets: {target_count} ({target_mode})"
@@ -858,13 +860,26 @@ class RecipeManagementPage(QWidget):
             )
             return
 
+        status = str(recipe.get("status") or "DRAFT").upper()
+        draft_stage = str(recipe.get("draft_stage") or "").strip().upper()
+        engineering_warning = ""
+        if status != "VALIDATED":
+            stage_text = f" ({draft_stage})" if draft_stage else ""
+            engineering_warning = (
+                f"IMPORTANT: This is an engineering/draft recipe{stage_text}, not a VALIDATED production recipe.\n\n"
+            )
+
         reply = QMessageBox.question(
             self,
             "Load Recipe to Machine",
             (
-                "This will write the selected recipe target values to PLC DB53, "
-                "verify DB53 read-back, write the recipe number to DB75.DBW288, "
-                "and verify the recipe number read-back.\n\n"
+                engineering_warning
+                + "This will load the selected saved PostgreSQL recipe to the PLC:\n"
+                "- write recipe target values to DB53\n"
+                "- write recipe name if that feature is enabled\n"
+                "- write recipe number to DB75.DBW288\n"
+                "- pulse the configured PLC recipe-save bit\n"
+                "- perform PLC read-back verification\n\n"
                 "Continue?"
             ),
             QMessageBox.Yes | QMessageBox.No,

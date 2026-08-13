@@ -1142,9 +1142,7 @@ class LaserCaptureTab(QWidget):
             if median_filter_mode:
                 safe_features["profileMedianFilterMode"] = median_filter_mode
             if displacement_y is not None:
-                # Keep the runtime verification value, the Sapera feature name,
-                # and the PLY converter Y spacing tied to the SAME profile value.
-                safe_features["displacementY"] = displacement_y
+                safe_features["displacementBetweenSamplesY"] = displacement_y
 
             optional_locked: Dict[str, object] = {}
             if profile_rate is not None:
@@ -1152,22 +1150,15 @@ class LaserCaptureTab(QWidget):
             if exposure is not None:
                 optional_locked["ExposureTime"] = exposure
 
-            converter_for_laser = dict(converter)
-            if displacement_y is not None:
-                converter_for_laser["y_step_mm"] = displacement_y / 1000.0
-
             configs[serial] = {
                 "label": label,
                 "config_mode": config_mode,
                 "userset_name": user_set,
-                # IMPORTANT: pass the table/profile displacement into the runner.
-                # Without this field the runner previously fell back to 140 um.
-                "expected_displacement_y_um": displacement_y,
                 "apply_safe_overrides_after_userset": config_mode.upper() != "USERSET1",
                 "write_locked_features": write_locked,
                 "safe_features": safe_features,
                 "optional_locked_features": optional_locked,
-                "converter": converter_for_laser,
+                "converter": dict(converter),
             }
 
         return configs

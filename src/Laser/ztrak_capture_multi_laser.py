@@ -72,7 +72,7 @@ LASER_CONFIGS = {
         "label": "laser_1_ztrak_2k_M0006674",
         "config_mode": "USERSET1",
         "userset_name": "UserSet1",
-        "expected_displacement_y_um": 140.0,
+        "expected_displacement_y_um": 265.0,
         "apply_safe_overrides_after_userset": False,
         "write_locked_features": False,
         "safe_features": {
@@ -620,12 +620,32 @@ def read_verified_userset_geometry(acq_device, cfg, serial, output_dir):
         )
 
     expected_y = cfg.get("expected_displacement_y_um")
+
+    # Do not hard-code displacementY by laser serial.  The same profiler is used
+    # for different tyre/SKU recipes, so the expected Y pitch must come from the
+    # active runtime/profile configuration.  If the explicit field is absent,
+    # use the configured Sapera feature value.  If neither is supplied, trust
+    # the verified UserSet readback rather than silently assuming 140 um.
     if expected_y is None:
-        expected_y = 140.0 if serial == "M0006674" else 990.0 if serial == "M0006994" else None
-    if expected_y is not None and abs(float(y_step_um) - float(expected_y)) > 1e-6:
-        raise RuntimeError(
-            "LASER CONFIG VERIFICATION FAILED: "
-            f"serial={serial} expected displacementY={expected_y}, actual={y_step_um}"
+        safe_features = cfg.get("safe_features", {}) or {}
+        expected_y = safe_features.get("displacementY")
+        if expected_y is None:
+            expected_y = safe_features.get("displacementBetweenSamplesY")
+
+    if expected_y is not None:
+        expected_y = float(expected_y)
+        if abs(float(y_step_um) - expected_y) > 1e-6:
+            raise RuntimeError(
+                "LASER CONFIG VERIFICATION FAILED: "
+                f"serial={serial} expected displacementY={expected_y}, actual={y_step_um}"
+            )
+        print(
+            f"[PASS] displacementY: expected={expected_y} actual={float(y_step_um)}"
+        )
+    else:
+        print(
+            f"[INFO] displacementY using UserSet device readback: "
+            f"{float(y_step_um)} um/profile"
         )
 
     # Current validated Z-Trak Coord3D_CR16 C scaling is 5 micrometres/raw unit.

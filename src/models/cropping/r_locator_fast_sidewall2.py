@@ -73,7 +73,7 @@ class Recipe:
     roi_side: str = "right"
     search_margin_y: int = 120
     use_gradient: bool = True
-    score_threshold: float = 0.45
+    score_threshold: float = 0.20
     method: int = cv2.TM_CCOEFF_NORMED
     auto_first_half: bool = True
     first_half_thr: float = 0.18
