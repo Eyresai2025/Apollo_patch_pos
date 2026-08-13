@@ -996,8 +996,16 @@ class NewSKUPage(QWidget):
         bg, fg, border = palette.get(normalized, palette["READY"])
         label.setText(text or normalized)
         label.setStyleSheet(
-            f"QLabel {{ background:{bg}; color:{fg}; border:1px solid {border}; "
-            "border-radius:10px; padding:2px 9px; font:700 9px 'Segoe UI'; }}"
+            f"""
+            QLabel {{
+                background: {bg};
+                color: {fg};
+                border: 1px solid {border};
+                border-radius: 10px;
+                padding: 2px 9px;
+                font: 700 9px 'Segoe UI';
+            }}
+            """
         )
 
     def _append_capture_console(self, level: str, message: str) -> None:
@@ -1197,7 +1205,7 @@ class NewSKUPage(QWidget):
                 border: none;
             }
             QLabel#SectionTitle {
-                font: 750 13px 'Segoe UI';
+                font: 700 13px 'Segoe UI';
                 color: #571c86;
                 background: transparent;
                 border: none;
@@ -2192,6 +2200,9 @@ class NewSKUPage(QWidget):
         self.workflow_summary_count.setObjectName("WorkflowMeta")
         self.workflow_summary_status = QLabel("Current step  •  SKU Setup")
         self.workflow_summary_status.setObjectName("WorkflowMeta")
+        self.workflow_summary_sku.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.workflow_summary_count.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.workflow_summary_status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         summary_row.addWidget(self.workflow_summary_sku)
         summary_row.addWidget(self.workflow_summary_count)
         summary_row.addStretch(1)
@@ -2228,7 +2239,42 @@ class NewSKUPage(QWidget):
         self.workflow_progress.setTextVisible(False)
         nav_outer.addWidget(self.workflow_progress)
 
-        nav_l = QHBoxLayout()
+        # Responsive workflow navigation.
+        # At 125%/150% Windows scaling, forcing 13 buttons into one fixed row
+        # makes labels squeeze or clip. Keep a sensible button width and allow
+        # horizontal scrolling only when the available width is smaller.
+        workflow_nav_scroll = QScrollArea()
+        workflow_nav_scroll.setWidgetResizable(True)
+        workflow_nav_scroll.setFrameShape(QFrame.NoFrame)
+        workflow_nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        workflow_nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        workflow_nav_scroll.setFixedHeight(46)
+        workflow_nav_scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:horizontal {
+                height: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #cdbdde;
+                border-radius: 3px;
+                min-width: 36px;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {
+                width: 0px;
+                background: transparent;
+                border: none;
+            }
+        """)
+
+        workflow_nav_content = QWidget()
+        workflow_nav_content.setStyleSheet("background: transparent;")
+        nav_l = QHBoxLayout(workflow_nav_content)
         nav_l.setContentsMargins(0, 0, 0, 0)
         nav_l.setSpacing(6)
 
@@ -2236,13 +2282,18 @@ class NewSKUPage(QWidget):
         for idx, (_key, name) in enumerate(WORKFLOW_STEPS):
             btn = QPushButton()
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedHeight(36)
+            btn.setFixedHeight(34)
+            btn.setMinimumWidth(86)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.clicked.connect(lambda checked=False, i=idx: self._switch_tab(i))
             nav_l.addWidget(btn, 1)
             self.tab_buttons.append(btn)
 
-        nav_outer.addLayout(nav_l)
+        # Minimum width preserves readable labels. On wide monitors the content
+        # expands normally; on smaller/DPI-scaled displays the scroll bar appears.
+        workflow_nav_content.setMinimumWidth(max(1180, len(WORKFLOW_STEPS) * 86))
+        workflow_nav_scroll.setWidget(workflow_nav_content)
+        nav_outer.addWidget(workflow_nav_scroll)
         root.addWidget(self.workflow_nav_frame)
 
         self.stack = FlexibleStackedWidget()
@@ -2744,7 +2795,44 @@ class NewSKUPage(QWidget):
     def _build_wizard_page(self):
         root = QVBoxLayout(self.wizard_page)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(12)
+        root.setSpacing(0)
+
+        # The SKU form is tall. A local scroll area prevents Windows DPI scaling
+        # (125%/150%) or a shorter monitor from forcing the entire application
+        # window beyond the available desktop height.
+        page_scroll = QScrollArea()
+        page_scroll.setWidgetResizable(True)
+        page_scroll.setFrameShape(QFrame.NoFrame)
+        page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        page_scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 8px;
+                margin: 2px 0px 2px 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #cdbdde;
+                border-radius: 4px;
+                min-height: 30px;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: transparent;
+                border: none;
+            }
+        """)
+
+        page_content = QWidget()
+        page_content.setStyleSheet("background: transparent;")
+        content_l = QVBoxLayout(page_content)
+        content_l.setContentsMargins(0, 0, 4, 0)
+        content_l.setSpacing(12)
 
         card = QFrame()
         card.setObjectName("PageCard")
@@ -2887,8 +2975,10 @@ class NewSKUPage(QWidget):
 
         lay.addLayout(btn_row)
 
-        root.addWidget(card)
-        root.addStretch(1)
+        content_l.addWidget(card)
+        content_l.addStretch(1)
+        page_scroll.setWidget(page_content)
+        root.addWidget(page_scroll)
 
     def _save_sku_setup(self):
         sku_name = self.wizard_widgets["sku_name"].text().strip()
@@ -3001,8 +3091,8 @@ class NewSKUPage(QWidget):
 
         hint = QLabel(
             "DB74 = current physical axis position. DB75 = values of the recipe currently active in the PLC. "
-            "The copied values become working targets for the present SKU and are permanently stored only "
-            "when the final Save Recipe step is completed."
+            "Active PLC capture always copies DB75 values only. Use Save Axis Setup to persist the present "
+            "target set to PostgreSQL before continuing."
         )
         hint.setObjectName("HintText")
         hint.setWordWrap(True)
@@ -3015,12 +3105,21 @@ class NewSKUPage(QWidget):
         mode_row.addWidget(mode_lbl)
 
         self.axis_entry_mode_combo = QComboBox()
-        self.axis_entry_mode_combo.addItems([
-            "Capture Current Axis Position From PLC (DB74)",
-            "Capture Current Active PLC Recipe Values (DB75)",
-            "Load Saved Recipe Values From PostgreSQL",
-            "Manual Entry From Software",
-        ])
+        # Use stable internal mode keys instead of parsing the visible label text.
+        # This prevents wording changes such as "Active PLC Recipe" from silently
+        # falling back to the DB74/current-position capture path.
+        self.axis_entry_mode_combo.addItem(
+            "Capture Current Axis Position From PLC (DB74)", "capture"
+        )
+        self.axis_entry_mode_combo.addItem(
+            "Capture Current Active PLC Recipe Values (DB75)", "active_plc"
+        )
+        self.axis_entry_mode_combo.addItem(
+            "Load Saved Recipe Values From PostgreSQL", "database"
+        )
+        self.axis_entry_mode_combo.addItem(
+            "Manual Entry From Software", "manual"
+        )
         self.axis_entry_mode_combo.setFixedHeight(34)
         self.axis_entry_mode_combo.setMinimumWidth(360)
         self.axis_entry_mode_combo.currentIndexChanged.connect(self._on_axis_entry_mode_changed)
@@ -3175,8 +3274,8 @@ class NewSKUPage(QWidget):
 
         btn_row = QHBoxLayout()
 
-        refresh_btn = self._make_button("Refresh PLC Values", "secondary")
-        refresh_btn.clicked.connect(self._refresh_axis_table)
+        refresh_btn = self._make_button("Refresh Values", "secondary")
+        refresh_btn.clicked.connect(self._refresh_axis_values_for_current_mode)
 
         self.axis_select_all_btn = self._make_button("Select All Targets", "secondary")
         self.axis_select_all_btn.clicked.connect(self._select_all_axis_targets)
@@ -3275,11 +3374,24 @@ class NewSKUPage(QWidget):
         if self.axis_entry_mode_combo is None:
             return
 
-        text = self.axis_entry_mode_combo.currentText().strip().lower()
-        is_manual = "manual" in text
-        is_active_plc = "active recipe" in text and "db75" in text
-        is_database = "postgresql" in text or "database" in text
-        is_capture = not is_manual and not is_active_plc and not is_database
+        mode_key = str(self.axis_entry_mode_combo.currentData() or "").strip().lower()
+        if not mode_key:
+            # Backward-compatible fallback for any old UI state. Keep this tolerant
+            # of the words "Active PLC Recipe" rather than relying on one exact phrase.
+            text = self.axis_entry_mode_combo.currentText().strip().lower()
+            if "db75" in text and "active" in text and "recipe" in text:
+                mode_key = "active_plc"
+            elif "postgresql" in text or "database" in text:
+                mode_key = "database"
+            elif "manual" in text:
+                mode_key = "manual"
+            else:
+                mode_key = "capture"
+
+        is_manual = mode_key == "manual"
+        is_active_plc = mode_key == "active_plc"
+        is_database = mode_key == "database"
+        is_capture = mode_key == "capture"
 
         if is_manual:
             self.axis_entry_mode = "manual"
@@ -3350,8 +3462,32 @@ class NewSKUPage(QWidget):
             if button is not None:
                 button.setEnabled(is_capture)
 
-        self._refresh_axis_table(refresh_plc=not is_database)
+        # Important: Active PLC mode already refreshed a dedicated DB75 snapshot above.
+        # Do NOT immediately run the generic DB74/DB75 refresh again here, because a
+        # transient Axis Status read failure can replace the valid DB75 snapshot with
+        # DB74-only fallback rows. That was the cause of Active Recipe mode appearing
+        # to capture current physical positions.
+        if is_active_plc:
+            self._refresh_axis_table(refresh_plc=False)
+        elif is_database:
+            self._refresh_axis_table(refresh_plc=False)
+        else:
+            self._refresh_axis_table(refresh_plc=True)
+
         self._update_axis_profile_copy_controls()
+
+    def _refresh_axis_values_for_current_mode(self) -> None:
+        """Refresh only the data source selected by the operator."""
+        mode = str(self.axis_entry_mode or "capture").strip().lower()
+        if mode == "active_plc":
+            self._refresh_active_recipe_from_plc(show_errors=True)
+            return
+        if mode == "database":
+            self._refresh_axis_copy_source_recipes(show_errors=True)
+            self._refresh_axis_table(refresh_plc=False)
+            return
+        # Current-position and manual views may refresh the regular PLC status.
+        self._refresh_axis_table(refresh_plc=True)
 
     def _current_axis_destination_sku_name(self) -> str:
         """Return the SKU currently being edited without changing workflow state."""
@@ -4065,10 +4201,17 @@ class NewSKUPage(QWidget):
         QMessageBox.information(self, "Database Axis Targets Loaded", message)
 
     def _refresh_active_recipe_from_plc(self, show_errors: bool = True) -> bool:
-        """Read the same DB74/DB75 snapshot used by the Axis Status page."""
+        """Read one dedicated ACTIVE-RECIPE snapshot from DB74.DBW78 + DB75.
+
+        This path intentionally does not use current physical DB74 axis positions as
+        a fallback. If DB75 cannot be read, Active Recipe capture is disabled instead
+        of silently substituting current positions.
+        """
         try:
-            snapshot = self.axis_status_service.get_axis_status()
+            snapshot = self.recipe_service.read_active_recipe_targets_from_plc()
         except Exception as exc:
+            self.axis_active_recipe_snapshot = {}
+            self.axis_active_recipe_rows = {}
             if self.axis_active_recipe_info_lbl is not None:
                 self.axis_active_recipe_info_lbl.setText(
                     f"Active PLC Recipe refresh failed: {exc}"
@@ -4109,6 +4252,8 @@ class NewSKUPage(QWidget):
         if self.axis_active_copy_btn is not None:
             self.axis_active_copy_btn.setEnabled(valid_count > 0)
 
+        # Render exactly the dedicated DB75 snapshot. Do not trigger another PLC
+        # refresh here.
         self._refresh_axis_table(refresh_plc=False)
         self._update_axis_profile_copy_controls(auto_select_available=True)
         return valid_count > 0
@@ -4124,9 +4269,10 @@ class NewSKUPage(QWidget):
             )
             return
 
-        if not self.axis_active_recipe_rows:
-            if not self._refresh_active_recipe_from_plc(show_errors=True):
-                return
+        # Capture must always use a fresh DB75 snapshot taken at the button click.
+        # Never reuse an old snapshot and never fall back to DB74 current positions.
+        if not self._refresh_active_recipe_from_plc(show_errors=True):
+            return
 
         snapshot = self.axis_active_recipe_snapshot or {}
         active_recipe_number = snapshot.get("plc_active_recipe_number")

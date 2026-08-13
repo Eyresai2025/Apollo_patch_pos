@@ -874,12 +874,20 @@ class RecipeManagementPage(QWidget):
             "Load Recipe to Machine",
             (
                 engineering_warning
-                + "This will load the selected saved PostgreSQL recipe to the PLC:\n"
-                "- write recipe target values to DB53\n"
-                "- write recipe name if that feature is enabled\n"
-                "- write recipe number to DB75.DBW288\n"
-                "- pulse the configured PLC recipe-save bit\n"
-                "- perform PLC read-back verification\n\n"
+                + "This will transfer the selected PostgreSQL recipe using the PLC GUI-ownership sequence:\n"
+                "- Recipe Mode From GUI DB75.DBX546.1 = TRUE\n"
+                "- write Recipe Number to DB75.DBW288 and verify\n"
+                "- write Tyre Name to PLC Recipe Name STRING[50]\n"
+                "- pulse Recipe Name Entry DB75.DBX290.0\n"
+                "- wait for PLC recipe buffer to settle\n"
+                "- write PostgreSQL axis targets to DB53\n"
+                "- verify DB53 before SAVE\n"
+                "- pulse Recipe SAVE DB53.DBX546.2\n"
+                "- verify DB53 again after SAVE\n"
+                "- pulse Recipe LOAD/ACTIVATE DB75.DBX546.0\n"
+                "- read DB74.DBW78 and report the actual active recipe\n"
+                "- Recipe Mode From GUI DB75.DBX546.1 = FALSE\n\n"
+                "PLC Recipe Name uses Tyre Name; SKU_### remains Apollo internal identity.\n\n"
                 "Continue?"
             ),
             QMessageBox.Yes | QMessageBox.No,
@@ -908,49 +916,44 @@ class RecipeManagementPage(QWidget):
 
     def _format_plc_result_message(self, result: Dict[str, Any]) -> str:
         verify_result = result.get("verify_result", {}) or {}
-        recipe_number_result = result.get("recipe_number_result", {}) or {}
-        plc_enabled = bool(result.get("enabled", False))
-        plc_written = bool(result.get("written", False))
-        plc_verified = bool(result.get("verified", False))
-
-        written_items = result.get("written_items", []) or []
-        skipped_items = result.get("skipped_items", []) or []
+        number_result = result.get("recipe_number_result", {}) or {}
+        name_result = result.get("recipe_name_result", {}) or {}
+        entry_result = result.get("recipe_entry_result", {}) or {}
+        save_result = result.get("recipe_save_bit_result", {}) or {}
+        gui_on = result.get("gui_mode_on_result", {}) or {}
+        gui_off = result.get("gui_mode_off_result", {}) or {}
+        if not bool(result.get("enabled", False)):
+            return "PLC Write: Disabled\n" + f"PLC Message: {result.get('message', '')}"
+        def status(v): return "OK" if bool(v) else "NOT OK / SKIPPED"
         mismatches = result.get("mismatches", []) or verify_result.get("mismatches", []) or []
-
-        if not plc_enabled:
-            return (
-                "PLC Write: Disabled\n"
-                f"PLC Message: {result.get('message', '')}"
-            )
-
         msg = (
-            f"PLC Write: {'OK' if plc_written else 'NOT OK'}\n"
-            f"PLC Verify: {'OK' if plc_verified else 'NOT OK / SKIPPED'}\n"
-            f"Recipe Number Write: {'OK' if recipe_number_result.get('written') else 'NOT OK / SKIPPED'}\n"
-            f"Recipe Number Verify: {'OK' if recipe_number_result.get('verified') else 'NOT OK / SKIPPED'}\n"
-            f"Targets Written: {len(written_items)}\n"
-            f"Targets Skipped: {len(skipped_items)}\n"
+            f"PLC Transfer/Save: {status(result.get('written'))}\n"
+            f"PLC Verify: {status(result.get('verified'))}\n"
+            f"GUI Recipe Mode ON (DB75.DBX546.1): {status(gui_on.get('verified', not gui_on.get('enabled', False)))}\n"
+            f"Recipe Number (DB75.DBW288): {status(number_result.get('verified'))}\n"
+            f"PLC Recipe Name (Tyre Name): {name_result.get('recipe_name', '-') or '-'}\n"
+            f"Recipe Name STRING[50]: {status(name_result.get('verified', not name_result.get('enabled', False)))}\n"
+            f"Recipe Name Entry (DB75.DBX290.0): {status(entry_result.get('verified', not entry_result.get('enabled', False)))}\n"
+            f"Recipe SAVE (DB53.DBX546.2): {status(save_result.get('verified', not save_result.get('enabled', False)))}\n"
+            f"Recipe LOAD/ACTIVATE (DB75.DBX546.0): {'OK' if result.get('recipe_activated') else ('NOT ACTIVE' if result.get('load_configured') else 'NOT CONFIGURED')}\n"
+            f"GUI Recipe Mode OFF: {status(gui_off.get('verified', not gui_off.get('enabled', False)))}\n"
+            f"Selected Recipe: {result.get('selected_recipe_number', '-')}\n"
+            f"Active Recipe Before: {result.get('active_recipe_before', 'UNKNOWN')}\n"
+            f"Active Recipe After: {result.get('active_recipe_after', 'UNKNOWN')}\n"
+            f"Active Recipe Confirmed: {'YES' if result.get('active_recipe_confirmed') else 'NO'}\n"
+            f"SAVE Pulse Skipped: {'YES' if result.get('save_skipped') else 'NO'}\n"
+            f"Targets Written: {len(result.get('written_items', []) or [])}\n"
+            f"Targets Skipped: {len(result.get('skipped_items', []) or [])}\n"
             f"Verify Count: {verify_result.get('verified_count', 0)}\n"
             f"Mismatch Count: {verify_result.get('mismatch_count', len(mismatches))}\n"
             f"PLC Message: {result.get('message', '')}"
         )
-
         if mismatches:
-            mismatch_lines = []
-
+            lines=[]
             for item in mismatches[:8]:
-                mismatch_lines.append(
-                    f"- {item.get('target_key')} | "
-                    f"Expected={item.get('expected')} | "
-                    f"Actual={item.get('actual')} | "
-                    f"DB{item.get('db')}.DBD{item.get('byte')}"
-                )
-
-            if len(mismatches) > 8:
-                mismatch_lines.append(f"... and {len(mismatches) - 8} more mismatches")
-
-            msg += "\n\nPLC Mismatches:\n" + "\n".join(mismatch_lines)
-
+                lines.append(f"- {item.get('target_key')} | Expected={item.get('expected')} | Actual={item.get('actual')} | DB{item.get('db')}.DBD{item.get('byte')}")
+            if len(mismatches)>8: lines.append(f"... and {len(mismatches)-8} more mismatches")
+            msg += "\n\nPLC Mismatches:\n" + "\n".join(lines)
         return msg
 
 
