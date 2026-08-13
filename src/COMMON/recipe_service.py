@@ -1116,45 +1116,41 @@ class RecipeService:
 
     def _write_recipe_name_to_plc(self, client, recipe_doc: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Writes the HMI/operator Tyre Name to PLC recipe-name storage.
+        Write the operator-facing Tyre Name to the PLC recipe-name field.
 
-        PLC-confirmed application behavior:
-            Recipe name data = Siemens STRING[50] at DB53 byte 0
-            Recipe name entry control = DB75.DBX290.0
+        PLC-confirmed DB75 layout:
+            DB75.DBW288       = RECIPE NO (INT)
+            DB75 byte 290     = RECIPE_NAME (Siemens STRING[50])
+            DB75.DBX546.0     = RECIPE LOAD
+            DB75.DBX546.1     = RECIPE MODE FROM GUI
 
-        Apollo uses tyre_name only for this PLC text field.
-        sku_name (SKU_###) remains application/database identity.
+        Important:
+            P#DB75.DBX290.0 shown in TIA is the POINTER/START ADDRESS of the
+            STRING. It is NOT a BOOL command and must never be pulsed.
 
-        Siemens STRING starts at:
-            DB53, byte 0
+        Apollo uses tyre_name only for the PLC/HMI recipe name.
+        sku_name (for example SKU_008) remains Apollo/PostgreSQL identity.
 
-        Siemens STRING[n] format:
-            byte 0 = max length
-            byte 1 = actual length
-            byte 2 onward = ASCII characters
-
-        Write-only tag: no read-back verification is done here.
+        Siemens classic STRING[n] memory layout:
+            byte 0 = maximum length
+            byte 1 = current length
+            byte 2 onward = characters
         """
-
         enabled = _to_bool(self.env.get("RECIPE_NAME_WRITE_ENABLED", "False"))
-
         if not enabled:
             return {
                 "enabled": False,
                 "written": False,
                 "verified": False,
                 "recipe_name": "",
-                "message": "Recipe name PLC write disabled.",
+                "message": "PLC recipe-name write disabled.",
             }
 
-        # PLC/HMI recipe name is the operator-facing Tyre Name only.
-        # sku_name (for example SKU_008) remains Apollo/PostgreSQL internal identity.
         recipe_name = (
             recipe_doc.get("tyre_name")
             or recipe_doc.get("sku_meta", {}).get("tyre_name")
             or ""
         )
-
         recipe_name = str(recipe_name).strip()
 
         if not recipe_name:
@@ -1163,40 +1159,14 @@ class RecipeService:
                 "written": False,
                 "verified": False,
                 "recipe_name": "",
-                "message": "Tyre Name is empty; PLC recipe-name STRING[50] not written.",
+                "message": "Tyre Name is empty; PLC RECIPE_NAME was not written.",
             }
 
-        db_no = int(self.env.get("RECIPE_NAME_WRITE_DB", "53"))
-        byte = int(self.env.get("RECIPE_NAME_WRITE_BYTE", "0"))
-        max_len = int(self.env.get("RECIPE_NAME_WRITE_MAX_LEN", "50"))
+        db_no = _env_int(self.env, "RECIPE_NAME_WRITE_DB", 75)
+        byte = _env_int(self.env, "RECIPE_NAME_WRITE_BYTE", 290)
+        max_len = _env_int(self.env, "RECIPE_NAME_WRITE_MAX_LEN", 50)
 
-        try:
-            # Siemens STRING[n]:
-            # [max_len][actual_len][characters...]
-            encoded = recipe_name.encode("ascii", errors="ignore")[:max_len]
-
-            data = bytearray(max_len + 2)
-            data[0] = max_len
-            data[1] = len(encoded)
-            data[2:2 + len(encoded)] = encoded
-
-            client.db_write(db_no, byte, data)
-
-            return {
-                "enabled": True,
-                "written": True,
-                "verified": True,  # write-only tag, treated as OK if db_write succeeds
-                "recipe_name": recipe_name,
-                "db": db_no,
-                "byte": byte,
-                "max_len": max_len,
-                "message": (
-                    f"Recipe name '{recipe_name}' written to DB{db_no}.DBX{byte}.0 "
-                    f"as STRING[{max_len}]."
-                ),
-            }
-
-        except Exception as e:
+        if db_no <= 0 or byte < 0 or max_len <= 0 or max_len > 254:
             return {
                 "enabled": True,
                 "written": False,
@@ -1205,9 +1175,63 @@ class RecipeService:
                 "db": db_no,
                 "byte": byte,
                 "max_len": max_len,
-                "message": f"Recipe name PLC write failed: {e}",
-            }   
-        
+                "message": "Invalid PLC recipe-name STRING configuration.",
+            }
+
+        try:
+            encoded = recipe_name.encode("ascii", errors="ignore")[:max_len]
+            expected_text = encoded.decode("ascii", errors="ignore")
+
+            data = bytearray(max_len + 2)
+            data[0] = max_len
+            data[1] = len(encoded)
+            data[2:2 + len(encoded)] = encoded
+
+            client.db_write(db_no, byte, data)
+
+            # Read back the whole Siemens STRING for deterministic verification.
+            raw = bytes(client.db_read(db_no, byte, max_len + 2))
+            actual_max = int(raw[0]) if len(raw) >= 1 else -1
+            actual_len = int(raw[1]) if len(raw) >= 2 else -1
+            if actual_len < 0 or actual_len > max_len:
+                actual_text = ""
+            else:
+                actual_text = raw[2:2 + actual_len].decode("ascii", errors="ignore")
+
+            verified = (
+                actual_max == max_len
+                and actual_len == len(encoded)
+                and actual_text == expected_text
+            )
+
+            return {
+                "enabled": True,
+                "written": True,
+                "verified": verified,
+                "recipe_name": expected_text,
+                "actual_recipe_name": actual_text,
+                "db": db_no,
+                "byte": byte,
+                "max_len": max_len,
+                "message": (
+                    f"Tyre Name '{expected_text}' written to DB{db_no} byte {byte} "
+                    f"as STRING[{max_len}]. Readback='{actual_text}', verified={verified}."
+                ),
+            }
+
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "written": False,
+                "verified": False,
+                "recipe_name": recipe_name,
+                "actual_recipe_name": "",
+                "db": db_no,
+                "byte": byte,
+                "max_len": max_len,
+                "message": f"PLC recipe-name STRING write failed: {exc}",
+            }
+
     def _read_plc_bit(self, client, db_no: int, byte: int, bit: int):
         """
         Read one PLC BOOL bit from DBX address.
@@ -1293,26 +1317,21 @@ class RecipeService:
                     "message": f"{label} pulse failed at DB{db_no}.DBX{byte}.{bit}: {exc}"}
 
     def _pulse_recipe_entry_bit(self, client) -> Dict[str, Any]:
-        """Pulse the PLC-confirmed Recipe Name Entry bit DB75.DBX290.0.
+        """Deprecated safety no-op.
 
-        Sequence:
-            1. Apollo writes tyre_name to the PLC Siemens STRING[50].
-            2. Apollo pulses DB75.DBX290.0 as the Recipe Name Entry command.
-
-        This is separate from:
-            SAVE = DB53.DBX546.2
-            LOAD = DB75.DBX546.0
+        DB75 byte 290 is the start of RECIPE_NAME STRING[50], not a BOOL
+        command. This method is retained only for backward compatibility and
+        intentionally performs no PLC write.
         """
-        enabled = _to_bool(self.env.get("RECIPE_ENTRY_BIT_ENABLED", "False"))
-        if not enabled:
-            return {"enabled": False, "written": True, "verified": True,
-                    "message": "Recipe entry/commit bit disabled."}
-        db_no = _env_int(self.env, "RECIPE_ENTRY_BIT_DB", 75)
-        byte = _env_int(self.env, "RECIPE_ENTRY_BIT_BYTE", 290)
-        bit = _env_int(self.env, "RECIPE_ENTRY_BIT_BIT", 0)
-        pulse_sec = max(0.05, _env_float(self.env, "RECIPE_ENTRY_BIT_PULSE_SEC", 0.5))
-        return self._pulse_named_recipe_bit(client, db_no, byte, bit, pulse_sec,
-                                            "Recipe Name Entry")
+        return {
+            "enabled": False,
+            "written": False,
+            "verified": True,
+            "message": (
+                "DB75 byte 290 is RECIPE_NAME STRING[50]; "
+                "no Recipe Entry bit pulse is required."
+            ),
+        }
 
     def _pulse_recipe_load_bit(self, client) -> Dict[str, Any]:
         """Pulse the PLC-confirmed Recipe LOAD/ACTIVATE command.
@@ -1512,8 +1531,7 @@ class RecipeService:
         Sequence:
           DB75.DBX546.1 TRUE
           -> DB75.DBW288 recipe number
-          -> write tyre_name to DB53 Siemens STRING[50]
-          -> DB75.DBX290.0 Recipe Name Entry pulse
+          -> write tyre_name directly to DB75 byte 290 as Siemens STRING[50]
           -> DB53 target write/verify
           -> DB53.DBX546.2 SAVE
           -> DB53 verify
@@ -1521,7 +1539,8 @@ class RecipeService:
           -> DB74.DBW78 active check
           -> DB75.DBX546.1 FALSE.
 
-        Recipe Name Entry, SAVE, and LOAD are three separate PLC functions.
+        DB75.DBX290.0 is not a BOOL handshake. In the PLC/TIA project it is
+        the pointer/start address of RECIPE_NAME STRING[50].
         """
         if not _to_bool(self.env.get("RECIPE_WRITE_TO_PLC", "False")):
             return {"enabled": False, "written": False, "verified": False,
@@ -1575,17 +1594,6 @@ class RecipeService:
             result["recipe_name_result"] = recipe_name_result
             if recipe_name_result.get("enabled") and not recipe_name_result.get("written"):
                 result["message"] = "Recipe transaction stopped: configured recipe-name write failed. " + recipe_name_result.get("message", "")
-                return result
-
-            recipe_entry_result = self._pulse_recipe_entry_bit(client)
-            result["recipe_entry_result"] = recipe_entry_result
-            if recipe_entry_result.get("enabled") and not (
-                recipe_entry_result.get("written") and recipe_entry_result.get("verified")
-            ):
-                result["message"] = (
-                    "Recipe transaction stopped: Recipe Name Entry failed. "
-                    + recipe_entry_result.get("message", "")
-                )
                 return result
 
             settle_sec = max(0.0, _env_float(self.env, "RECIPE_NUMBER_SETTLE_SEC", 0.30))
@@ -1645,7 +1653,6 @@ class RecipeService:
                 "recipe_activated": bool(load_configured and load_ok and active_confirmed),
                 "recipe_number_written": bool(recipe_number_result.get("written", False)),
                 "recipe_number_verified": bool(recipe_number_result.get("verified", False)),
-                "recipe_entry_written": bool(recipe_entry_result.get("written", False)),
                 "recipe_save_bit_written": bool(save_result.get("written", False)),
             })
 
@@ -1653,7 +1660,6 @@ class RecipeService:
                 bool(result.get("db53_written"))
                 and bool(recipe_number_result.get("written"))
                 and bool(recipe_name_result.get("written", not recipe_name_result.get("enabled", False)))
-                and bool(recipe_entry_result.get("written", True))
                 and bool(save_result.get("written", True))
                 and load_ok
             )
@@ -1661,7 +1667,6 @@ class RecipeService:
                 bool(result.get("db53_verified"))
                 and bool(recipe_number_result.get("verified"))
                 and bool(recipe_name_result.get("verified", not recipe_name_result.get("enabled", False)))
-                and bool(recipe_entry_result.get("verified", True))
                 and bool(save_result.get("verified", True))
                 and (active_confirmed if load_configured else True)
             )
@@ -1673,7 +1678,7 @@ class RecipeService:
             )
             result["message"] = " ".join(filter(None, [
                 gui_mode_on.get("message", ""), recipe_number_result.get("message", ""),
-                recipe_name_result.get("message", ""), recipe_entry_result.get("message", ""),
+                recipe_name_result.get("message", ""),
                 f"Recipe-number/name settle={settle_sec:.2f}s.", write_result.get("message", ""),
                 "Pre-save verify: " + pre.get("message", ""), save_result.get("message", ""),
                 "Post-save verify: " + post.get("message", ""), load_result.get("message", ""), load_note

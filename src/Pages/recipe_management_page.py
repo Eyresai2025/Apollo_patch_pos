@@ -877,8 +877,7 @@ class RecipeManagementPage(QWidget):
                 + "This will transfer the selected PostgreSQL recipe using the PLC GUI-ownership sequence:\n"
                 "- Recipe Mode From GUI DB75.DBX546.1 = TRUE\n"
                 "- write Recipe Number to DB75.DBW288 and verify\n"
-                "- write Tyre Name to PLC Recipe Name STRING[50]\n"
-                "- pulse Recipe Name Entry DB75.DBX290.0\n"
+                "- write Tyre Name directly to DB75 byte 290 as Recipe Name STRING[50] and verify\n"
                 "- wait for PLC recipe buffer to settle\n"
                 "- write PostgreSQL axis targets to DB53\n"
                 "- verify DB53 before SAVE\n"
@@ -918,7 +917,6 @@ class RecipeManagementPage(QWidget):
         verify_result = result.get("verify_result", {}) or {}
         number_result = result.get("recipe_number_result", {}) or {}
         name_result = result.get("recipe_name_result", {}) or {}
-        entry_result = result.get("recipe_entry_result", {}) or {}
         save_result = result.get("recipe_save_bit_result", {}) or {}
         gui_on = result.get("gui_mode_on_result", {}) or {}
         gui_off = result.get("gui_mode_off_result", {}) or {}
@@ -932,8 +930,8 @@ class RecipeManagementPage(QWidget):
             f"GUI Recipe Mode ON (DB75.DBX546.1): {status(gui_on.get('verified', not gui_on.get('enabled', False)))}\n"
             f"Recipe Number (DB75.DBW288): {status(number_result.get('verified'))}\n"
             f"PLC Recipe Name (Tyre Name): {name_result.get('recipe_name', '-') or '-'}\n"
-            f"Recipe Name STRING[50]: {status(name_result.get('verified', not name_result.get('enabled', False)))}\n"
-            f"Recipe Name Entry (DB75.DBX290.0): {status(entry_result.get('verified', not entry_result.get('enabled', False)))}\n"
+            f"Recipe Name STRING[50] (DB75 byte 290): {status(name_result.get('verified', not name_result.get('enabled', False)))}\n"
+            f"Recipe Name Readback: {name_result.get('actual_recipe_name', '-') or '-'}\n"
             f"Recipe SAVE (DB53.DBX546.2): {status(save_result.get('verified', not save_result.get('enabled', False)))}\n"
             f"Recipe LOAD/ACTIVATE (DB75.DBX546.0): {'OK' if result.get('recipe_activated') else ('NOT ACTIVE' if result.get('load_configured') else 'NOT CONFIGURED')}\n"
             f"GUI Recipe Mode OFF: {status(gui_off.get('verified', not gui_off.get('enabled', False)))}\n"
