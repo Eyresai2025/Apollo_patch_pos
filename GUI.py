@@ -257,7 +257,10 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 BASE_DIR = app_dir()
-MEDIA_PATH = str(BASE_DIR / "media")
+# Source-controlled resources (icons/guides) stay with the application.
+RESOURCE_MEDIA_PATH = str(BASE_DIR / "media")
+# Temporary default until central configuration is loaded below.
+MEDIA_PATH = RESOURCE_MEDIA_PATH
 ENV_PATH   = str(BASE_DIR / ".env")
 
 try:
@@ -272,6 +275,13 @@ os.environ["CUPY_ACCELERATORS"] = ""
 config_manager = get_config_manager(ENV_PATH)
 app_config = config_manager.config
 env_vars = config_manager.as_legacy_dict()  # temporary bridge for unmigrated GUI fields
+
+# AP-003: all generated/operational media follows the centrally configured
+# runtime root. Static UI resources remain in the application package.
+MEDIA_PATH = str(app_config.paths.media_root)
+RESOURCE_MEDIA_PATH = str(app_config.paths.resource_media_root)
+Path(MEDIA_PATH).mkdir(parents=True, exist_ok=True)
+
 deployment = app_config.deployment_mode
 plc_ip = app_config.plc.ip
 logger.info(
@@ -304,11 +314,11 @@ logger.info(
 
 _local_inspection_input = env_vars.get(
     "LOCAL_INSPECTION_INPUT",
-    str(BASE_DIR / "media" / "raw images" / "1.png"),
+    str(app_config.paths.media_root / "raw images" / "1.png"),
 )
 _local_inspection_path = Path(str(_local_inspection_input).strip().strip('"').strip("'"))
 if not _local_inspection_path.is_absolute():
-    _local_inspection_path = BASE_DIR / _local_inspection_path
+    _local_inspection_path = app_config.paths.runtime_root / _local_inspection_path
 LOCAL_MULTI_SIDE_TEST_FOLDER = str(_local_inspection_path.resolve())
 
 MAIN_SEG_MODEL_PATH = (
@@ -338,7 +348,6 @@ else:
 logger.info(f"Using device: {device}")
 
 MEDIA_ROOT_INIT_ERROR = False
-MEDIA_PATH = str(BASE_DIR / "media")
 RAW_IMAGE_DIR = os.path.join(MEDIA_PATH, "raw images")
 STARTUP_IMAGE_PATHS = [
     os.path.join(RAW_IMAGE_DIR, "1.png"),
@@ -398,7 +407,7 @@ class MainWindow(QMainWindow):
 
         # Let Windows/Qt maximize within usable area.
         QTimer.singleShot(0, self.showMaximized)
-        self.setWindowIcon(QIcon(os.path.join(MEDIA_PATH, "img/smartQC-.ico")))
+        self.setWindowIcon(QIcon(os.path.join(RESOURCE_MEDIA_PATH, "img/smartQC-.ico")))
         
         # Thread management
         self.thread_manager = ThreadManager(parent=self)
@@ -1218,7 +1227,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Live Inspection")
         dialog.resize(self.s(520), self.s(390 if not is_deployment else 330))
-        dialog.setWindowIcon(QIcon(os.path.join(MEDIA_PATH, "img/smartQC-.ico")))
+        dialog.setWindowIcon(QIcon(os.path.join(RESOURCE_MEDIA_PATH, "img/smartQC-.ico")))
         dialog.setModal(True)
 
         dialog.setStyleSheet("""
@@ -2228,7 +2237,7 @@ class MainWindow(QMainWindow):
         h.setSpacing(self.s(8))
 
         def load_header_icon(file_name, size=16):
-            icon_path = os.path.join(MEDIA_PATH, "img", file_name)
+            icon_path = os.path.join(RESOURCE_MEDIA_PATH, "img", file_name)
             if not os.path.exists(icon_path):
                 return QIcon()
             return QIcon(icon_path)
@@ -2261,10 +2270,10 @@ class MainWindow(QMainWindow):
             return box, value_label
 
         date_box, self.date_label = make_datetime_item(
-            os.path.join(MEDIA_PATH, "img", "calendar.png")
+            os.path.join(RESOURCE_MEDIA_PATH, "img", "calendar.png")
         )
         time_box, self.time_label = make_datetime_item(
-            os.path.join(MEDIA_PATH, "img", "clock.png")
+            os.path.join(RESOURCE_MEDIA_PATH, "img", "clock.png")
         )
         h.addWidget(date_box)
         h.addSpacing(self.s(4))
@@ -2905,7 +2914,7 @@ class MainWindow(QMainWindow):
 
         logo_label = QLabel()
         logo_pixmap = QPixmap(
-            os.path.join(MEDIA_PATH, "img", "LOGO-02.png")
+            os.path.join(RESOURCE_MEDIA_PATH, "img", "LOGO-02.png")
         )
         if not logo_pixmap.isNull():
             logo_label.setPixmap(
@@ -2981,7 +2990,7 @@ class MainWindow(QMainWindow):
             btn.setToolTip(sidebar_tooltips.get(text, f"Open the {text} page."))
             btn.setFixedHeight(max(self.s(35), 33))
 
-            icon_path = os.path.join(MEDIA_PATH, "img", icon_name)
+            icon_path = os.path.join(RESOURCE_MEDIA_PATH, "img", icon_name)
             if os.path.exists(icon_path):
                 btn.setIcon(load_square_icon(icon_path, self.s(17)))
                 btn.setIconSize(QSize(self.s(17), self.s(17)))
@@ -3039,7 +3048,7 @@ class MainWindow(QMainWindow):
 
         bottom_logo = QLabel()
         bottom_pixmap = QPixmap(
-            os.path.join(MEDIA_PATH, "img", "LOGO-02s.png")
+            os.path.join(RESOURCE_MEDIA_PATH, "img", "LOGO-02s.png")
         )
         if not bottom_pixmap.isNull():
             bottom_logo.setPixmap(
@@ -3256,7 +3265,7 @@ class MainWindow(QMainWindow):
                 icon_label = QLabel()
                 icon_label.setStyleSheet("background: transparent; border: none;")
                 icon_label.setFixedSize(self.s(18), self.s(18))
-                icon_path = os.path.join(MEDIA_PATH, "img", icon_name)
+                icon_path = os.path.join(RESOURCE_MEDIA_PATH, "img", icon_name)
                 pixmap = QPixmap(icon_path)
                 if not pixmap.isNull():
                     icon_label.setPixmap(pixmap.scaled(
@@ -3342,7 +3351,7 @@ class MainWindow(QMainWindow):
         result_icon = QLabel()
         result_icon.setStyleSheet("background: transparent; border: none;")
         result_icon.setFixedSize(self.s(18), self.s(18))
-        result_icon_pixmap = QPixmap(os.path.join(MEDIA_PATH, "img", "wheels.png"))
+        result_icon_pixmap = QPixmap(os.path.join(RESOURCE_MEDIA_PATH, "img", "wheels.png"))
         if not result_icon_pixmap.isNull():
             result_icon.setPixmap(result_icon_pixmap.scaled(
                 self.s(17), self.s(17), Qt.KeepAspectRatio,
@@ -3504,7 +3513,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("SKU Processing")
         dialog.resize(self.s(460), self.s(200))
-        dialog.setWindowIcon(QIcon(os.path.join(MEDIA_PATH, "img/smartQC-.ico")))
+        dialog.setWindowIcon(QIcon(os.path.join(RESOURCE_MEDIA_PATH, "img/smartQC-.ico")))
         dialog.setStyleSheet("""
             QDialog { background: #f4f4f4; }
             QFrame#Card { background: white; border-radius: 16px; border: 1px solid #e6e6e6; }
@@ -3827,7 +3836,7 @@ class MainWindow(QMainWindow):
     def open_annotation_tool(self):
         try:
             if getattr(self, "annotation_tool_page", None) is None:
-                self.annotation_tool_page = AnnotationTool(media_path=MEDIA_PATH)
+                self.annotation_tool_page = AnnotationTool(media_path=RESOURCE_MEDIA_PATH)
                 self.annotation_tool_page.setWindowFlags(Qt.Widget)
                 self.content_stack.addWidget(self.annotation_tool_page)
             self.content_stack.setCurrentWidget(self.annotation_tool_page)
@@ -3837,7 +3846,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to open annotation tool: {e}")
     
     def open_help_doc(self):
-        help_file = os.path.join(MEDIA_PATH, "Guide", "Edge_App_GUI_Operating_Document.docx")
+        help_file = os.path.join(RESOURCE_MEDIA_PATH, "Guide", "Edge_App_GUI_Operating_Document.docx")
         if platform.system() == "Windows":
             os.startfile(help_file)
         elif platform.system() == "Darwin":

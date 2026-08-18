@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QSize  # type: ignore
 from PyQt5.QtGui import QColor, QPixmap  # type: ignore
+from src.COMMON.config import get_config
 from PyQt5.QtWidgets import (  # type: ignore
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QLabel,
     QSizePolicy, QToolButton, QTableWidget, QTableWidgetItem,
@@ -911,7 +912,7 @@ class ActionCodePlanPage(QWidget):
         pdf_path, _ = QFileDialog.getOpenFileName(self, "Select OSC SOP PDF", "", "PDF Files (*.pdf)")
         if not pdf_path:
             return
-        out_dir = os.path.join("media", "osc_catalog", "rev03")
+        out_dir = str(get_config().paths.media_root / "osc_catalog" / "rev03")
         try:
             payload = parse_catalog_tables(__import__("pathlib").Path(pdf_path))
             payload["images"] = crop_section_images(__import__("pathlib").Path(pdf_path), payload, __import__("pathlib").Path(out_dir))

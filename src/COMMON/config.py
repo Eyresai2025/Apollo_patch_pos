@@ -2,9 +2,9 @@
 
 Configuration precedence (highest first):
     1. Operating-system environment variables
-    2. External machine-local ``secrets.env`` file
-    3. Project ``.env`` file
-    4. Typed defaults defined in this module
+    2. Project ``.env`` file
+    3. Typed defaults defined in this module
+
 The service intentionally keeps a legacy dictionary interface so existing
 modules can be migrated gradually without changing production behaviour.
 """
@@ -339,6 +339,8 @@ class DatabaseConfig:
 class PathConfig:
     project_root: Path
     env_file: Path
+    runtime_root: Path
+    resource_media_root: Path
     media_root: Path
     model_dir: Path
     capture_dir: Path
@@ -734,6 +736,31 @@ class ConfigManager:
             value = str(default)
         return _resolve_path(value, self.project_root)
 
+    def get_runtime_path(
+        self,
+        key: str,
+        default: str | Path,
+        runtime_root: Path,
+        *,
+        allow_empty: bool = False,
+    ) -> Optional[Path]:
+        """Resolve a runtime path relative to the configured runtime root.
+
+        Relative runtime paths follow ``APOLLO_RUNTIME_ROOT`` instead of the
+        source tree. With no external runtime root configured, behaviour is
+        identical to the historical project-local layout.
+        """
+        value = str(self._values.get(key, default)).strip()
+        if not value and allow_empty:
+            return None
+        if not value:
+            value = str(default)
+        expanded = _expand_value(value, self._values, self.project_root)
+        candidate = Path(expanded).expanduser()
+        if not candidate.is_absolute():
+            candidate = runtime_root / candidate
+        return candidate.resolve()
+
     def source_for(self, key: str) -> str:
         if key in os.environ and (
             key in self._file_values
@@ -791,13 +818,40 @@ class ConfigManager:
         return tuple(targets)
 
     def _build_config(self) -> AppConfig:
-        media_root = self.get_path("MEDIA_ROOT", "media") or self.project_root / "media"
-        model_dir = self.get_path("MODEL_DIR", media_root / "weights") or media_root / "weights"
-        capture_dir = self.get_path("CAPTURE_DIR", media_root / "capture") or media_root / "capture"
-        output_dir = self.get_path("OUTPUT_DIR", media_root / "output") or media_root / "output"
-        recipe_backup_dir = self.get_path("RECIPE_BACKUP_DIR", "media/recipe_backups") or media_root / "recipe_backups"
-        validation_dir = self.get_path("VALIDATION_REPORT_DIR", "media/validation_reports") or media_root / "validation_reports"
-        logs_dir = self.get_path("LOG_DIR", "logs") or self.project_root / "logs"
+        # AP-003: keep generated/runtime state outside the source tree when
+        # APOLLO_RUNTIME_ROOT is configured. The project root remains the
+        # default so existing installations stay backward-compatible.
+        runtime_root = self.get_path("APOLLO_RUNTIME_ROOT", self.project_root) or self.project_root
+        runtime_root = runtime_root.resolve()
+        resource_media_root = (self.project_root / "media").resolve()
+
+        media_root = self.get_runtime_path("MEDIA_ROOT", "media", runtime_root) or (runtime_root / "media")
+        model_dir = (
+            self.get_runtime_path("MODEL_DIR", "media/weights", runtime_root)
+            if "MODEL_DIR" in self._values
+            else (media_root / "weights").resolve()
+        )
+        capture_dir = (
+            self.get_runtime_path("CAPTURE_DIR", "media/capture", runtime_root)
+            if "CAPTURE_DIR" in self._values
+            else (media_root / "capture").resolve()
+        )
+        output_dir = (
+            self.get_runtime_path("OUTPUT_DIR", "media/output", runtime_root)
+            if "OUTPUT_DIR" in self._values
+            else (media_root / "output").resolve()
+        )
+        recipe_backup_dir = (
+            self.get_runtime_path("RECIPE_BACKUP_DIR", "media/recipe_backups", runtime_root)
+            if "RECIPE_BACKUP_DIR" in self._values
+            else (media_root / "recipe_backups").resolve()
+        )
+        validation_dir = (
+            self.get_runtime_path("VALIDATION_REPORT_DIR", "media/validation_reports", runtime_root)
+            if "VALIDATION_REPORT_DIR" in self._values
+            else (media_root / "validation_reports").resolve()
+        )
+        logs_dir = self.get_runtime_path("LOG_DIR", "logs", runtime_root) or (runtime_root / "logs")
 
         device_value = self.get_str("INFERENCE_DEVICE", "cuda").lower()
         try:
@@ -860,6 +914,8 @@ class ConfigManager:
         paths = PathConfig(
             project_root=self.project_root,
             env_file=self.env_path,
+            runtime_root=runtime_root,
+            resource_media_root=resource_media_root,
             media_root=media_root,
             model_dir=model_dir,
             capture_dir=capture_dir,
@@ -883,10 +939,11 @@ class ConfigManager:
         )
         security = SecurityConfig(
             enabled=self.get_bool("AUTH_ENABLED", True),
-            database_path=self.get_path(
+            database_path=self.get_runtime_path(
                 "AUTH_DB_PATH",
                 "data/security/apollo_security.db",
-            ) or (self.project_root / "data" / "security" / "apollo_security.db"),
+                runtime_root,
+            ) or (runtime_root / "data" / "security" / "apollo_security.db"),
             session_timeout_minutes=self.get_int("AUTH_SESSION_TIMEOUT_MIN", 30),
             max_failed_attempts=self.get_int("AUTH_MAX_FAILED_ATTEMPTS", 5),
             lockout_minutes=self.get_int("AUTH_LOCKOUT_MIN", 15),
@@ -912,10 +969,11 @@ class ConfigManager:
             input_metadata_collection=self.get_str("INSPECTION_INPUT_METADATA_COLLECTION", "Input Images"),
             output_metadata_collection=self.get_str("INSPECTION_OUTPUT_METADATA_COLLECTION", "Output Images"),
             offline_outbox_enabled=self.get_bool("INSPECTION_OFFLINE_OUTBOX_ENABLED", True),
-            outbox_path=self.get_path(
+            outbox_path=self.get_runtime_path(
                 "INSPECTION_OUTBOX_PATH",
                 "data/inspection/inspection_outbox.db",
-            ) or (self.project_root / "data" / "inspection" / "inspection_outbox.db"),
+                runtime_root,
+            ) or (runtime_root / "data" / "inspection" / "inspection_outbox.db"),
             sync_enabled=self.get_bool("INSPECTION_SYNC_ENABLED", True),
             sync_interval_sec=self.get_float("INSPECTION_SYNC_INTERVAL_SEC", 30.0),
             sync_batch_size=self.get_int("INSPECTION_SYNC_BATCH_SIZE", 10),
@@ -1066,6 +1124,22 @@ class ConfigManager:
                 key=key,
                 source=self.source_for(key),
             )
+
+        # AP-003 deployment hygiene. Keep this a warning so the operator can
+        # migrate an existing machine safely before any strict enforcement.
+        try:
+            if (
+                cfg.application.deployment_mode
+                and cfg.paths.runtime_root.resolve() == cfg.paths.project_root.resolve()
+            ):
+                report.add(
+                    ValidationSeverity.WARNING,
+                    "RUNTIME_ROOT_INSIDE_PROJECT",
+                    "DEPLOYMENT=True but APOLLO_RUNTIME_ROOT still uses the application source tree",
+                    key="APOLLO_RUNTIME_ROOT",
+                )
+        except Exception:
+            pass
 
         # Logging checks.
         allowed_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
