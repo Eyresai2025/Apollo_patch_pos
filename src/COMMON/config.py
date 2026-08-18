@@ -2,8 +2,9 @@
 
 Configuration precedence (highest first):
     1. Operating-system environment variables
-    2. Project ``.env`` file
-    3. Typed defaults defined in this module
+    2. External machine-local ``secrets.env`` file
+    3. Project ``.env`` file
+    4. Typed defaults defined in this module
 
 The service intentionally keeps a legacy dictionary interface so existing
 modules can be migrated gradually without changing production behaviour.
@@ -180,15 +181,42 @@ def _resolve_path(value: str, project_root: Path) -> Path:
     return (project_root / value).resolve()
 
 
+def _url_contains_credentials(value: str) -> bool:
+    """Return True when a URI contains user-info before the host.
+
+    A local MongoDB URI such as ``mongodb://localhost:27017/`` is configuration,
+    not secret material. A URI such as ``mongodb://user:pass@host/db`` is secret.
+    """
+    text = str(value or "").strip()
+    if "://" not in text or "@" not in text:
+        return False
+    try:
+        authority = text.split("://", 1)[1].split("/", 1)[0]
+    except Exception:
+        return False
+    return "@" in authority and bool(authority.split("@", 1)[0].strip())
+
+
 def _is_secret_key(key: str) -> bool:
-    """Return True when a configuration key contains secret material."""
+    """Return True for key names that are inherently secret-bearing."""
     upper = key.upper()
+    if upper == "DATABASE_URL":
+        # DATABASE_URL can be a credential-free local MongoDB endpoint.
+        # Credential presence is evaluated from the value at validation time.
+        return False
     return (
         any(marker in upper for marker in _SECRET_MARKERS)
         or upper in _SECRET_URL_KEYS
         or upper.endswith("_DATABASE_URL")
         or upper.endswith("_ADMIN_URL")
     )
+
+
+def _contains_secret_material(key: str, value: str) -> bool:
+    upper = key.upper()
+    if upper == "DATABASE_URL":
+        return _url_contains_credentials(value)
+    return _is_secret_key(key)
 
 
 def _mask_value(key: str, value: str) -> str:
@@ -1111,7 +1139,7 @@ class ConfigManager:
         # deployment mode treats it as a release-blocking configuration error.
         secret_keys_in_project_env = [
             key for key, value in self._file_values.items()
-            if value and _is_secret_key(key)
+            if value and _contains_secret_material(key, value)
         ]
         for key in sorted(secret_keys_in_project_env):
             report.add(
@@ -1123,6 +1151,41 @@ class ConfigManager:
                 ),
                 key=key,
                 source=self.source_for(key),
+            )
+
+        # AP-004 versioned configuration contract. This catches typos/unknown
+        # keys and missing production/conditional settings before hardware pages
+        # are opened. The contract itself is source-controlled and hardware-free.
+        try:
+            from .config_contract import evaluate_config_contract, load_config_contract
+
+            contract = load_config_contract(self.project_root)
+            for finding in evaluate_config_contract(
+                contract,
+                project_values=self._file_values,
+                secret_values=self._secret_values,
+                effective_values=self._values,
+                deployment_mode=cfg.application.deployment_mode,
+                source_for=self.source_for,
+            ):
+                severity = {
+                    "ERROR": ValidationSeverity.ERROR,
+                    "WARNING": ValidationSeverity.WARNING,
+                    "INFO": ValidationSeverity.INFO,
+                }.get(finding.severity.upper(), ValidationSeverity.WARNING)
+                report.add(
+                    severity, finding.code, finding.message,
+                    key=finding.key, source=finding.source,
+                )
+        except FileNotFoundError as exc:
+            report.add(
+                ValidationSeverity.ERROR if cfg.application.deployment_mode else ValidationSeverity.WARNING,
+                "CONFIG_CONTRACT_NOT_FOUND", str(exc),
+            )
+        except Exception as exc:
+            report.add(
+                ValidationSeverity.ERROR if cfg.application.deployment_mode else ValidationSeverity.WARNING,
+                "CONFIG_CONTRACT_INVALID", f"Configuration contract could not be evaluated: {exc}",
             )
 
         # AP-003 deployment hygiene. Keep this a warning so the operator can
