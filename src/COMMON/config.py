@@ -2,9 +2,9 @@
 
 Configuration precedence (highest first):
     1. Operating-system environment variables
-    2. Project ``.env`` file
-    3. Typed defaults defined in this module
-
+    2. External machine-local ``secrets.env`` file
+    3. Project ``.env`` file
+    4. Typed defaults defined in this module
 The service intentionally keeps a legacy dictionary interface so existing
 modules can be migrated gradually without changing production behaviour.
 """
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _TRUE_VALUES = {"1", "true", "yes", "y", "on", "enabled"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off", "disabled"}
 _SECRET_MARKERS = ("PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY")
+_SECRET_URL_KEYS = {"DATABASE_URL", "POSTGRES_DATABASE_URL", "POSTGRES_ADMIN_URL"}
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -179,14 +180,48 @@ def _resolve_path(value: str, project_root: Path) -> Path:
     return (project_root / value).resolve()
 
 
-def _mask_value(key: str, value: str) -> str:
+def _is_secret_key(key: str) -> bool:
+    """Return True when a configuration key contains secret material."""
     upper = key.upper()
-    if any(marker in upper for marker in _SECRET_MARKERS):
+    return (
+        any(marker in upper for marker in _SECRET_MARKERS)
+        or upper in _SECRET_URL_KEYS
+        or upper.endswith("_DATABASE_URL")
+        or upper.endswith("_ADMIN_URL")
+    )
+
+
+def _mask_value(key: str, value: str) -> str:
+    """Return a log/export-safe representation of a configuration value."""
+    upper = key.upper()
+    if upper in _SECRET_URL_KEYS or upper.endswith("_DATABASE_URL") or upper.endswith("_ADMIN_URL"):
+        # Keep the transport/host useful for diagnostics while hiding credentials.
+        if "@" in value:
+            return re.sub(r"(://)[^/@]+(?=@)", r"\1***", value)
+        return value
+    if _is_secret_key(key):
         return "***"
-    if key == "DATABASE_URL" and "@" in value:
-        # Preserve protocol and host while hiding credentials.
-        return re.sub(r"(://)[^/@]+(?=@)", r"\1***", value)
     return value
+
+
+def _default_secrets_path(project_root: Path) -> Path:
+    """Resolve the machine-local secrets file used outside the source tree.
+
+    Precedence:
+      1. APOLLO_SECRETS_FILE operating-system environment variable
+      2. %PROGRAMDATA%\\Apollo\\config\\secrets.env on Windows
+      3. ~/.config/apollo/secrets.env on non-Windows systems
+    """
+    explicit = str(os.environ.get("APOLLO_SECRETS_FILE", "")).strip()
+    if explicit:
+        expanded = _expand_value(explicit, dict(os.environ), project_root)
+        return Path(expanded).expanduser().resolve()
+
+    if os.name == "nt":
+        program_data = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+        return program_data / "Apollo" / "config" / "secrets.env"
+
+    return Path.home() / ".config" / "apollo" / "secrets.env"
 
 
 # ---------------------------------------------------------------------------
@@ -595,9 +630,13 @@ class ConfigManager:
 
     def __init__(self, env_or_root: Optional[os.PathLike[str] | str] = None):
         self.project_root, self.env_path = _resolve_env_path(env_or_root)
+        self.secrets_path = _default_secrets_path(self.project_root)
         self._file_values: Dict[str, str] = {}
         self._line_numbers: Dict[str, int] = {}
         self._duplicate_keys: List[str] = []
+        self._secret_values: Dict[str, str] = {}
+        self._secret_line_numbers: Dict[str, int] = {}
+        self._duplicate_secret_keys: List[str] = []
         self._values: Dict[str, str] = {}
         self._conversion_issues: List[ValidationIssue] = []
         self.config: AppConfig
@@ -609,10 +648,15 @@ class ConfigManager:
         self._file_values, self._line_numbers, self._duplicate_keys = _parse_env_file(
             self.env_path
         )
+        self._secret_values, self._secret_line_numbers, self._duplicate_secret_keys = (
+            _parse_env_file(self.secrets_path)
+        )
 
-        # Existing file values are the base. Any same-named OS environment
-        # variable overrides them. OS-only APOLLO/config keys are also included.
+        # Project .env provides non-secret machine/application configuration.
+        # The external machine-local secrets file overrides project values.
+        # Finally, OS environment variables override both.
         combined = dict(self._file_values)
+        combined.update(self._secret_values)
         for key, value in os.environ.items():
             if key in combined or key.startswith("APOLLO_"):
                 combined[key] = value
@@ -691,8 +735,14 @@ class ConfigManager:
         return _resolve_path(value, self.project_root)
 
     def source_for(self, key: str) -> str:
-        if key in os.environ and (key in self._file_values or key.startswith("APOLLO_")):
+        if key in os.environ and (
+            key in self._file_values
+            or key in self._secret_values
+            or key.startswith("APOLLO_")
+        ):
             return "OS environment"
+        if key in self._secret_line_numbers:
+            return f"{self.secrets_path} line {self._secret_line_numbers[key]}"
         if key in self._line_numbers:
             return f"{self.env_path} line {self._line_numbers[key]}"
         return "default"
@@ -987,8 +1037,35 @@ class ConfigManager:
                 key=key,
                 source=str(self.env_path),
             )
+        for key in sorted(set(self._duplicate_secret_keys)):
+            report.add(
+                ValidationSeverity.ERROR,
+                "DUPLICATE_SECRET_KEY",
+                f"{key} is defined more than once in the external secrets file",
+                key=key,
+                source=str(self.secrets_path),
+            )
 
         cfg = self.config
+
+        # A production source/deployment package must not carry credentials in
+        # the project .env file. Development gets a warning to support migration;
+        # deployment mode treats it as a release-blocking configuration error.
+        secret_keys_in_project_env = [
+            key for key, value in self._file_values.items()
+            if value and _is_secret_key(key)
+        ]
+        for key in sorted(secret_keys_in_project_env):
+            report.add(
+                ValidationSeverity.ERROR if cfg.application.deployment_mode else ValidationSeverity.WARNING,
+                "SECRET_IN_PROJECT_ENV",
+                (
+                    f"{key} contains secret material in the project .env. "
+                    f"Move it to {self.secrets_path} or an OS environment variable."
+                ),
+                key=key,
+                source=self.source_for(key),
+            )
 
         # Logging checks.
         allowed_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}

@@ -1,6 +1,6 @@
 """Create/update the Apollo PostgreSQL role and database.
 
-Required .env keys:
+Required secret configuration keys:
     POSTGRES_ADMIN_URL
     POSTGRES_APP_USER
     POSTGRES_APP_PASSWORD
@@ -38,11 +38,11 @@ def main() -> int:
     database_name = get_value("POSTGRES_DB_NAME", "eyresqc_apollo")
 
     if not app_password or app_password == "CHANGE_ME_STRONG_PASSWORD":
-        print("[ERROR] Set POSTGRES_APP_PASSWORD in .env before running this tool.")
+        print("[ERROR] Set POSTGRES_APP_PASSWORD in the external Apollo secrets file or OS environment before running this tool.")
         return 2
 
     if "CHANGE_ME" in admin_url:
-        print("[ERROR] Set a valid POSTGRES_ADMIN_URL in .env before running this tool.")
+        print("[ERROR] Set a valid POSTGRES_ADMIN_URL in the external Apollo secrets file or OS environment before running this tool.")
         return 2
 
     print(f"[INFO] Creating/checking role: {app_user}")

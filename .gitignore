@@ -1,38 +1,91 @@
-template_extractor
-raw images
-Output
-new_sku_images
-feature_threshold
-logs
-# Python cache files
+# =============================================================================
+# Apollo repository hygiene
+# Keep source code, SQL migrations, docs, tests, static UI assets and the
+# curated OSC catalog in Git. Keep machine-local/runtime/generated data out.
+# =============================================================================
+
+# --- Machine-local configuration / secrets -----------------------------------
+.env
+.env.*
+!.env.example
+secrets.env
+*.secrets.env
+config/secrets.env
+
+# --- Python cache / test / analysis cache -------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Python tool caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-offset_calibration
+.coverage
+coverage.xml
+htmlcov/
 
-# PatchCore / AI model files
+# --- IDE / OS / machine-specific files ----------------------------------------
+.vscode/
+.idea/
+*.code-workspace
+*.lnk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Logs and local databases --------------------------------------------------
+*.log
+*.jsonl
+*.db
+*.sqlite
+*.sqlite3
+logs/
+data/security/
+data/inspection/
+
+# --- Build / packaging ---------------------------------------------------------
+build/
+dist/
+*.spec
+
+# --- AI weights / generated training artifacts --------------------------------
 *.pth
 *.pt
-
-# Training model folders
 media/training/
-media/training/*
 media/augmentation/
 media/patch_creation/
+media/feature_threshold/
 media/new_sku_workflow/
-media/Auto_FFC_Capture/
-media/new_sku_validation
+media/new_sku_validation/
 media/R_Recipe/
 media/cropping/
+media/offset_calibration/
+media/template_extractor/
+
+# --- Capture / runtime hardware artifacts --------------------------------------
+media/Auto_FFC_Capture/
 media/Capture_Input/
+media/Output/
+media/raw images/
+media/new_sku_images/
 media/Camera_Profiles/
-media/cycle_time_breakdown/
+media/Laser_Profiles/
 media/Laser_Capture/
 media/Laser_Debug/
-media/Laser_Profiles/
+media/cycle_time_breakdown/
+media/recipe_backups/
+media/Demo_Inspection_History/
+
+# --- Generated / optional heavy UI artifact -----------------------------------
 media/img/login_ai.gif
+
+# NOTE: The following are intentionally NOT ignored because they are source
+# assets/documentation used by the application/repository:
+#   media/img/          (static UI images/icons)
+#   media/Guide/        (operator/service documents)
+#   media/osc_catalog/  (curated OSC catalog)
+#   database/migrations/
+#   docs/
+
+# Accidental zero-byte root artifacts found in the reviewed repository
+/26.1.2
+/read-only
