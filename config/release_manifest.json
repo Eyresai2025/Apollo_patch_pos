@@ -1,0 +1,84 @@
+{
+  "manifest_version": "1.0",
+  "release_id": "Apollo-2026.08-RC1",
+  "release_state": "release-candidate",
+  "config_contract_version": "1.2",
+  "runtime_policy": "external",
+  "secrets_policy": "external",
+  "required_files": [
+    "RELEASE_VERSION",
+    ".env.example",
+    "GUI.py",
+    "config/config_contract.json",
+    "config/secrets.env.example",
+    "src/COMMON/config.py",
+    "src/COMMON/config_contract.py",
+    "src/COMMON/new_sku_capture_paths.py",
+    "src/COMMON/new_sku_production_validation_service.py",
+    "src/COMMON/new_sku_workflow_service.py",
+    "src/Pages/new_sku_page.py",
+    "tests/test_central_config.py",
+    "tests/test_configuration_contract.py",
+    "tests/test_runtime_path_separation.py",
+    "tests/test_patchcore_runtime_config.py",
+    "tests/test_patchcore_preload_contract.py",
+    "tests/test_new_sku_capture_contract.py",
+    "tools/audit_repository_hygiene.py",
+    "tools/audit_ap003_runtime.py",
+    "tools/audit_configuration_contract.py"
+  ],
+  "recommended_release_files": [
+    ".gitignore",
+    "database/migrations",
+    "requirements.txt",
+    "requirements-postgres.txt"
+  ],
+  "package_exclude_patterns": [
+    ".git/**",
+    ".env",
+    "env/**",
+    "venv/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/*.db",
+    "**/*.sqlite",
+    "**/*.sqlite3",
+    "**/*.log",
+    "**/*.jsonl",
+    "media/Camera_Profiles/**",
+    "media/Laser_Profiles/**",
+    "media/Capture_Input/**",
+    "media/Laser_Capture/**",
+    "media/new_sku_images/**",
+    "media/recipe_backups/**",
+    "media/Demo_Inspection_History/**"
+  ],
+  "validated_evidence": [
+    "AP-001 central configuration: 6 passed",
+    "AP-003 selected runtime/config/logging regression: 13 passed",
+    "AP-004 configuration contract suite: 22 passed; audit errors=0 warnings=7",
+    "AP-005 PatchCore configuration regression: 7 passed; combined regression 29 passed",
+    "New SKU capture-validation contract: 7 passed; combined selected regression 36 passed"
+  ],
+  "known_deferred": [
+    {
+      "id": "FULL_TEST_SUITE",
+      "status": "deferred",
+      "reason": "Current Windows PyTorch installation fails to load torch/lib/c10.dll with WinError 1114 during broad pytest collection. Selected regression suites already passed before this environment issue was isolated.",
+      "blocks_final_release": true
+    },
+    {
+      "id": "TELEDYNE_CTI_PATH",
+      "status": "deferred",
+      "reason": "Vendor CTI path intentionally remains a non-blocking AP-004 warning until real laser backend commissioning.",
+      "blocks_final_release": false
+    },
+    {
+      "id": "NEW_SKU_LIVE_CAPTURE_ACCEPTANCE",
+      "status": "pending",
+      "reason": "Capture validation code/regression passed; final live 5 Calibration + 5 Reference positive/negative UI acceptance is still pending.",
+      "blocks_final_release": true
+    }
+  ]
+}

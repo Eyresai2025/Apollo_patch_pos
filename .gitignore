@@ -89,3 +89,8 @@ media/img/login_ai.gif
 # Accidental zero-byte root artifacts found in the reviewed repository
 /26.1.2
 /read-only
+
+# Python virtual environments
+env/
+venv/
+.venv/
