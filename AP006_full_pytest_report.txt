@@ -1,0 +1,25 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 189, in _run_module_as_main
+  File "<frozen runpy>", line 148, in _get_module_details
+  File "<frozen runpy>", line 112, in _get_module_details
+  File "C:\Users\Hi\OneDrive - radometech.com\Desktop\New folder\env\Lib\site-packages\pytest\__init__.py", line 5, in <module>
+    from _pytest._code import ExceptionInfo
+  File "C:\Users\Hi\OneDrive - radometech.com\Desktop\New folder\env\Lib\site-packages\_pytest\_code\__init__.py", line 2, in <module>
+    from .code import Code
+  File "C:\Users\Hi\OneDrive - radometech.com\Desktop\New folder\env\Lib\site-packages\_pytest\_code\code.py", line 42, in <module>
+  File "C:\Users\Hi\OneDrive - radometech.com\Desktop\New folder\env\Lib\site-packages\_pytest\_io\__init__.py", line 1, in <module>
+    from .terminalwriter import get_terminal_width
+  File "C:\Users\Hi\OneDrive - radometech.com\Desktop\New folder\env\Lib\site-packages\_pytest\_io\terminalwriter.py", line 10, in <module>
+    from _pytest.compat import final
+  File "C:\Users\Hi\OneDrive - radometech.com\Desktop\New folder\env\Lib\site-packages\_pytest\compat.py", line 20, in <module>
+    import py
+  File "C:\Users\Hi\OneDrive - radometech.com\Desktop\New folder\env\Lib\site-packages\py.py", line 6, in <module>
+    import _pytest._py.error as error
+  File "<frozen importlib._bootstrap>", line 1178, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1149, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 936, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1073, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1127, in get_data
+KeyboardInterrupt
+^C

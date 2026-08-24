@@ -27,6 +27,7 @@ from src.COMMON.new_sku_capture_paths import (
     latest_cycle_dir,
     next_cycle_dir,
     resolve_role_folder,
+    validate_capture_contract,
 )
 from src.models.template_extracter import TemplateExtractorPage
 from src.models.new_sku_training.training_page import NewSKUTrainingPage
@@ -1784,17 +1785,16 @@ class NewSKUPage(QWidget):
             )
 
         # 3. Capture
-        capture_roles = 0
-        for role in CAPTURE_ROLE_ORDER:
-            serial = str(CAMERA_SERIAL_MAP.get(role, "") or "")
-            folder = resolve_role_folder(
-                self.media_path, sku, role, serial=serial, require_images=True
-            )
-            if folder and self._has_images(Path(folder)):
-                capture_roles += 1
-        if capture_roles == len(CAPTURE_ROLE_ORDER):
+        # AP-006: completion requires BOTH sets for every logical side:
+        #   Calibration/<role>/<image> + latest Cycle_N/<role>/<reference image>.
+        # The same helper is also used by workflow readiness and final production
+        # validation so the three views cannot disagree about Capture status.
+        capture_contract = validate_capture_contract(
+            self.media_path, sku, roles=CAPTURE_ROLE_ORDER
+        )
+        if capture_contract.get("complete"):
             statuses["capture"] = "completed"
-        elif capture_roles > 0:
+        elif int(capture_contract.get("found_sets", 0) or 0) > 0:
             statuses["capture"] = "partial"
 
         # 4. Templates / image processing (two sidewalls)

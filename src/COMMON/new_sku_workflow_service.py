@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from src.COMMON.new_sku_capture_paths import validate_capture_contract
+
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 
 STEP_ORDER: Tuple[Tuple[str, str], ...] = (
@@ -143,36 +145,16 @@ class NewSKUWorkflowService:
             "reason": str(reason or ""),
         }
 
-    def _capture_role_folder(self, sku: str, role: str) -> Optional[Path]:
-        root = self.media_path / "new_sku_images" / sku
-        if not root.exists():
-            return None
+    def _capture_contract(self, sku: str) -> Dict[str, Any]:
+        """Return the shared five-side Calibration + Reference capture result."""
+        return validate_capture_contract(self.media_path, sku, roles=ROLES)
 
-        cycle_dirs = sorted(
-            (
-                path for path in root.iterdir()
-                if path.is_dir() and path.name.lower().startswith("cycle")
-            ),
-            key=lambda path: self._mtime(path),
-            reverse=True,
-        )
-        for cycle in cycle_dirs:
-            candidate = cycle / role
-            if self._has_images(candidate):
-                return candidate
-
-        candidate = root / role
-        return candidate if self._has_images(candidate) else None
-
-    def _capture_files(self, sku: str) -> List[Path]:
+    @staticmethod
+    def _capture_files_from_contract(contract: Dict[str, Any]) -> List[Path]:
         files: List[Path] = []
-        for role in ROLES:
-            folder = self._capture_role_folder(sku, role)
-            if folder:
-                files.extend(
-                    p for p in folder.rglob("*")
-                    if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-                )
+        for value in list(contract.get("paths") or []):
+            if value:
+                files.append(Path(str(value)))
         return files
 
     def _stage_outputs(
@@ -213,14 +195,14 @@ class NewSKUWorkflowService:
             "timestamp": target_time,
         }
 
-        capture_files = self._capture_files(sku)
-        capture_found = [
-            role for role in ROLES if self._capture_role_folder(sku, role)
-        ]
+        capture_contract = self._capture_contract(sku)
+        capture_files = self._capture_files_from_contract(capture_contract)
+        capture_found = list(capture_contract.get("complete_roles") or [])
         outputs["capture"] = {
-            "complete": len(capture_found) == len(ROLES),
+            "complete": bool(capture_contract.get("complete")),
             "items": capture_found,
             "timestamp": self._latest_mtime(capture_files),
+            "capture_contract": capture_contract,
         }
 
         template_found: List[str] = []

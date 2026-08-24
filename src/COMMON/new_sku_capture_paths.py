@@ -2,16 +2,16 @@
 
 Supported capture layouts
 -------------------------
-Preferred current layout::
+Current two-stage New SKU capture contract::
 
-    media/new_sku_images/<SKU>/Cycle_<N>/<role>/<images>
+    media/new_sku_images/<SKU>/Calibration/<role>/<calibration image>
+    media/new_sku_images/<SKU>/Cycle_<N>/<role>/<reference image>
 
-Backward-compatible layout::
-
-    media/new_sku_images/<SKU>/<role>/<images>
-
-All callers use the newest numeric ``Cycle_<N>`` folder that contains the
-requested role. Paired callers can request two roles from the same cycle.
+Generic role-resolution helpers retain backward compatibility with the older
+direct/cycle-only layouts because downstream engineering tools may still need
+to open historical data. Production Capture completion, however, is evaluated
+by :func:`validate_capture_contract`, which requires both the Calibration set
+and the newest numeric Reference ``Cycle_<N>`` set for every logical role.
 """
 
 from __future__ import annotations
@@ -38,6 +38,17 @@ ROLE_ALIASES = {
     "tread": ("tread",),
     "bead": ("bead",),
 }
+
+CAPTURE_CONTRACT_ROLES: Tuple[str, ...] = (
+    "sidewall1",
+    "sidewall2",
+    "innerwall",
+    "tread",
+    "bead",
+)
+
+CALIBRATION_DIR_NAME = "Calibration"
+
 
 
 def _safe_name(value: str) -> str:
@@ -279,6 +290,136 @@ def resolve_paired_role_folders(
         require_images=require_images,
     )
     return anchor, target, None
+
+
+def _nonempty_image_files(folder: Optional[Path]) -> list[Path]:
+    """Return supported image files whose on-disk size is greater than zero."""
+    if folder is None:
+        return []
+    result: list[Path] = []
+    for path in image_files(folder, recursive=False):
+        try:
+            if path.stat().st_size > 0:
+                result.append(path.resolve())
+        except OSError:
+            continue
+    return result
+
+
+def validate_capture_contract(
+    media_root: str | Path,
+    sku_name: str,
+    *,
+    roles: Sequence[str] = CAPTURE_CONTRACT_ROLES,
+) -> dict:
+    """Validate the current New SKU Calibration + Reference capture contract.
+
+    A logical role is complete only when both of these exist and are non-empty:
+
+    * ``Calibration/<role>/<image>``
+    * newest numeric ``Cycle_<N>/<role>/<image>``
+
+    The function is deliberately hardware-free and does not modify the file
+    system. It is shared by workflow status/readiness and final production
+    validation so all views report the same Capture state.
+    """
+    media_root = Path(media_root).expanduser().resolve()
+    sku = _safe_name(sku_name)
+    sku_root = media_root / "new_sku_images" / sku
+
+    calibration_root = _case_insensitive_child(
+        sku_root, (CALIBRATION_DIR_NAME,)
+    )
+    cycle_dirs = list_cycle_dirs(sku_root)
+    reference_cycle = cycle_dirs[0].resolve() if cycle_dirs else None
+
+    role_results: dict[str, dict] = {}
+    all_paths: list[Path] = []
+    complete_roles: list[str] = []
+    partial_roles: list[str] = []
+    missing_roles: list[str] = []
+
+    for raw_role in roles:
+        role = str(raw_role or "").strip().lower()
+
+        calibration_folder = (
+            role_folder_under(calibration_root, role)
+            if calibration_root is not None
+            else None
+        )
+        reference_folder = (
+            role_folder_under(reference_cycle, role)
+            if reference_cycle is not None
+            else None
+        )
+
+        calibration_images = _nonempty_image_files(calibration_folder)
+        reference_images = _nonempty_image_files(reference_folder)
+        calibration_image = calibration_images[-1] if calibration_images else None
+        reference_image = reference_images[-1] if reference_images else None
+
+        calibration_ok = calibration_image is not None
+        reference_ok = reference_image is not None
+        found = int(calibration_ok) + int(reference_ok)
+        complete = found == 2
+
+        paths = [
+            path for path in (calibration_image, reference_image) if path is not None
+        ]
+        all_paths.extend(paths)
+
+        missing_sets: list[str] = []
+        if not calibration_ok:
+            missing_sets.append("Calibration")
+        if not reference_ok:
+            missing_sets.append("Reference")
+
+        if complete:
+            status = "valid"
+            complete_roles.append(role)
+        elif found:
+            status = "partial"
+            partial_roles.append(role)
+        else:
+            status = "missing"
+            missing_roles.append(role)
+
+        role_results[role] = {
+            "role": role,
+            "complete": complete,
+            "status": status,
+            "found": found,
+            "expected": 2,
+            "calibration_ok": calibration_ok,
+            "reference_ok": reference_ok,
+            "calibration_folder": str(calibration_folder.resolve()) if calibration_folder else "",
+            "reference_folder": str(reference_folder.resolve()) if reference_folder else "",
+            "calibration_image": str(calibration_image) if calibration_image else "",
+            "reference_image": str(reference_image) if reference_image else "",
+            "paths": [str(path) for path in paths],
+            "missing_sets": missing_sets,
+        }
+
+    expected_roles = len(tuple(roles))
+    complete = expected_roles > 0 and len(complete_roles) == expected_roles
+    found_sets = sum(int(item["found"]) for item in role_results.values())
+
+    return {
+        "sku": sku,
+        "complete": complete,
+        "status": "valid" if complete else ("partial" if found_sets else "missing"),
+        "expected_roles": expected_roles,
+        "complete_roles": complete_roles,
+        "partial_roles": partial_roles,
+        "missing_roles": missing_roles,
+        "expected_images": expected_roles * 2,
+        "found_sets": found_sets,
+        "calibration_root": str(calibration_root.resolve()) if calibration_root else str((sku_root / CALIBRATION_DIR_NAME).resolve()),
+        "reference_cycle": str(reference_cycle) if reference_cycle else "",
+        "reference_cycle_name": reference_cycle.name if reference_cycle else "",
+        "roles": role_results,
+        "paths": [str(path) for path in all_paths],
+    }
 
 
 def latest_cycle_dir(

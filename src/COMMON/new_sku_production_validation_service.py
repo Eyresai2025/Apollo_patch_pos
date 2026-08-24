@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from src.COMMON.new_sku_capture_paths import validate_capture_contract
+
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 ROLES: Tuple[str, ...] = ("sidewall1", "sidewall2", "innerwall", "tread", "bead")
 ROLE_LABELS = {
@@ -119,39 +121,56 @@ class NewSKUProductionValidationService:
             "metadata": dict(metadata or {}),
         }
 
-    def _latest_capture_cycle(self, sku: str) -> Optional[Path]:
-        root = self.media_path / "new_sku_images" / sku
-        if not root.exists():
-            return None
-        cycles = []
-        for folder in root.iterdir():
-            if not folder.is_dir() or not folder.name.lower().startswith("cycle"):
-                continue
-            try:
-                cycles.append((folder.stat().st_mtime, folder))
-            except OSError:
-                continue
-        if cycles:
-            return max(cycles, key=lambda item: item[0])[1]
-        return root
-
     def _validate_capture(self, sku: str) -> List[Dict[str, Any]]:
+        """Validate the shared Calibration + latest Reference capture contract."""
         checks: List[Dict[str, Any]] = []
-        cycle = self._latest_capture_cycle(sku)
+        contract = validate_capture_contract(self.media_path, sku, roles=ROLES)
+        cycle_name = str(contract.get("reference_cycle_name") or "")
+
         for role in ROLES:
-            folder = (cycle / role) if cycle else Path()
-            images = self._images(folder, recursive=False) if cycle else []
-            nonempty = [p for p in images if self._filesize_ok(p)]
-            if len(nonempty) >= 2:
-                status, detail = "valid", f"{len(nonempty)} image(s) found in {cycle.name}"
-            elif nonempty:
-                status, detail = "partial", f"Only {len(nonempty)} of 2 required images found"
+            role_result = dict((contract.get("roles") or {}).get(role) or {})
+            found = int(role_result.get("found", 0) or 0)
+            missing_sets = list(role_result.get("missing_sets") or [])
+
+            if found == 2:
+                status = "valid"
+                detail = (
+                    "Calibration image + Reference image found"
+                    + (f" in {cycle_name}" if cycle_name else "")
+                )
+            elif found == 1:
+                status = "partial"
+                detail = (
+                    "Capture set is incomplete; missing "
+                    + ", ".join(missing_sets or ["required set"])
+                )
             else:
-                status, detail = "missing", "No capture images found in the latest cycle"
+                status = "missing"
+                detail = (
+                    "Missing Calibration and Reference images"
+                    if len(missing_sets) >= 2
+                    else "No valid Calibration + Reference capture pair found"
+                )
+
+            paths = [Path(value) for value in role_result.get("paths", []) if value]
             checks.append(self._check(
-                "capture", role, status, detail,
-                paths=nonempty, expected=2, found=len(nonempty), step_key="capture",
-                metadata={"cycle": cycle.name if cycle else ""},
+                "capture",
+                role,
+                status,
+                detail,
+                paths=paths,
+                expected=2,
+                found=found,
+                step_key="capture",
+                metadata={
+                    "contract": "calibration_plus_reference",
+                    "calibration_ok": bool(role_result.get("calibration_ok")),
+                    "reference_ok": bool(role_result.get("reference_ok")),
+                    "calibration_folder": str(role_result.get("calibration_folder") or ""),
+                    "reference_folder": str(role_result.get("reference_folder") or ""),
+                    "cycle": cycle_name,
+                    "missing_sets": missing_sets,
+                },
             ))
         return checks
 
