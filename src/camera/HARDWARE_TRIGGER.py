@@ -30,6 +30,10 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple, Callable
+from src.COMMON.camera_role_mapping import (
+    validate_camera_role_mapping,
+    format_camera_role_mapping,
+)
 PLC_IO_LOCK = threading.RLock()
 import numpy as np
 from datetime import datetime
@@ -2812,6 +2816,24 @@ class MultiCameraManager:
         self.camera_to_side = get_camera_to_side_map()
         self.side_to_camera = get_side_to_camera_map()
         self.camera_roles_by_serial = get_camera_roles_by_serial()
+
+        # AP-009: fail early on an impossible physical role mapping before Arena opens devices.
+        mapping_check = validate_camera_role_mapping(
+            self.side_to_camera,
+            shared_inner_bead=SHARED_INNER_BEAD,
+        )
+        log(
+            "[CAMERA MAP] "
+            + format_camera_role_mapping(self.side_to_camera)
+            + f" | physical={mapping_check['physical_count']}"
+        )
+        for warning in mapping_check["warnings"]:
+            log(f"[CAMERA MAP][WARNING] {warning}")
+        if not mapping_check["valid"]:
+            raise RuntimeError(
+                "Invalid camera role-to-serial mapping: "
+                + "; ".join(mapping_check["errors"])
+            )
 
         # One FFC configuration per logical role. This is role-based rather
         # than physical-camera-based, so shared innerwall/bead can use

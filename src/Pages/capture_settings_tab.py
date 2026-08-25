@@ -3,7 +3,7 @@
 # PyQt5 CAMERA CAPTURE SETTINGS TAB
 # Lucid Arena SDK + Multi Camera Stitching
 # Four 4K cameras with one shared innerwall/bead camera
-# Shared 4K serial: 254901428
+# Physical role serials are authoritative from .env (AP-009)
 # =========================================================
 
 import os
@@ -18,6 +18,13 @@ from datetime import datetime
 from pathlib import Path
 from copy import deepcopy
 from typing import Dict, List, Optional
+
+from src.COMMON.camera_role_mapping import (
+    get_authoritative_camera_role_mapping,
+    camera_mapping_shared_inner_bead,
+    validate_camera_role_mapping,
+    format_camera_role_mapping,
+)
 
 import cv2
 import numpy as np
@@ -1232,6 +1239,12 @@ class AutoPLCFFCProcessTab(QWidget):
 
         self.project_root = Path(__file__).resolve().parents[2]
         self.camera_profile_root = self.project_root / "media" / "Camera_Profiles"
+        self.authoritative_camera_mapping = get_authoritative_camera_role_mapping(self.project_root)
+        self.camera_mapping_shared = camera_mapping_shared_inner_bead(self.project_root)
+        self.camera_mapping_validation = validate_camera_role_mapping(
+            self.authoritative_camera_mapping,
+            shared_inner_bead=self.camera_mapping_shared,
+        )
         self.loaded_camera_profile: Optional[Dict] = None
         self.loaded_camera_profile_path: str = ""
         self.loaded_sku_name: str = ""
@@ -1347,6 +1360,13 @@ class AutoPLCFFCProcessTab(QWidget):
         self.profile_status_label.setObjectName("ProfileStatus")
         self.profile_status_label.setWordWrap(True)
 
+        map_prefix = "Camera map OK" if self.camera_mapping_validation["valid"] else "Camera map INVALID"
+        self.camera_mapping_label = QLabel(
+            f"{map_prefix}: {format_camera_role_mapping(self.authoritative_camera_mapping)}"
+        )
+        self.camera_mapping_label.setObjectName("ProfileStatus")
+        self.camera_mapping_label.setWordWrap(True)
+
         self.refresh_sku_btn.clicked.connect(self.refresh_sku_profiles)
         self.load_sku_profile_btn.clicked.connect(self.load_sku_camera_profile)
 
@@ -1355,6 +1375,7 @@ class AutoPLCFFCProcessTab(QWidget):
         sku_layout.addWidget(self.refresh_sku_btn, 0, 2)
         sku_layout.addWidget(self.load_sku_profile_btn, 0, 3)
         sku_layout.addWidget(self.profile_status_label, 1, 0, 1, 4)
+        sku_layout.addWidget(self.camera_mapping_label, 2, 0, 1, 4)
         sku_layout.setColumnStretch(1, 1)
         top_row.addWidget(sku_box, 5)
 
@@ -1454,7 +1475,7 @@ class AutoPLCFFCProcessTab(QWidget):
         transport_panel, transport_l = panel("Image & Transport")
         transport_form = compact_form()
         self.camera_height_spin = self.make_spin(1, 100000, 15000)
-        self.shared_camera_serial = "254901428"
+        self.shared_camera_serial = self.authoritative_camera_mapping["innerwall"]
         self.final_height_spin = self.make_spin(1, 200000, 60000)
         self.stream_buffers_spin = self.make_spin(1, 128, 16)
         self.buffer_timeout_spin = self.make_spin(1000, 300000, 300000)
@@ -2084,16 +2105,18 @@ class AutoPLCFFCProcessTab(QWidget):
         if missing:
             raise ValueError(f"Camera profile is missing role(s): {', '.join(missing)}")
 
-        shared_serial = str(
-            raw_profile.get("shared_inner_bead_serial")
-            or cameras["innerwall"].get("serial")
-            or cameras["bead"].get("serial")
-            or self.shared_camera_serial
-        ).strip()
-        if not shared_serial:
-            shared_serial = "254901428"
-        cameras["innerwall"]["serial"] = shared_serial
-        cameras["bead"]["serial"] = shared_serial
+        # AP-009: SKU profiles own acquisition settings, never physical role assignment.
+        # Re-apply the machine-authoritative mapping every time a profile is loaded.
+        runtime_map = get_authoritative_camera_role_mapping(self.project_root)
+        map_validation = validate_camera_role_mapping(
+            runtime_map,
+            shared_inner_bead=camera_mapping_shared_inner_bead(self.project_root),
+        )
+        if not map_validation["valid"]:
+            raise ValueError("Invalid authoritative camera mapping: " + "; ".join(map_validation["errors"]))
+        for role in required:
+            cameras[role]["serial"] = runtime_map[role]
+        shared_serial = runtime_map["innerwall"]
 
         profile = deepcopy(raw_profile)
         profile["profile_type"] = "camera"
@@ -2134,7 +2157,7 @@ class AutoPLCFFCProcessTab(QWidget):
         self.loaded_camera_profile = profile
         self.loaded_camera_profile_path = str(path)
         self.loaded_sku_name = sku
-        self.shared_camera_serial = str(profile.get("shared_inner_bead_serial", "254901428"))
+        self.shared_camera_serial = str(profile.get("shared_inner_bead_serial") or self.authoritative_camera_mapping["innerwall"])
         self.profile_status_label.setText(
             f"Loaded SKU={sku} | {path} | shared bead/inner serial={self.shared_camera_serial}"
         )
@@ -2215,34 +2238,34 @@ class AutoPLCFFCProcessTab(QWidget):
         profile = {
             "profile_type": "camera",
             "sku_name": "CAPTURE_PAGE_DEFAULT",
-            "shared_inner_bead_serial": "254901428",
+            "shared_inner_bead_serial": self.authoritative_camera_mapping["innerwall"],
             "cameras": {
                 "sidewall1": {
-                    "serial": "254901432", "enabled": True, "width": 4096,
+                    "serial": self.authoritative_camera_mapping["sidewall1"], "enabled": True, "width": 4096,
                     "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
                     "acquisition_line_rate": 11471.0, "exposure_time": 56.0, "gain": 24.0,
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
                 },
                 "sidewall2": {
-                    "serial": "254901431", "enabled": True, "width": 4096,
+                    "serial": self.authoritative_camera_mapping["sidewall2"], "enabled": True, "width": 4096,
                     "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
                     "acquisition_line_rate": 11471.0, "exposure_time": 86.0, "gain": 24.0,
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
                 },
                 "tread": {
-                    "serial": "254901430", "enabled": True, "width": 4096,
+                    "serial": self.authoritative_camera_mapping["tread"], "enabled": True, "width": 4096,
                     "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
                     "acquisition_line_rate": 14003.0, "exposure_time": 71.0, "gain": 24.0,
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
                 },
                 "bead": {
-                    "serial": "254901428", "enabled": True, "width": 4096,
+                    "serial": self.authoritative_camera_mapping["bead"], "enabled": True, "width": 4096,
                     "camera_height": 15000, "pixel_format": "Mono8", "final_height": 60000,
                     "acquisition_line_rate": 8937.0, "exposure_time": 61.5, "gain": 20.0,
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
                 },
                 "innerwall": {
-                    "serial": "254901428", "enabled": True, "width": 4096,
+                    "serial": self.authoritative_camera_mapping["innerwall"], "enabled": True, "width": 4096,
                     "camera_height": 15000, "pixel_format": "Mono8", "final_height": 75000,
                     "acquisition_line_rate": 12744.0, "exposure_time": 78.0, "gain": 24.0,
                     "num_stream_buffers": 16, "packet_size": 9000, "packet_delay": 1000,
@@ -2321,11 +2344,19 @@ class AutoPLCFFCProcessTab(QWidget):
             })
             configs[role] = base
 
-        if "innerwall" in configs and "bead" in configs:
-            shared_serial = str(configs["innerwall"].get("serial") or configs["bead"].get("serial") or self.shared_camera_serial)
-            configs["innerwall"]["serial"] = shared_serial
-            configs["bead"]["serial"] = shared_serial
-            self.shared_camera_serial = shared_serial
+        # AP-009: table/SKU edits may change acquisition values, not machine wiring.
+        runtime_map = get_authoritative_camera_role_mapping(self.project_root)
+        map_validation = validate_camera_role_mapping(
+            runtime_map,
+            shared_inner_bead=camera_mapping_shared_inner_bead(self.project_root),
+        )
+        if not map_validation["valid"]:
+            raise ValueError("Invalid authoritative camera mapping: " + "; ".join(map_validation["errors"]))
+        for role, cfg in configs.items():
+            if role in runtime_map:
+                cfg["serial"] = runtime_map[role]
+        self.authoritative_camera_mapping = runtime_map
+        self.shared_camera_serial = runtime_map["innerwall"]
         return configs
 
     # -----------------------------------------------------
@@ -2466,7 +2497,7 @@ class AutoPLCFFCProcessTab(QWidget):
                 "Main Trigger Latch": self.main_latch_chk.isChecked(),
                 "Shared FrameStart Stream": False,
                 "Post-trigger Buffer Delay sec": self.after_trigger_delay_spin.value(),
-                "Shared 254901428 Acquisition": "Validated native-copy capture; immediate BEAD-to-INNERWALL profile switch",
+                f"Shared {self.shared_camera_serial} Acquisition": "Validated native-copy capture; immediate BEAD-to-INNERWALL profile switch",
                 "Main Images": self.num_main_spin.value(),
                 "Bead Images": self.num_bead_spin.value(),
                 "4K Camera/Patch Height": self.camera_height_spin.value(),

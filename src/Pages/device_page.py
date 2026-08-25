@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QScrollArea, QSizePolicy, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -23,6 +24,13 @@ from src.workers.camera_live_preview_worker import CameraLivePreviewWorker
 from src.workers.camera_capture_worker import CameraCaptureWorker
 from src.device.sku_device_profile_store import SKUDeviceProfileStore
 from src.Pages.device_laser_tab import DeviceLaserTab
+from src.COMMON.camera_role_mapping import (
+    CAMERA_ROLE_ENV_KEYS,
+    get_authoritative_camera_role_mapping,
+    camera_mapping_shared_inner_bead,
+    validate_camera_role_mapping,
+    format_camera_role_mapping,
+)
 
 
 SHARED_INNER_BEAD_ZONE = "Inner + Bead (Shared)"
@@ -686,6 +694,19 @@ class DevicePage(QWidget):
         profile_help.setWordWrap(True)
         profile_layout.addWidget(profile_help)
 
+        runtime_map = get_authoritative_camera_role_mapping(Path(__file__).resolve().parents[2])
+        map_check = validate_camera_role_mapping(
+            runtime_map,
+            shared_inner_bead=camera_mapping_shared_inner_bead(Path(__file__).resolve().parents[2]),
+        )
+        map_state = "OK" if map_check["valid"] else "INVALID"
+        self.camera_mapping_banner = QLabel(
+            f"Authoritative .env camera mapping [{map_state}]: {format_camera_role_mapping(runtime_map)}"
+        )
+        self.camera_mapping_banner.setObjectName("StatusBadge")
+        self.camera_mapping_banner.setWordWrap(True)
+        profile_layout.addWidget(self.camera_mapping_banner)
+
         table_title = QLabel("Detected Cameras")
         table_title.setObjectName("SectionTitle")
         profile_layout.addWidget(table_title)
@@ -1042,30 +1063,9 @@ class DevicePage(QWidget):
             self.load_memory_to_form(self.selected_serial, new_role)
 
     def _environment_camera_mapping(self):
-        values = {}
-        env_path = os.path.join(os.getcwd(), ".env")
-        file_values = {}
-        try:
-            if os.path.isfile(env_path):
-                with open(env_path, "r", encoding="utf-8") as handle:
-                    for raw_line in handle:
-                        line = raw_line.strip()
-                        if not line or line.startswith("#") or "=" not in line:
-                            continue
-                        key, value = line.split("=", 1)
-                        file_values[key.strip()] = value.strip().strip('"').strip("'")
-        except Exception as exc:
-            print(f"[DEVICE PAGE] .env mapping read warning: {exc}")
-
-        for key in (
-            "CAM_SIDEWALL1_SERIAL",
-            "CAM_SIDEWALL2_SERIAL",
-            "CAM_TREAD_SERIAL",
-            "CAM_INNERWALL_SERIAL",
-            "CAM_BEAD_SERIAL",
-        ):
-            values[key] = str(os.getenv(key) or file_values.get(key) or "").strip()
-        return values
+        """Backward-compatible env-key map backed by the AP-009 authoritative helper."""
+        runtime_map = get_authoritative_camera_role_mapping(Path(__file__).resolve().parents[2])
+        return {CAMERA_ROLE_ENV_KEYS[role]: serial for role, serial in runtime_map.items()}
 
     def apply_env_camera_mapping(self):
         if self.camera_table.rowCount() == 0:
